@@ -19,11 +19,12 @@ describe("repo-harness-chatgpt Create mode MVP", () => {
 
   test("Create reuses browser-consult with explicit GitHub app selection and fail-closed write boundaries", () => {
     const protocol = readFileSync(CREATE, "utf-8");
+    const normalizedProtocol = protocol.replace(/\s+/g, " ");
     expect(protocol).toContain("repo-harness chatgpt browser-consult");
     expect(protocol).toContain("--chatgpt-app GitHub");
     expect(protocol).toContain("--dry-run");
     expect(protocol).toContain("--secret-scan");
-    expect(protocol).toContain("Never write directly to the default branch");
+    expect(normalizedProtocol).toContain("Never write directly to the default branch");
     expect(protocol).toContain("Never force-update a ref");
     expect(protocol).toContain("draft");
     expect(protocol).toContain("Do not mark it ready");
