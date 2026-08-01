@@ -116,7 +116,7 @@ describe('chatgpt browser-create', () => {
     for (const flag of ['--repo', '--chatgpt-app', '--base', '--branch', '--plan', '--contract']) {
       expect(help.stdout).toContain(flag);
     }
-    expect(help.stdout).toContain('Create always requires secret scanning');
+    expect(help.stdout.replace(/\s+/g, ' ')).toContain('Create always requires secret scanning');
   });
 
   test('rejects default branches and missing plan or contract before provider activity', () => {
