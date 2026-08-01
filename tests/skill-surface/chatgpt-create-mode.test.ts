@@ -48,7 +48,7 @@ describe("repo-harness-chatgpt first-class Create mode", () => {
     expect(protocol).toContain('"trust": "assistant_reported"');
     expect(protocol).toContain("surface_blocked");
     expect(protocol).toContain("appSelection.verified");
-    expect(protocol).toContain("Repo-harness does not intercept GitHub tool calls");
+    expect(protocol.toLowerCase()).toContain("repo-harness does not intercept github tool calls");
   });
 
   test("runtime and execution-focused tests are present", () => {
