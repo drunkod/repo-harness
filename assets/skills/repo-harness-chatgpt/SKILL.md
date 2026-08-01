@@ -16,7 +16,7 @@ Router-only: mode protocol lives in the linked files below.
 
 - First-time Oracle browser or MCP Connector configuration -> `references/setup.md`.
 - Start a new local -> ChatGPT Web browser consult -> `references/consult.md`.
-- Create a branch, commit, and draft PR through the selected GitHub app -> `create.md`.
+- Create a branch, commit, and draft PR through the selected GitHub app -> `references/create.md`.
 - Continue, read, or clean up a saved browser session -> `references/continue.md`.
 - Verify or accept a ChatGPT MCP tool call as real evidence -> `references/read-back.md`.
 - Operate the MCP Connector bridge (planner/executor/orchestrator/coding) -> `references/bridge.md`.
