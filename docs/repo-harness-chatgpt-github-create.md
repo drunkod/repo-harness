@@ -29,6 +29,7 @@ the selected ChatGPT GitHub app supplies the repository tools.
 - an approved plan and task contract exist;
 - Oracle passes `browser-doctor`;
 - the GitHub app is available in the authenticated ChatGPT workspace;
+- the exact installed app name is known (`GitHub` is only the example name);
 - the app has the required permission for the exact repository;
 - a dedicated branch name and base commit are known;
 - Gitleaks is available when `--secret-scan` is required.
@@ -51,10 +52,15 @@ The task contract should freeze:
 - forbidden paths;
 - required behavior;
 - required checks;
+- exact installed ChatGPT app name;
 - whether a draft PR is requested;
 - rollback.
 
-## 2. Dry-run the Create session
+## 2. Confirm the app name and dry-run the Create session
+
+The examples below assume the installed ChatGPT app is literally named
+`GitHub`. If the workspace shows another name, replace `GitHub` with that exact
+name. Do not guess or rely on prompt prose to select an app.
 
 ```bash
 repo-harness chatgpt browser-consult \
@@ -110,6 +116,10 @@ draft PR, observed checks, missing checks, and residual risks.
   --file tasks/contracts/<task>.contract.md \
   --write-output ".ai/harness/handoff/chatgpt/create-${stamp}-<task>.md"
 ```
+
+Before allowing repository actions, verify in ChatGPT that the intended app is
+visibly selected. If it is absent or another app is selected, stop and correct
+the exact app name or select it manually.
 
 ## 4. Required GitHub write sequence
 
@@ -175,6 +185,18 @@ Start a new, non-mutating Browser Review session. Provide:
 The Create conversation never approves its own work. A human remains the merge
 authority.
 
+## Failure handling
+
+- `ORACLE_APP_PRESELECT_UNSUPPORTED` means the Oracle binary cannot preselect
+  any ChatGPT app; upgrade/fix Oracle or select the app manually.
+- A missing or mismatched app name is different: if the requested app is not
+  visibly selected, stop before repository access and use the exact installed
+  name. Do not assume every workspace calls the app `GitHub`.
+- With no visible GitHub tool event, classify the run as `surface_blocked`;
+  prose alone is not proof that a repository write occurred.
+- On `ORACLE_CAPTURE_INCOMPLETE`, inspect GitHub state before retrying because
+  writes may already have happened, then continue the saved provider session.
+
 ## Safety summary
 
 Create must not:
@@ -191,4 +213,4 @@ Create must not:
 - claim tests ran without evidence.
 
 The canonical detailed protocol is
-`assets/skills/repo-harness-chatgpt/create.md`.
+`assets/skills/repo-harness-chatgpt/references/create.md`.
