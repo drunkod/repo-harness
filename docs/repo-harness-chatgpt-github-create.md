@@ -1,50 +1,47 @@
 # ChatGPT + GitHub App Create
 
-## Purpose
+`browser-create` is the first-class repo-harness mode for bounded GitHub writes
+through a selected ChatGPT app.
 
-`ChatGPT + GitHub App Create` is a first-class repo-harness Browser Engine
-runtime mode beside non-mutating Plan and Review consults.
+General browser transport, Oracle resolution, profile binding, doctor output,
+app preselection, secret scanning, session storage, and continuation semantics
+are canonical in the [ChatGPT Browser Engine](./repo-harness-chatgpt-browser-engine.md).
+This guide documents only the Create-specific contract layered on that engine.
 
 ```text
-Plan   = browser-consult + planning prompt
+Plan   = browser-consult + non-mutating planning prompt
 Create = browser-create + selected GitHub app + bounded write contract
 Review = browser-consult + independent review prompt
 ```
 
-Create reuses the existing Oracle-backed browser transport. It does not add a
-second browser engine, store GitHub credentials, or implement the GitHub API
-inside repo-harness. Oracle opens ChatGPT Web and requests the selected app;
+Create does not add a second browser engine, a GitHub credential store, or a
+repo-harness-owned GitHub API client. Oracle requests the named ChatGPT app;
 the app supplies repository tools.
 
-The dedicated command adds runtime behavior that a hand-written
-`browser-consult --chatgpt-app ...` prompt does not provide:
+## What the dedicated command adds
 
-- required Create inputs;
+A hand-written `browser-consult --chatgpt-app ...` prompt is not Create. The
+first-class command adds:
+
+- required repository, app, base, branch, plan, contract, and task inputs;
 - a fixed write-safety prompt prefix;
-- mandatory content-level secret scanning;
-- Oracle app-preselection capability checks;
-- `mode: "create"` session metadata;
-- a default Creation Report path;
-- a structured assistant-reported GitHub result envelope;
-- `surface_blocked` classification when usable write evidence is absent.
+- mandatory fail-closed Gitleaks scanning;
+- a real-run Oracle `--browser-app` capability precondition;
+- `mode: "create"` and typed Create metadata;
+- a unique default Creation Report path;
+- a structured Create result envelope;
+- `surface_blocked` classification when usable GitHub evidence is absent.
 
 ## Trust boundary
 
-Repo-harness can prove that it:
+Repo-harness can prove that it built and scanned the exact prompt bundle,
+requested the app through Oracle, stored the provider result, and parsed the
+returned envelope.
 
-- built the bounded prompt;
-- scanned the exact prompt bundle;
-- requested an app through Oracle's `--browser-app` flag;
-- stored the browser session and provider output;
-- parsed the returned Create result envelope.
-
-Repo-harness cannot currently prove from Oracle telemetry that:
-
-- the named app was visibly selected in ChatGPT;
-- each claimed GitHub tool call occurred;
-- the returned commit or pull request exists.
-
-For that reason, parsed GitHub data is stored under:
+Current Oracle output does not independently prove that the app was visibly
+selected, that each claimed GitHub tool call happened, or that a reported
+commit or pull request exists. Parsed repository identifiers are therefore
+stored as:
 
 ```json
 {
@@ -52,7 +49,7 @@ For that reason, parsed GitHub data is stored under:
 }
 ```
 
-and app selection remains:
+App-selection metadata remains:
 
 ```json
 {
@@ -61,39 +58,9 @@ and app selection remains:
 }
 ```
 
-An independent Review and human acceptance remain required.
+Independent GitHub read-back, Review, and human acceptance remain required.
 
-## Preconditions
-
-Before a real Create run:
-
-1. Adopt the target repository with repo-harness.
-2. Produce and approve a plan and task contract.
-3. Install or select Gitleaks 8.19 or newer.
-4. Bind an authenticated ChatGPT browser profile when required.
-5. Resolve an Oracle binary that supports `--browser-app`.
-6. Confirm the exact installed ChatGPT app name.
-7. Choose a dedicated non-default branch.
-
-Check general Browser Engine readiness:
-
-```bash
-repo-harness chatgpt browser-doctor \
-  --repo . \
-  --provider oracle \
-  --json
-```
-
-The JSON exposes app preselection at:
-
-```text
-oracle.optionalCapabilities.browserAppPreselect
-```
-
-`browser-create` also asserts this capability itself immediately before a real
-browser launch.
-
-## Required command arguments
+## Required inputs
 
 ```text
 --repo <path>
@@ -105,36 +72,38 @@ browser launch.
 --contract <path>
 ```
 
-The plan and contract must be repo-relative files that already exist. The
-branch cannot be `main`, `master`, or the same value as the base ref.
+The plan and contract must be existing repo-relative files. The target branch
+must be dedicated: it cannot be `main`, `master`, or the same value as the base
+ref.
 
-## Step 1: prepare durable inputs
-
-Example plan:
-
-```text
-plans/plan-example-change.md
-```
-
-Example task contract:
-
-```text
-tasks/contracts/example-change.contract.md
-```
-
-The contract should freeze:
+The approved contract should freeze:
 
 - repository and baseline;
 - dedicated branch;
 - allowed and forbidden paths;
-- required behavior;
-- required checks;
+- required behavior and checks;
 - draft-PR policy;
-- rollback.
+- rollback expectations.
 
-Create consumes these files but instructs ChatGPT not to modify them.
+Create attaches the plan and contract and instructs ChatGPT not to modify them.
 
-## Step 2: run a dry run
+## Readiness
+
+Use the Browser Engine doctor described in the canonical engine guide:
+
+```bash
+repo-harness chatgpt browser-doctor \
+  --repo . \
+  --provider oracle \
+  --json
+```
+
+For a real Create run, `browser-create` additionally requires the resolved
+Oracle binary to advertise app preselection. Failure is
+`ORACLE_APP_PRESELECT_UNSUPPORTED` before browser launch. The exact app name is
+workspace-dependent; `GitHub` is an example, not an inferred universal name.
+
+## Dry run
 
 ```bash
 repo-harness chatgpt browser-create \
@@ -149,61 +118,44 @@ repo-harness chatgpt browser-create \
   --dry-run
 ```
 
-The dry run:
+The dry run validates scope, reads the approved files through Browser Engine
+path policy, builds the fixed Create prompt, scans the exact rendered bundle,
+and saves a Create session without opening a browser.
 
-- validates required inputs;
-- rejects default-branch targets;
-- reads the plan and contract through the Browser Engine file policy;
-- builds the fixed Create prompt;
-- scans the exact rendered bundle;
-- saves a session without opening a browser;
-- records `mode: "create"` and `create.outcome: "dry_run"`;
-- returns the Oracle command containing `--browser-app GitHub`.
-
-Inspect the returned paths:
+Inspect:
 
 ```text
-paths.sessionDir
 paths.prompt
 paths.output
 paths.transcript
 paths.events
+meta.mode
+meta.create
+dryRun.command
+dryRun.secretScan
 ```
 
-Inspect metadata:
+The Oracle command must contain `--browser-app <exact-app-name>`. A dry run
+proves command construction, not live app availability.
 
-```bash
-repo-harness chatgpt browser-session \
-  --repo . \
-  <session-id> \
-  --metadata-only
-```
-
-A representative dry-run result is:
+Representative metadata:
 
 ```json
 {
-  "status": "dry_run",
   "mode": "create",
+  "status": "dry_run",
   "create": {
     "baseRef": "main",
     "targetBranch": "agent/example-change",
     "planPath": "plans/plan-example-change.md",
     "contractPath": "tasks/contracts/example-change.contract.md",
-    "draftPr": false,
     "requestedApp": "GitHub",
-    "creationReportPath": ".ai/harness/handoff/chatgpt/create-...md",
-    "outcome": "dry_run",
-    "appSelection": {
-      "requestedApp": "GitHub",
-      "verified": false,
-      "source": "oracle_request_only"
-    }
+    "outcome": "dry_run"
   }
 }
 ```
 
-## Step 3: run Create
+## Real run
 
 ```bash
 repo-harness chatgpt browser-create \
@@ -217,37 +169,33 @@ repo-harness chatgpt browser-create \
   --draft-pr
 ```
 
-Create uses Oracle only. Before opening the browser, it resolves and probes the
-selected Oracle binary. A binary without `--browser-app` support fails with:
+The fixed execution boundary instructs ChatGPT to:
 
-```text
-ORACLE_APP_PRESELECT_UNSUPPORTED
-```
-
-The fixed prompt instructs ChatGPT to:
-
-- use the selected app;
-- read before writing;
-- create and use only the dedicated branch;
-- remain inside the approved contract;
-- avoid force-updating refs;
-- avoid merge, auto-merge, ready-for-review, thread resolution, and CI reruns;
+- treat the approved contract as authoritative;
+- read existing target files before writing;
+- create and work only on the dedicated branch from the requested base;
+- leave the plan and contract unchanged;
+- avoid default-branch and force-ref writes;
+- avoid unrelated cleanup, dependencies, fallbacks, and refactors;
+- avoid merge, auto-merge, ready-for-review transitions, thread resolution,
+  and CI reruns;
 - report only checks supported by direct evidence.
 
-The user-supplied `--prompt` is appended after this fixed boundary.
+These are instructions to the remote app. Repo-harness does not intercept the
+app's GitHub tool calls.
 
-## Step 4: structured Create result
+## Structured Create result
 
-The prompt requires exactly one final fenced JSON block:
+The final answer must contain exactly one fenced JSON block:
 
 ````text
 ```repo-harness-create-result
 {
   "selectedApp": "GitHub",
   "repository": "owner/name",
-  "baseCommit": "<full commit SHA>",
+  "baseCommit": "1111111111111111111111111111111111111111",
   "branch": "agent/example-change",
-  "commitSha": "<full commit SHA>",
+  "commitSha": "2222222222222222222222222222222222222222",
   "pullRequest": {
     "number": 123,
     "url": "https://github.com/owner/name/pull/123",
@@ -264,41 +212,34 @@ The prompt requires exactly one final fenced JSON block:
 ```
 ````
 
-Use `null` for `pullRequest` when none was requested.
+Use `null` for `pullRequest` when no PR was requested.
 
-Repo-harness accepts the envelope only when:
+The parser requires:
 
-- exactly one block is present;
-- it contains valid JSON;
-- required strings and arrays are present;
-- the reported branch equals `--branch`;
-- a reported app, when present, equals `--chatgpt-app`;
-- at least one named GitHub write action is reported.
+- exactly one valid JSON envelope;
+- the exact requested app and branch;
+- `owner/name` repository form;
+- full 40-character base and implementation commit SHAs;
+- safe repo-relative changed-file paths;
+- at least one reported GitHub write action;
+- a fully reported draft PR when `--draft-pr` was requested;
+- no reported PR when `--draft-pr` was not requested.
 
-Accepted data is copied into:
+Accepted data is stored under `meta.create.reportedGitHub`, separately from the
+raw provider output, with `trust: "assistant_reported"`.
 
-```text
-meta.create.reportedGitHub
-```
-
-separately from the raw Browser Engine output.
-
-## Step 5: understand outcomes
+## Outcomes
 
 ### `reported`
 
-Oracle completed and one valid assistant-reported GitHub envelope was parsed.
-This does not independently verify GitHub state.
+Oracle completed and the structured result passed validation. GitHub state is
+still unverified until independently read back.
 
 ### `surface_blocked`
 
-Oracle completed, but Create could not obtain usable GitHub evidence. Causes
-include:
-
-- no result envelope;
-- invalid or duplicate result envelopes;
-- wrong branch or app;
-- no reported write action.
+Oracle completed, but the response did not provide usable evidence. Examples:
+missing or duplicate envelopes, malformed JSON, wrong app or branch, invalid
+SHAs, no write event, or a missing/unrequested PR.
 
 The CLI exits non-zero and records:
 
@@ -306,13 +247,13 @@ The CLI exits non-zero and records:
 CREATE_SURFACE_BLOCKED
 ```
 
-The saved conversation may still have caused GitHub writes. Inspect GitHub and
-the same saved ChatGPT session before retrying.
+The remote app may already have written to GitHub. Inspect the saved
+conversation and GitHub state before retrying.
 
 ### `recoverable`
 
-Provider capture is incomplete. Continue the same provider session rather than
-submitting the original Create prompt again.
+Provider capture may be incomplete. Continue the same provider session rather
+than resubmitting the original Create request.
 
 ### `provider_failed`
 
@@ -322,24 +263,26 @@ Oracle failed before a usable Create result was obtained.
 
 No browser was opened and no repository write was attempted.
 
-## Step 6: list and inspect Create sessions
+## Continue and inspect
+
+Create sessions remain Create sessions across `browser-followup`; they inherit
+the selected app, Oracle provider, model/thinking settings, and mandatory scan
+posture.
 
 ```bash
-repo-harness chatgpt browser-list \
+repo-harness chatgpt browser-followup \
   --repo . \
-  --mode create \
-  --json
+  --session <session-id> \
+  --prompt "Return the required Create result envelope."
 ```
 
-Each summary includes:
+List only Create sessions:
 
-```text
-mode
-status
-createOutcome
+```bash
+repo-harness chatgpt browser-list --repo . --mode create --json
 ```
 
-Read complete metadata:
+Read metadata:
 
 ```bash
 repo-harness chatgpt browser-session \
@@ -348,42 +291,42 @@ repo-harness chatgpt browser-session \
   --metadata-only
 ```
 
-Create follow-ups inherit Create mode, app selection, and secret-scan posture.
-They remain linked to the source provider session.
+Plan Create-only cleanup before deleting anything:
 
-## Step 7: Review handoff
-
-Start a separate non-mutating Review session and provide:
-
-- approved plan and contract;
-- base commit;
-- assistant-reported implementation commit;
-- changed-file list;
-- PR patch and metadata fetched independently from GitHub;
-- GitHub Actions/status evidence;
-- Creation Report;
-- saved Create metadata.
-
-Do not treat `reportedGitHub` or the assistant's Creation Report as acceptance.
-The reviewer should resolve the reported repository identifiers through GitHub
-and compare actual state with the contract.
+```bash
+repo-harness chatgpt browser-cleanup \
+  --repo . \
+  --mode create \
+  --status surface_blocked \
+  --json
+```
 
 ## Creation Report path
 
-When `--write-output` is omitted, Create generates a unique path:
+Without `--write-output`, Create allocates:
 
 ```text
 .ai/harness/handoff/chatgpt/create-<timestamp>-<branch-slug>.md
 ```
 
-An explicit path can be supplied:
+An explicit output path uses the normal Browser Engine write policy. Sensitive
+or source paths are denied, existing files require `--overwrite-output`, and
+absolute paths require explicit authorization.
 
-```bash
---write-output .ai/harness/handoff/chatgpt/create-example.md
-```
+## Independent Review
 
-Existing outputs are not overwritten unless `--overwrite-output` is given.
-Browser output path policy continues to deny sensitive and source paths.
+Start a new non-mutating Review session with independently fetched GitHub
+state:
+
+- approved plan and contract;
+- actual base and implementation commits;
+- actual changed-file list and PR patch;
+- GitHub Actions/status evidence;
+- Creation Report and saved Create metadata.
+
+Do not treat `reportedGitHub` or the Creation Report as acceptance. A human
+remains authoritative for comments, thread resolution, ready-for-review,
+merge, deployment, and rollback decisions.
 
 ## Failure reference
 
@@ -402,27 +345,3 @@ Browser output path policy continues to deny sensitive and source paths.
 | `PROMPT_SECRET_SCAN_UNAVAILABLE` | Required scanner unavailable |
 | `PROMPT_SECRET_SCAN_FAILED` | Prompt bundle rejected |
 | `CREATE_SURFACE_BLOCKED` | Completed output lacks usable Create evidence |
-
-## Security notes
-
-- Create always scans the exact rendered prompt and attached bytes before
-  session creation or provider execution.
-- The GitHub app remains the repository authority; repo-harness does not hold
-  its credentials.
-- Prompt guardrails cannot technically intercept the remote app's tool calls.
-- A returned tool name is assistant-reported, not provider-attested telemetry.
-- Never merge, deploy, resolve review threads, or rerun CI based solely on the
-  Create result.
-
-## Minimal operating sequence
-
-```text
-1. browser-consult Plan
-2. approve plan and contract
-3. browser-create --dry-run
-4. inspect prompt, scan receipt, and mode metadata
-5. browser-create real run
-6. independently resolve commit/PR through GitHub
-7. browser-consult Review in a new session
-8. human decision
-```
