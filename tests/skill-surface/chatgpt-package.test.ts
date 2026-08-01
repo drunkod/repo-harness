@@ -33,11 +33,9 @@ const PACKAGE_DIR = "repo-harness-chatgpt";
 const SKILLS_ROOT = join(ROOT, "assets", "skills");
 const PACKAGE_ROOT = join(SKILLS_ROOT, PACKAGE_DIR);
 const MANIFEST_PATH = join(ROOT, "assets", "skill-commands", "manifest.json");
-// Raised from 2048 as delegate and Create added Mode Selection lines,
-// when_to_use triggers, and compact Boundaries notes. Kept as a small,
-// deliberate step rather than a round jump so the router stays a compact
-// link list, not a place to inline protocol.
-const ROUTER_BODY_BYTE_LIMIT = 2560;
+// Keep the ChatGPT router on the same hard ceiling as every other canonical
+// package. New modes add one routing line; their protocol stays in references/.
+const ROUTER_BODY_BYTE_LIMIT = 2048;
 
 const REFERENCES = ["setup.md", "consult.md", "create.md", "continue.md", "read-back.md", "bridge.md", "delegate.md"] as const;
 
