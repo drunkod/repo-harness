@@ -1,4 +1,6 @@
-export type BrowserSessionStatus = 'completed' | 'running' | 'incomplete_capture' | 'recoverable' | 'failed' | 'cancelled' | 'dry_run';
+export type BrowserSessionStatus = 'completed' | 'running' | 'incomplete_capture' | 'recoverable' | 'failed' | 'cancelled' | 'dry_run' | 'surface_blocked';
+
+export type BrowserSessionMode = 'consult' | 'create';
 
 export type BrowserProviderName = 'oracle' | 'native';
 
@@ -11,6 +13,46 @@ export type BrowserWriteOutputPolicy = 'cli' | 'mcp';
 export interface BrowserFileInput {
   path: string;
   delivery?: 'inline';
+}
+
+export interface BrowserCreateSessionContext {
+  baseRef: string;
+  targetBranch: string;
+  planPath: string;
+  contractPath: string;
+  draftPr: boolean;
+  requestedApp: string;
+  creationReportPath: string;
+}
+
+export type BrowserCreateOutcome = 'pending' | 'dry_run' | 'reported' | 'surface_blocked' | 'provider_failed' | 'recoverable';
+
+export interface BrowserCreatePullRequestEvidence {
+  number?: number;
+  url?: string;
+  draft?: boolean;
+}
+
+export interface BrowserCreateReportedGitHubEvidence {
+  trust: 'assistant_reported';
+  repository: string;
+  baseCommit: string;
+  branch: string;
+  commitSha: string;
+  pullRequest?: BrowserCreatePullRequestEvidence;
+  changedFiles: string[];
+  toolEvents: string[];
+}
+
+export interface BrowserCreateSessionMeta extends BrowserCreateSessionContext {
+  outcome: BrowserCreateOutcome;
+  appSelection: {
+    requestedApp: string;
+    reportedSelectedApp?: string;
+    verified: false;
+    source: 'oracle_request_only';
+  };
+  reportedGitHub?: BrowserCreateReportedGitHubEvidence;
 }
 
 export interface BrowserConsultInput {
@@ -45,6 +87,22 @@ export interface BrowserConsultInput {
   browserChannel?: NativeBrowserChannel;
   keepBrowser?: boolean;
   headless?: boolean;
+  sessionMode?: BrowserSessionMode;
+  createContext?: BrowserCreateSessionContext;
+}
+
+export interface BrowserCreateInput extends Omit<
+  BrowserConsultInput,
+  'chatgptApp' | 'files' | 'provider' | 'requireSecretScan' | 'sessionMode' | 'createContext'
+> {
+  chatgptApp: string;
+  baseRef: string;
+  targetBranch: string;
+  planPath: string;
+  contractPath: string;
+  draftPr?: boolean;
+  files?: BrowserFileInput[];
+  provider?: 'oracle';
 }
 
 export interface BrowserImportedArtifact {
@@ -96,6 +154,7 @@ export interface BrowserSessionMeta {
   version: 1;
   sessionId: string;
   engine: 'chatgpt-browser';
+  mode: BrowserSessionMode;
   provider: BrowserProviderName;
   status: BrowserSessionStatus;
   repo: string;
@@ -136,6 +195,7 @@ export interface BrowserSessionMeta {
   security?: {
     promptSecretScan: PromptSecretScanReceipt;
   };
+  create?: BrowserCreateSessionMeta;
   sourceSessionId?: string;
   providerSessionId?: string;
   parentProviderSessionId?: string;
@@ -153,6 +213,7 @@ export interface BrowserSessionMeta {
 
 export interface StoredBrowserSessionSummary {
   sessionId: string;
+  mode: BrowserSessionMode;
   status: BrowserSessionStatus;
   provider: BrowserProviderName;
   createdAt: string;
@@ -161,6 +222,7 @@ export interface StoredBrowserSessionSummary {
   outputPath: string;
   transcriptPath: string;
   conversationUrl?: string;
+  createOutcome?: BrowserCreateOutcome;
 }
 
 export interface StoredBrowserSession {
