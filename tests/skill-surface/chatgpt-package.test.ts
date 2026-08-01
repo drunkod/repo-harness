@@ -17,7 +17,7 @@ import { runMcpInstallSkill } from "../../src/cli/mcp/setup";
 import { assertChatGptMcpContract } from "../helpers/chatgpt-mcp-contract";
 
 // SSD-05 staged the canonical `repo-harness-chatgpt` package (router + setup /
-// consult / continue / read-back / bridge references) INERT under
+// consult / create / continue / read-back / bridge references) INERT under
 // assets/skills/**. SSD-06 has now performed the atomic public cutover: the
 // package is a live, explicit-setup-only manifest entry, the retiring GPT Pro
 // facades (repo-harness-gptpro, repo-harness-gptpro-setup) and the static
@@ -33,14 +33,13 @@ const PACKAGE_DIR = "repo-harness-chatgpt";
 const SKILLS_ROOT = join(ROOT, "assets", "skills");
 const PACKAGE_ROOT = join(SKILLS_ROOT, PACKAGE_DIR);
 const MANIFEST_PATH = join(ROOT, "assets", "skill-commands", "manifest.json");
-// Raised from 2048 when the 6th mode (delegate, references/delegate.md) added
-// one Mode Selection line, one when_to_use trigger clause, and one Boundaries
-// note to the router body (chatgpt-delegate-mode). Kept as a small, deliberate
-// step rather than a round jump so the router stays a compact link list, not
-// a place to inline protocol.
+// Raised from 2048 as delegate and Create added Mode Selection lines,
+// when_to_use triggers, and compact Boundaries notes. Kept as a small,
+// deliberate step rather than a round jump so the router stays a compact
+// link list, not a place to inline protocol.
 const ROUTER_BODY_BYTE_LIMIT = 2560;
 
-const REFERENCES = ["setup.md", "consult.md", "continue.md", "read-back.md", "bridge.md", "delegate.md"] as const;
+const REFERENCES = ["setup.md", "consult.md", "create.md", "continue.md", "read-back.md", "bridge.md", "delegate.md"] as const;
 
 function readSkill(): string {
   return readFileSync(join(PACKAGE_ROOT, "SKILL.md"), "utf-8");
