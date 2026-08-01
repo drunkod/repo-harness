@@ -1,8 +1,6 @@
 import { Command } from 'commander';
 import {
   browserDoctor,
-  cleanupSessions,
-  listSessions,
   openSession,
   readSession,
   resolveRepoRoot,
@@ -10,7 +8,8 @@ import {
   runBrowserFollowup,
   runBrowserSetup,
 } from '../chatgpt-browser/engine';
-import { runBrowserCreate } from '../chatgpt-browser/create-mode';
+import { runBrowserCreate, runBrowserCreateFollowup } from '../chatgpt-browser/create-mode';
+import { cleanupBrowserSessions, listBrowserSessions } from '../chatgpt-browser/session-store';
 import type { BrowserProviderName, BrowserSessionMode, BrowserSessionStatus, NativeBrowserChannel, ThinkingLevel } from '../chatgpt-browser/types';
 import { runChatgptSkillProjection } from '../chatgpt-skill/installer';
 import type { ChatgptSkillTarget } from '../chatgpt-skill/installer';
@@ -443,7 +442,7 @@ export function buildChatgptCommand(): Command {
     .action((rawOpts: BrowserFollowupOptions) => {
       void runChatgptAction(async () => {
         const repoRoot = resolveRepoRoot(rawOpts.repo);
-        const result = await runBrowserFollowup({
+        const followupInput = {
           repoRoot,
           sessionId: rawOpts.session,
           title: rawOpts.title,
@@ -467,7 +466,11 @@ export function buildChatgptCommand(): Command {
           oracleBin: rawOpts.oracleBin,
           gitleaksBin: rawOpts.gitleaksBin,
           requireSecretScan: rawOpts.secretScan === true ? true : undefined,
-        });
+        };
+        const source = readSession(repoRoot, rawOpts.session);
+        const result = source.meta.mode === 'create'
+          ? await runBrowserCreateFollowup(followupInput)
+          : await runBrowserFollowup(followupInput);
         console.log(JSON.stringify({
           sourceSessionId: rawOpts.session,
           sessionId: result.sessionId,
@@ -504,8 +507,12 @@ export function buildChatgptCommand(): Command {
     .action((rawOpts: BrowserCommonOptions & { mode?: string; limit?: string; json?: boolean }) => {
       void runChatgptAction(() => {
         const mode = parseMode(rawOpts.mode);
-        const sessions = listSessions(resolveRepoRoot(rawOpts.repo), parsePositiveInteger('limit', rawOpts.limit))
-          .filter((session) => mode === undefined || session.mode === mode);
+        const sessions = listBrowserSessions(
+          resolveRepoRoot(rawOpts.repo),
+          undefined,
+          parsePositiveInteger('limit', rawOpts.limit),
+          mode,
+        );
         if (rawOpts.json === true) {
           console.log(JSON.stringify({ sessions }, null, 2));
           return;
@@ -520,14 +527,16 @@ export function buildChatgptCommand(): Command {
     .option('--repo <path>', 'Repository root', '.')
     .option('--older-than-days <days>', 'Only include sessions whose directory mtime is older than this many days')
     .option('--status <status>', 'Only include a session status')
+    .option('--mode <mode>', 'Only include a session mode: consult|create')
     .option('--limit <count>', 'Maximum sessions to remove')
     .option('--force', 'Actually remove candidate sessions')
     .option('--json', 'Output JSON instead of human-readable text')
-    .action((rawOpts: BrowserCommonOptions & { olderThanDays?: string; status?: string; limit?: string; force?: boolean; json?: boolean }) => {
+    .action((rawOpts: BrowserCommonOptions & { olderThanDays?: string; status?: string; mode?: string; limit?: string; force?: boolean; json?: boolean }) => {
       void runChatgptAction(() => {
-        const result = cleanupSessions(resolveRepoRoot(rawOpts.repo), {
+        const result = cleanupBrowserSessions(resolveRepoRoot(rawOpts.repo), {
           olderThanDays: parsePositiveInteger('older-than-days', rawOpts.olderThanDays),
           status: parseStatus(rawOpts.status),
+          mode: parseMode(rawOpts.mode),
           limit: parsePositiveInteger('limit', rawOpts.limit),
           dryRun: rawOpts.force !== true,
         });
