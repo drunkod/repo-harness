@@ -19,11 +19,18 @@ Date: 2026-07-31
 2. The browser engine already supports `--chatgpt-app <name>`. App
    preselection is Oracle-only and fails closed on unsupported providers.
 3. The canonical `repo-harness-chatgpt` skill is the existing explicit-setup
-   integration package and routes behavior through mode files.
+   integration package and routes behavior through `references/*.md` mode
+   files.
 4. The tested GitHub app can create branches, create/update files, build
    blob/tree/commit sequences, update refs, and open pull requests.
 5. repo-harness should not absorb GitHub credentials or duplicate the GitHub
    API implementation merely to describe this workflow.
+6. `--secret-scan` is implemented on the current branch across the ChatGPT
+   command, Browser Engine types/dispatch, and browser tests; analysis based
+   on an older indexed source snapshot must not remove the live gate.
+7. App-name forwarding is intentionally generic. `GitHub` is an example, not
+   a universal workspace name, so Create must stop when the requested app is
+   not visibly selected.
 
 ## MVP decision
 
@@ -41,8 +48,9 @@ browser-consult
 
 The MVP therefore adds:
 
-- `assets/skills/repo-harness-chatgpt/create.md`;
+- `assets/skills/repo-harness-chatgpt/references/create.md`;
 - router discovery and boundaries in the canonical ChatGPT skill;
+- inclusion in the canonical closed reference set;
 - a published operator guide;
 - contract tests for app selection and write safety.
 
@@ -50,7 +58,7 @@ The MVP therefore adds:
 
 - no direct writes to the default branch;
 - no force ref updates;
-- no implicit repository selection;
+- no implicit repository or app-name selection;
 - no scope beyond the approved contract;
 - draft PR only when requested;
 - no merge, auto-merge, ready-for-review transition, review-thread mutation,
