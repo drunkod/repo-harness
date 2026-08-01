@@ -200,6 +200,31 @@ describe('chatgpt browser-create', () => {
     });
   });
 
+  test('accepts a bounded Create result without a pull request when none was requested', () => {
+    withRepo((repoRoot) => {
+      const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-create-no-pr-'));
+      try {
+        const gitleaks = writeFakeGitleaks(binDir);
+        const oracle = writeFakeOracle(binDir, {
+          appPreselect: true,
+          output: createEnvelope({ pullRequest: null }),
+        });
+        const result = runChatgpt([
+          ...baseArgs(repoRoot),
+          '--gitleaks-bin', gitleaks,
+          '--oracle-bin', oracle,
+        ]);
+        expect(result.status).toBe(0);
+        const payload = JSON.parse(result.stdout);
+        expect(payload.status).toBe('completed');
+        expect(payload.create.outcome).toBe('reported');
+        expect(payload.create.reportedGitHub.pullRequest).toBeUndefined();
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   test('records assistant-reported GitHub identifiers separately from the provider output', () => {
     withRepo((repoRoot) => {
       const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-create-reported-'));
@@ -234,6 +259,31 @@ describe('chatgpt browser-create', () => {
         const meta = JSON.parse(readFileSync(join(payload.paths.sessionDir, 'meta.json'), 'utf-8'));
         expect(meta.mode).toBe('create');
         expect(meta.create.reportedGitHub.trust).toBe('assistant_reported');
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test('requires a reported draft PR when --draft-pr was requested', () => {
+    withRepo((repoRoot) => {
+      const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-create-missing-pr-'));
+      try {
+        const gitleaks = writeFakeGitleaks(binDir);
+        const oracle = writeFakeOracle(binDir, {
+          appPreselect: true,
+          output: createEnvelope({ pullRequest: null }),
+        });
+        const result = runChatgpt([
+          ...baseArgs(repoRoot),
+          '--draft-pr',
+          '--gitleaks-bin', gitleaks,
+          '--oracle-bin', oracle,
+        ]);
+        expect(result.status).toBe(2);
+        const payload = JSON.parse(result.stdout);
+        expect(payload.status).toBe('surface_blocked');
+        expect(payload.error.message).toContain('requested draft pull request');
       } finally {
         rmSync(binDir, { recursive: true, force: true });
       }
@@ -283,6 +333,50 @@ describe('chatgpt browser-create', () => {
         const payload = JSON.parse(result.stdout);
         expect(payload.status).toBe('surface_blocked');
         expect(payload.error.message).toContain('does not match agent/create-x');
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test('continues a surface-blocked Create session and supports mode-aware cleanup', () => {
+    withRepo((repoRoot) => {
+      const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-create-followup-'));
+      try {
+        const gitleaks = writeFakeGitleaks(binDir);
+        const oracle = writeFakeOracle(binDir, { appPreselect: true, output: 'No usable envelope.' });
+        const blocked = runChatgpt([
+          ...baseArgs(repoRoot),
+          '--gitleaks-bin', gitleaks,
+          '--oracle-bin', oracle,
+        ]);
+        expect(blocked.status).toBe(2);
+        const blockedPayload = JSON.parse(blocked.stdout);
+        expect(blockedPayload.status).toBe('surface_blocked');
+
+        const followup = runChatgpt([
+          'browser-followup',
+          '--repo', repoRoot,
+          '--session', blockedPayload.sessionId,
+          '--prompt', 'Return the required Create result envelope.',
+          '--gitleaks-bin', gitleaks,
+          '--dry-run',
+        ]);
+        expect(followup.status).toBe(0);
+        const followupPayload = JSON.parse(followup.stdout);
+        expect(followupPayload.mode).toBe('create');
+        expect(followupPayload.create.outcome).toBe('dry_run');
+        expect(followupPayload.create.reportedGitHub).toBeUndefined();
+
+        const cleanup = runChatgpt([
+          'browser-cleanup',
+          '--repo', repoRoot,
+          '--mode', 'create',
+          '--status', 'surface_blocked',
+          '--json',
+        ]);
+        expect(cleanup.status).toBe(0);
+        expect(JSON.parse(cleanup.stdout).candidates).toEqual([blockedPayload.sessionId]);
       } finally {
         rmSync(binDir, { recursive: true, force: true });
       }
