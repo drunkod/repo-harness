@@ -5,14 +5,14 @@ import { join } from "path";
 const ROOT = join(import.meta.dir, "..", "..");
 const PACKAGE_ROOT = join(ROOT, "assets", "skills", "repo-harness-chatgpt");
 const ROUTER = join(PACKAGE_ROOT, "SKILL.md");
-const CREATE = join(PACKAGE_ROOT, "create.md");
+const CREATE = join(PACKAGE_ROOT, "references", "create.md");
 const DOC = join(ROOT, "docs", "repo-harness-chatgpt-github-create.md");
 
 describe("repo-harness-chatgpt Create mode MVP", () => {
   test("router exposes a distinct GitHub-app-backed Create mode", () => {
     const router = readFileSync(ROUTER, "utf-8");
     expect(router).toContain("GitHub-app-backed Create");
-    expect(router).toContain("`create.md`");
+    expect(router).toContain("`references/create.md`");
     expect(router).toContain("sole ChatGPT Web mode allowed to perform GitHub writes");
     expect(statSync(ROUTER).size).toBeLessThanOrEqual(2560);
   });
@@ -30,6 +30,8 @@ describe("repo-harness-chatgpt Create mode MVP", () => {
     expect(protocol).toContain("Do not mark it ready");
     expect(protocol).toContain("The Create conversation does not review");
     expect(protocol).toContain("does not add a GitHub API implementation to repo-harness");
+    expect(normalizedProtocol).toContain("Selected app name unavailable or mismatched");
+    expect(normalizedProtocol).toContain("do not assume `GitHub` is universal");
   });
 
   test("published package includes the Create guide", () => {
@@ -37,6 +39,6 @@ describe("repo-harness-chatgpt Create mode MVP", () => {
     expect(packageJson.files).toContain("docs/repo-harness-chatgpt-github-create.md");
     const guide = readFileSync(DOC, "utf-8");
     expect(guide).toContain("ChatGPT + GitHub App Create MVP");
-    expect(guide).toContain("assets/skills/repo-harness-chatgpt/create.md");
+    expect(guide).toContain("assets/skills/repo-harness-chatgpt/references/create.md");
   });
 });
