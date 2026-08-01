@@ -40,7 +40,7 @@ function writeFakeGitleaks(dir: string): string {
   return path;
 }
 
-function writeFakeOracle(dir: string, opts: { appPreselect: boolean; output?: string }): string {
+function writeFakeOracle(dir: string, opts: { appPreselect: boolean; output?: string; argsPath?: string }): string {
   const path = join(dir, 'oracle');
   const flags = [
     '--engine',
@@ -59,8 +59,10 @@ function writeFakeOracle(dir: string, opts: { appPreselect: boolean; output?: st
     '#!/usr/bin/env bun',
     `const HELP = ${JSON.stringify(flags)};`,
     `const OUTPUT = ${JSON.stringify(opts.output ?? '')};`,
+    `const ARGS_PATH = ${JSON.stringify(opts.argsPath ?? '')};`,
     "if (process.argv.includes('--version')) { console.log('0.16.1'); process.exit(0); }",
     "if (process.argv.includes('--help') || process.argv.includes('--debug-help')) { console.log(HELP); process.exit(0); }",
+    "if (ARGS_PATH) await Bun.write(ARGS_PATH, process.argv.slice(2).join('\\n') + '\\n');",
     "const index = process.argv.indexOf('--write-output');",
     'if (index >= 0) await Bun.write(process.argv[index + 1], OUTPUT);',
     "console.log('Session: fake-create-session');",
@@ -136,6 +138,15 @@ describe('chatgpt browser-create', () => {
       expect(missingPlan.status).toBe(2);
       expect(missingPlan.stderr).toContain('CREATE_PLAN_NOT_FOUND');
       expect(existsSync(join(repoRoot, '.ai/harness/chatgpt/sessions'))).toBe(false);
+
+      const missingContract = runChatgpt([
+        ...baseArgs(repoRoot),
+        '--contract', 'tasks/contracts/missing.contract.md',
+        '--dry-run',
+      ]);
+      expect(missingContract.status).toBe(2);
+      expect(missingContract.stderr).toContain('CREATE_CONTRACT_NOT_FOUND');
+      expect(existsSync(join(repoRoot, '.ai/harness/chatgpt/sessions'))).toBe(false);
     });
   });
 
@@ -180,6 +191,28 @@ describe('chatgpt browser-create', () => {
     });
   });
 
+  test('browser doctor exposes browserAppPreselect for a Create-capable Oracle', () => {
+    withRepo((repoRoot) => {
+      const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-create-doctor-'));
+      try {
+        const oracle = writeFakeOracle(binDir, { appPreselect: true });
+        const doctor = runChatgpt([
+          'browser-doctor',
+          '--repo', repoRoot,
+          '--provider', 'oracle',
+          '--oracle-bin', oracle,
+          '--json',
+        ]);
+        expect(doctor.status).toBe(0);
+        const readiness = JSON.parse(doctor.stdout);
+        expect(readiness.oracle.optionalCapabilities.browserAppPreselect).toBe(true);
+        expect(readiness.oracle.capabilities.browserEngine).toBe(true);
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   test('fails before browser launch when Oracle lacks --browser-app', () => {
     withRepo((repoRoot) => {
       const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-create-no-app-'));
@@ -194,6 +227,53 @@ describe('chatgpt browser-create', () => {
         expect(result.status).toBe(2);
         expect(result.stderr).toContain('ORACLE_APP_PRESELECT_UNSUPPORTED');
         expect(existsSync(join(repoRoot, '.ai/harness/chatgpt/sessions'))).toBe(false);
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test('inherits Browser Engine write-output path policy for Creation Reports', () => {
+    withRepo((repoRoot) => {
+      const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-create-output-'));
+      try {
+        const gitleaks = writeFakeGitleaks(binDir);
+        writeFileSync(join(repoRoot, '.env'), 'SECRET=value\n');
+
+        const denied = runChatgpt([
+          ...baseArgs(repoRoot),
+          '--gitleaks-bin', gitleaks,
+          '--write-output', '.env',
+          '--dry-run',
+        ]);
+        expect(denied.status).toBe(2);
+        expect(denied.stderr).toContain('path is denied by ChatGPT browser policy');
+        expect(readFileSync(join(repoRoot, '.env'), 'utf-8')).toBe('SECRET=value\n');
+        expect(existsSync(join(repoRoot, '.ai/harness/chatgpt/sessions'))).toBe(false);
+
+        mkdirSync(join(repoRoot, 'tasks', 'reviews'), { recursive: true });
+        writeFileSync(join(repoRoot, 'tasks', 'reviews', 'existing.md'), 'old\n');
+        const existing = runChatgpt([
+          ...baseArgs(repoRoot),
+          '--gitleaks-bin', gitleaks,
+          '--write-output', 'tasks/reviews/existing.md',
+          '--dry-run',
+        ]);
+        expect(existing.status).toBe(2);
+        expect(existing.stderr).toContain('write output already exists');
+        expect(readFileSync(join(repoRoot, 'tasks', 'reviews', 'existing.md'), 'utf-8')).toBe('old\n');
+        expect(existsSync(join(repoRoot, '.ai/harness/chatgpt/sessions'))).toBe(false);
+
+        const allowedPath = join(repoRoot, 'tasks', 'reviews', 'create.md');
+        const allowed = runChatgpt([
+          ...baseArgs(repoRoot),
+          '--gitleaks-bin', gitleaks,
+          '--write-output', 'tasks/reviews/create.md',
+          '--dry-run',
+        ]);
+        expect(allowed.status).toBe(0);
+        expect(existsSync(allowedPath)).toBe(true);
+        expect(readFileSync(allowedPath, 'utf-8')).toContain('Dry run only');
       } finally {
         rmSync(binDir, { recursive: true, force: true });
       }
@@ -225,12 +305,17 @@ describe('chatgpt browser-create', () => {
     });
   });
 
-  test('records assistant-reported GitHub identifiers separately from the provider output', () => {
+  test('records assistant-reported GitHub identifiers separately and passes the app to real Oracle execution', () => {
     withRepo((repoRoot) => {
       const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-create-reported-'));
       try {
         const gitleaks = writeFakeGitleaks(binDir);
-        const oracle = writeFakeOracle(binDir, { appPreselect: true, output: createEnvelope() });
+        const argsPath = join(binDir, 'oracle-args.txt');
+        const oracle = writeFakeOracle(binDir, {
+          appPreselect: true,
+          output: createEnvelope(),
+          argsPath,
+        });
         const result = runChatgpt([
           ...baseArgs(repoRoot),
           '--draft-pr',
@@ -256,8 +341,13 @@ describe('chatgpt browser-create', () => {
           pullRequest: { number: 12, draft: true },
           toolEvents: ['create_branch', 'create_commit', 'update_ref', 'create_pull_request'],
         });
+        const oracleArgs = readFileSync(argsPath, 'utf-8').split(/\r?\n/);
+        const appIndex = oracleArgs.indexOf('--browser-app');
+        expect(appIndex).toBeGreaterThanOrEqual(0);
+        expect(oracleArgs[appIndex + 1]).toBe('GitHub');
         const meta = JSON.parse(readFileSync(join(payload.paths.sessionDir, 'meta.json'), 'utf-8'));
         expect(meta.mode).toBe('create');
+        expect(meta.browser.chatgptApp).toBe('GitHub');
         expect(meta.create.reportedGitHub.trust).toBe('assistant_reported');
       } finally {
         rmSync(binDir, { recursive: true, force: true });
