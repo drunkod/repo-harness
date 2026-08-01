@@ -10,7 +10,8 @@ import {
   runBrowserFollowup,
   runBrowserSetup,
 } from '../chatgpt-browser/engine';
-import type { BrowserProviderName, BrowserSessionStatus, NativeBrowserChannel, ThinkingLevel } from '../chatgpt-browser/types';
+import { runBrowserCreate } from '../chatgpt-browser/create-mode';
+import type { BrowserProviderName, BrowserSessionMode, BrowserSessionStatus, NativeBrowserChannel, ThinkingLevel } from '../chatgpt-browser/types';
 import { runChatgptSkillProjection } from '../chatgpt-skill/installer';
 import type { ChatgptSkillTarget } from '../chatgpt-skill/installer';
 
@@ -70,6 +71,30 @@ interface BrowserConsultOptions extends BrowserCommonOptions {
   browserChannel?: string;
   keepBrowser?: boolean;
   headless?: boolean;
+}
+
+interface BrowserCreateOptions {
+  repo: string;
+  title?: string;
+  prompt: string;
+  file?: string[];
+  chatgptApp: string;
+  base: string;
+  branch: string;
+  plan: string;
+  contract: string;
+  draftPr?: boolean;
+  model?: string;
+  thinking?: string;
+  timeoutMs?: string;
+  heartbeat?: string;
+  writeOutput?: string;
+  allowAbsoluteOutput?: boolean;
+  overwriteOutput?: boolean;
+  maxInlineChars?: string;
+  oracleBin?: string;
+  gitleaksBin?: string;
+  dryRun?: boolean;
 }
 
 interface BrowserFollowupOptions extends BrowserCommonOptions {
@@ -137,8 +162,14 @@ function parseNonNegativeInteger(name: string, value?: string): number | undefin
 
 function parseStatus(value?: string): BrowserSessionStatus | undefined {
   if (value === undefined) return undefined;
-  if (value === 'completed' || value === 'running' || value === 'incomplete_capture' || value === 'recoverable' || value === 'failed' || value === 'cancelled' || value === 'dry_run') return value;
+  if (value === 'completed' || value === 'running' || value === 'incomplete_capture' || value === 'recoverable' || value === 'failed' || value === 'cancelled' || value === 'dry_run' || value === 'surface_blocked') return value;
   throw new Error(`invalid --status "${value}"`);
+}
+
+function parseMode(value?: string): BrowserSessionMode | undefined {
+  if (value === undefined) return undefined;
+  if (value === 'consult' || value === 'create') return value;
+  throw new Error(`invalid --mode "${value}" (expected: consult, create)`);
 }
 
 async function runChatgptAction(action: () => void | Promise<void>): Promise<void> {
@@ -151,7 +182,7 @@ async function runChatgptAction(action: () => void | Promise<void>): Promise<voi
 }
 
 export function buildChatgptCommand(): Command {
-  const chatgpt = new Command('chatgpt').description('Use a local ChatGPT Web browser session for repo-harness planning and review workflows');
+  const chatgpt = new Command('chatgpt').description('Use a local ChatGPT Web browser session for repo-harness planning, Create, and review workflows');
 
   chatgpt
     .command('install-skill')
@@ -308,6 +339,69 @@ export function buildChatgptCommand(): Command {
     });
 
   chatgpt
+    .command('browser-create')
+    .description('Run a first-class GitHub-app-backed Create session through the existing Browser Engine')
+    .requiredOption('--repo <path>', 'Repository root for files and session store')
+    .requiredOption('--prompt <text>', 'Bounded implementation task appended after the fixed Create contract')
+    .requiredOption('--chatgpt-app <name>', 'Exact installed ChatGPT app name exposing GitHub write tools')
+    .requiredOption('--base <ref>', 'Exact base ref or commit for the dedicated branch')
+    .requiredOption('--branch <name>', 'Dedicated non-default target branch')
+    .requiredOption('--plan <path>', 'Repo-relative approved plan path')
+    .requiredOption('--contract <path>', 'Repo-relative approved task-contract path')
+    .option('--title <title>', 'Session title slug')
+    .option('--file <path>', 'Additional repo-relative workflow file to include inline', (value, previous: string[] = []) => [...previous, value], [])
+    .option('--draft-pr', 'Request a draft pull request after the bounded commit')
+    .option('--model <label>', 'Requested ChatGPT model label')
+    .option('--thinking <level>', 'Thinking level: light|standard|extended|heavy')
+    .option('--timeout-ms <ms>', 'Assistant timeout in milliseconds')
+    .option('--heartbeat <seconds>', 'Oracle provider heartbeat interval in seconds; 0 disables heartbeat (default: 59)')
+    .option('--max-inline-chars <chars>', 'Maximum inline chars per file', '120000')
+    .option('--write-output <path>', 'Repo-relative Creation Report path; defaults under .ai/harness/handoff/chatgpt')
+    .option('--allow-absolute-output', 'Permit --write-output to target an absolute path')
+    .option('--overwrite-output', 'Allow --write-output to replace an existing file')
+    .option('--oracle-bin <path>', 'Explicit Oracle binary path')
+    .option('--gitleaks-bin <path>', 'Explicit trusted Gitleaks binary; Create always requires secret scanning')
+    .option('--dry-run', 'Build and scan the Create prompt/session without opening a browser')
+    .action((rawOpts: BrowserCreateOptions) => {
+      void runChatgptAction(async () => {
+        const result = await runBrowserCreate({
+          repoRoot: resolveRepoRoot(rawOpts.repo),
+          title: rawOpts.title,
+          prompt: rawOpts.prompt,
+          chatgptApp: rawOpts.chatgptApp,
+          baseRef: rawOpts.base,
+          targetBranch: rawOpts.branch,
+          planPath: rawOpts.plan,
+          contractPath: rawOpts.contract,
+          draftPr: rawOpts.draftPr === true,
+          files: (rawOpts.file ?? []).map((path) => ({ path })),
+          model: rawOpts.model,
+          thinking: parseThinking(rawOpts.thinking),
+          timeoutMs: parsePositiveInteger('timeout-ms', rawOpts.timeoutMs),
+          heartbeatSeconds: parseNonNegativeInteger('heartbeat', rawOpts.heartbeat),
+          writeOutput: rawOpts.writeOutput,
+          allowAbsoluteOutput: rawOpts.allowAbsoluteOutput === true,
+          overwriteOutput: rawOpts.overwriteOutput === true,
+          maxInlineChars: parsePositiveInteger('max-inline-chars', rawOpts.maxInlineChars),
+          oracleBin: rawOpts.oracleBin,
+          gitleaksBin: rawOpts.gitleaksBin,
+          dryRun: rawOpts.dryRun === true,
+          provider: 'oracle',
+        });
+        console.log(JSON.stringify({
+          sessionId: result.sessionId,
+          status: result.status,
+          mode: result.meta.mode,
+          create: result.meta.create,
+          paths: result.paths,
+          dryRun: result.dryRun,
+          error: result.error,
+        }, null, 2));
+        if (result.status === 'failed' || result.status === 'surface_blocked') process.exitCode = 2;
+      });
+    });
+
+  chatgpt
     .command('browser-session')
     .description('Read a saved ChatGPT browser consult session')
     .argument('<session-id>', 'Session ID to read')
@@ -378,6 +472,8 @@ export function buildChatgptCommand(): Command {
           sourceSessionId: rawOpts.session,
           sessionId: result.sessionId,
           status: result.status,
+          mode: result.meta.mode,
+          create: result.meta.create,
           paths: result.paths,
           dryRun: result.dryRun,
           error: result.error,
@@ -400,18 +496,21 @@ export function buildChatgptCommand(): Command {
 
   chatgpt
     .command('browser-list')
-    .description('List saved ChatGPT browser consult sessions')
+    .description('List saved ChatGPT browser sessions')
     .option('--repo <path>', 'Repository root', '.')
+    .option('--mode <mode>', 'Only show a session mode: consult|create')
     .option('--limit <count>', 'Maximum sessions to list', '20')
     .option('--json', 'Output JSON instead of human-readable text')
-    .action((rawOpts: BrowserCommonOptions & { limit?: string; json?: boolean }) => {
+    .action((rawOpts: BrowserCommonOptions & { mode?: string; limit?: string; json?: boolean }) => {
       void runChatgptAction(() => {
-        const sessions = listSessions(resolveRepoRoot(rawOpts.repo), parsePositiveInteger('limit', rawOpts.limit));
+        const mode = parseMode(rawOpts.mode);
+        const sessions = listSessions(resolveRepoRoot(rawOpts.repo), parsePositiveInteger('limit', rawOpts.limit))
+          .filter((session) => mode === undefined || session.mode === mode);
         if (rawOpts.json === true) {
           console.log(JSON.stringify({ sessions }, null, 2));
           return;
         }
-        for (const session of sessions) console.log(`${session.sessionId}\t${session.status}\t${session.outputPath}`);
+        for (const session of sessions) console.log(`${session.sessionId}\t${session.mode}\t${session.status}\t${session.outputPath}`);
       });
     });
 
