@@ -7,6 +7,7 @@ import type {
   BrowserImportedArtifact,
   BrowserProviderName,
   BrowserSessionMeta,
+  BrowserSessionMode,
   BrowserSessionPaths,
   BrowserSessionStatus,
   PromptBundle,
@@ -228,7 +229,7 @@ export function writeBrowserSession(opts: {
     },
     diagnostics: {
       dryRun: opts.input.dryRun === true,
-      reattachable: opts.status === 'incomplete_capture' || opts.status === 'recoverable',
+      reattachable: opts.status === 'incomplete_capture' || opts.status === 'recoverable' || opts.status === 'surface_blocked',
       lastCaptureAt: now,
     },
     security: opts.secretScan ? { promptSecretScan: opts.secretScan } : undefined,
@@ -278,8 +279,15 @@ export function updateBrowserSessionMeta(
   if (!existsSync(metaPath)) throw new Error(`session not found: ${sessionId}`);
   const current = normalizeBrowserSessionMeta(JSON.parse(readFileSync(metaPath, 'utf-8')) as BrowserSessionMeta);
   const now = new Date().toISOString();
+  const updated = update(current);
   const next = normalizeBrowserSessionMeta({
-    ...update(current),
+    ...updated,
+    diagnostics: {
+      ...updated.diagnostics,
+      reattachable: updated.status === 'incomplete_capture'
+        || updated.status === 'recoverable'
+        || updated.status === 'surface_blocked',
+    },
     updatedAt: now,
   });
   writeFileSync(metaPath, JSON.stringify(next, null, 2) + '\n', 'utf-8');
@@ -307,7 +315,12 @@ export function updateBrowserSessionMeta(
   return next;
 }
 
-export function listBrowserSessions(repoRoot: string, customRoot?: string, limit = 20): StoredBrowserSessionSummary[] {
+export function listBrowserSessions(
+  repoRoot: string,
+  customRoot?: string,
+  limit = 20,
+  mode?: BrowserSessionMode,
+): StoredBrowserSessionSummary[] {
   const root = sessionRoot(repoRoot, customRoot);
   if (!existsSync(root)) return [];
   return readdirSync(root, { withFileTypes: true })
@@ -315,6 +328,7 @@ export function listBrowserSessions(repoRoot: string, customRoot?: string, limit
     .map((entry) => join(root, entry.name, 'meta.json'))
     .filter((path) => existsSync(path))
     .map((path) => normalizeBrowserSessionMeta(JSON.parse(readFileSync(path, 'utf-8')) as BrowserSessionMeta))
+    .filter((meta) => mode === undefined || meta.mode === mode)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, limit)
     .map((meta) => ({
@@ -360,6 +374,7 @@ export function cleanupBrowserSessions(repoRoot: string, opts: {
   customRoot?: string;
   olderThanDays?: number;
   status?: BrowserSessionStatus;
+  mode?: BrowserSessionMode;
   dryRun?: boolean;
   limit?: number;
 } = {}): { removed: string[]; candidates: string[]; dryRun: boolean } {
@@ -375,6 +390,7 @@ export function cleanupBrowserSessions(repoRoot: string, opts: {
       const meta = normalizeBrowserSessionMeta(JSON.parse(readFileSync(metaPath, 'utf-8')) as BrowserSessionMeta);
       const stat = statSync(sessionDir);
       if (opts.status && meta.status !== opts.status) return null;
+      if (opts.mode && meta.mode !== opts.mode) return null;
       if (cutoff !== undefined && stat.mtimeMs >= cutoff) return null;
       return { sessionId: entry.name, sessionDir };
     })
