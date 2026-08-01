@@ -2,8 +2,9 @@ import { existsSync } from 'fs';
 import { isAbsolute, relative, resolve } from 'path';
 import { runBrowserConsult } from './engine';
 import { probeOracle, resolveOracleBin, supportsBrowserAppPreselect } from './oracle-provider';
-import { updateBrowserSessionMeta } from './session-store';
+import { readBrowserSession, updateBrowserSessionMeta } from './session-store';
 import type {
+  BrowserConsultInput,
   BrowserConsultResult,
   BrowserCreateInput,
   BrowserCreateReportedGitHubEvidence,
@@ -163,7 +164,7 @@ export function buildCreatePrompt(input: BrowserCreateInput, context: BrowserCre
 }
 
 interface ParsedCreateEnvelope {
-  selectedApp?: string;
+  selectedApp: string;
   repository: string;
   baseCommit: string;
   branch: string;
@@ -223,7 +224,7 @@ export function parseCreateResult(output: string): ParsedCreateEnvelope {
     pullRequest = { number, url, draft };
   }
   return {
-    selectedApp: optionalString(parsed.selectedApp),
+    selectedApp: requiredString(parsed.selectedApp, 'selectedApp'),
     repository: requiredString(parsed.repository, 'repository'),
     baseCommit: requiredString(parsed.baseCommit, 'baseCommit'),
     branch: requiredString(parsed.branch, 'branch'),
@@ -232,6 +233,48 @@ export function parseCreateResult(output: string): ParsedCreateEnvelope {
     changedFiles: stringArray(parsed.changedFiles, 'changedFiles'),
     toolEvents: stringArray(parsed.toolEvents, 'toolEvents'),
   };
+}
+
+function assertFullCommitSha(value: string, field: string): void {
+  if (!/^[0-9a-f]{40}$/i.test(value)) throw new Error(`${field} must be a full 40-character commit SHA`);
+}
+
+function assertRepositoryName(value: string): void {
+  if (!/^[^/\s]+\/[^/\s]+$/.test(value)) throw new Error('repository must use owner/name form');
+}
+
+function assertChangedFiles(paths: string[]): void {
+  for (const path of paths) {
+    if (isAbsolute(path) || path === '..' || path.startsWith('../') || path.includes('/../')) {
+      throw new Error(`changedFiles contains an unsafe path: ${path}`);
+    }
+  }
+}
+
+function assertCreateEnvelope(
+  envelope: ParsedCreateEnvelope,
+  context: BrowserCreateSessionContext,
+): void {
+  if (envelope.branch !== context.targetBranch) {
+    throw new Error(`reported branch ${envelope.branch} does not match ${context.targetBranch}`);
+  }
+  if (envelope.selectedApp !== context.requestedApp) {
+    throw new Error(`reported selectedApp ${envelope.selectedApp} does not match ${context.requestedApp}`);
+  }
+  assertRepositoryName(envelope.repository);
+  assertFullCommitSha(envelope.baseCommit, 'baseCommit');
+  assertFullCommitSha(envelope.commitSha, 'commitSha');
+  assertChangedFiles(envelope.changedFiles);
+  if (!envelope.toolEvents.some((event) => WRITE_TOOL_EVENTS.has(event))) {
+    throw new Error('reported toolEvents contain no GitHub write action');
+  }
+  if (context.draftPr) {
+    if (!envelope.pullRequest?.number || !envelope.pullRequest.url || envelope.pullRequest.draft !== true) {
+      throw new Error('a requested draft pull request was not fully reported as draft');
+    }
+  } else if (envelope.pullRequest !== undefined) {
+    throw new Error('a pull request was reported although --draft-pr was not requested');
+  }
 }
 
 function toReportedEvidence(envelope: ParsedCreateEnvelope): BrowserCreateReportedGitHubEvidence {
@@ -267,15 +310,7 @@ function finalizeCreateResult(
 
   try {
     const envelope = parseCreateResult(result.output ?? '');
-    if (envelope.branch !== context.targetBranch) {
-      throw new Error(`reported branch ${envelope.branch} does not match ${context.targetBranch}`);
-    }
-    if (envelope.selectedApp && envelope.selectedApp !== context.requestedApp) {
-      throw new Error(`reported selectedApp ${envelope.selectedApp} does not match ${context.requestedApp}`);
-    }
-    if (!envelope.toolEvents.some((event) => WRITE_TOOL_EVENTS.has(event))) {
-      throw new Error('reported toolEvents contain no GitHub write action');
-    }
+    assertCreateEnvelope(envelope, context);
     const reportedGitHub = toReportedEvidence(envelope);
     const meta = updateBrowserSessionMeta(input.repoRoot, result.sessionId, (current) => ({
       ...current,
@@ -334,4 +369,53 @@ export async function runBrowserCreate(input: BrowserCreateInput): Promise<Brows
     createContext: context,
   });
   return finalizeCreateResult(input, context, result);
+}
+
+const CREATE_FOLLOWUP_RESUMABLE_STATUSES = new Set([
+  'completed',
+  'recoverable',
+  'incomplete_capture',
+  'dry_run',
+  'surface_blocked',
+]);
+
+export async function runBrowserCreateFollowup(
+  input: Omit<BrowserConsultInput, 'sourceSessionId'> & { sessionId: string },
+): Promise<BrowserConsultResult> {
+  const existing = readBrowserSession(input.repoRoot, input.sessionId);
+  if (existing.meta.mode !== 'create') {
+    throw new CreatePreconditionError(
+      'CREATE_FOLLOWUP_MODE_MISMATCH',
+      `session ${input.sessionId} is not a Create session`,
+    );
+  }
+  const provider = input.provider ?? existing.meta.provider;
+  if (provider !== 'oracle') {
+    throw new CreatePreconditionError(
+      'CREATE_PROVIDER_UNSUPPORTED',
+      'Create follow-up requires the oracle provider',
+    );
+  }
+  if (input.dryRun !== true && !CREATE_FOLLOWUP_RESUMABLE_STATUSES.has(existing.meta.status)) {
+    throw new CreatePreconditionError(
+      'CREATE_FOLLOWUP_STATUS_UNSUPPORTED',
+      `cannot follow up from Create session ${input.sessionId} with status "${existing.meta.status}"`,
+    );
+  }
+  return runBrowserConsult({
+    ...input,
+    title: input.title ?? `followup ${input.sessionId}`,
+    sourceSessionId: input.sessionId,
+    requireSecretScan: input.requireSecretScan === true || Boolean(existing.meta.security?.promptSecretScan),
+    providerSessionId: input.providerSessionId ?? existing.meta.providerSessionId,
+    parentProviderSessionId: existing.meta.providerSessionId,
+    model: input.model ?? existing.meta.model.requested,
+    thinking: input.thinking ?? existing.meta.model.thinking,
+    provider: 'oracle',
+    chatgptUrl: input.chatgptUrl ?? existing.meta.browser.conversationUrl ?? existing.meta.browser.chatgptUrl,
+    chatgptApp: input.chatgptApp ?? existing.meta.browser.chatgptApp,
+    profileDir: input.profileDir ?? existing.meta.browser.profileDir,
+    profileDirectory: input.profileDirectory ?? existing.meta.browser.profileDirectory,
+    browserChannel: input.browserChannel ?? existing.meta.browser.channel,
+  });
 }
