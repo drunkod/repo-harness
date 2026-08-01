@@ -13,6 +13,8 @@ Updated: 2026-08-01
 - User-tested ChatGPT GitHub app action surface.
 - Follow-up implementation report identifying the gap between a skill-level
   Create protocol and a first-class runtime entity.
+- Canonical-form follow-up report covering package layout, router budget,
+  stale-name gates, documentation ownership, and reusable Browser Engine tests.
 
 ## Findings
 
@@ -184,21 +186,51 @@ provider_failed
 completed but the output lacked a single valid result envelope, reported the
 wrong branch/app, or reported no GitHub write action.
 
+### Canonical package and documentation form
+
+- `create.md` has one home:
+  `assets/skills/repo-harness-chatgpt/references/create.md`.
+- The closed `REFERENCES` set declares `create.md`; no duplicate package-root
+  copy exists.
+- `SKILL.md` remains a routing-only document with `## Mode Selection` and
+  `## Boundaries`, no top-level `## Protocol`, and the shared 2048-byte ceiling.
+- `package.json` explicitly publishes
+  `docs/repo-harness-chatgpt-github-create.md`.
+- The Create guide links to the canonical Browser Engine guide for Oracle,
+  profile, doctor, app-preselection, secret-scan, and session mechanics rather
+  than maintaining a competing explanation.
+- Create reference and guide text are checked against manifest-derived retired
+  package names and the canonical stale-pattern set.
+- No artificial provenance line was added to the genuinely new Create
+  reference; the existing directory-level provenance convention remains
+  unchanged.
+
 ### Runtime tests
 
-Added execution-focused tests with fake Oracle and Gitleaks binaries covering:
+Execution-focused tests use the existing Browser Engine test patterns and fake
+Oracle/Gitleaks binaries. Coverage includes:
 
 - command help and required flags;
 - default-branch rejection;
-- missing plan rejection;
+- missing plan and missing contract rejection;
 - mandatory secret scanning;
-- generated `--browser-app` command;
-- `mode=create` persistence;
-- Create-only browser listing;
+- generated dry-run `--browser-app` command;
+- Browser Doctor `browserAppPreselect` capability visibility;
 - unsupported Oracle failure before browser launch;
+- real Oracle invocation receiving `--browser-app GitHub`;
+- `mode=create` persistence and Create-only listing;
+- inherited Creation Report output-path denial, overwrite, and allowed-path
+  behavior;
 - parsed assistant-reported GitHub identifiers;
+- no-PR and requested-draft-PR result contracts;
 - missing evidence classification as `surface_blocked`;
-- reported branch mismatch classification.
+- reported branch mismatch classification;
+- Create follow-up recovery and mode-aware cleanup.
+
+The existing repo-wide retired-name scan remains unchanged and continues to
+cover the canonical skill reference surface. The Create-specific skill test
+adds coverage for the published guide, which sits outside that scan's fixed
+`docs/` subdirectory list.
 
 ## Safety model
 
