@@ -1,6 +1,12 @@
 # repo-harness ChatGPT Browser Engine
 
-`repo-harness chatgpt browser-*` uses a locally authenticated ChatGPT Web browser session for planning and review workflows. It does not use the OpenAI API and does not require `OPENAI_API_KEY`.
+`repo-harness chatgpt browser-*` uses a locally authenticated ChatGPT Web
+browser session for planning, bounded GitHub Create, and review workflows. It
+does not use the OpenAI API and does not require `OPENAI_API_KEY`.
+
+Create-specific target, write, result, and independent read-back rules live in
+[ChatGPT + GitHub App Create](./repo-harness-chatgpt-github-create.md); this page
+remains authoritative for the shared browser transport and session lifecycle.
 
 ## What It Does
 
@@ -11,6 +17,7 @@
 - Supports dry-run preview without opening a browser.
 - Supports an Oracle provider wrapper for `oracle --engine browser` (the default, recommended main path).
 - Supports linked follow-up sessions, conversation URL readback, and safe cleanup planning.
+- Supports repository-bound Create and a separate read-only Create read-back through the same Oracle browser engine.
 - Exposes optional MCP tools only when the MCP server is started with `--enable-chatgpt-browser`.
 
 ## What It Does Not Do
@@ -22,6 +29,7 @@
 - It does not import local artifact paths from ordinary provider stdout.
 - It does not auto-fall back from Oracle to another provider. Oracle may have already submitted the prompt before a capture drop, so silent retries would double-ask.
 - It does not generate, install, or require a Chrome extension.
+- It does not provider-attest ChatGPT app tool calls; Create/read-back evidence remains explicitly trust-labelled and requires Review.
 
 ## Provider Posture
 
@@ -142,6 +150,10 @@ the saved `prompt.md` before transporting it through Codex's built-in browser.
 review consults retain the path gate without silently enabling this delegate
 contract.
 
+Create and Create read-back enable the same fail-closed scan internally; their
+operators do not add a separate `--secret-scan` flag. See the Create guide for
+their required inputs and outcomes.
+
 ## Oracle Provider
 
 ```bash
@@ -177,6 +189,9 @@ Use the Oracle CLI, not `oracle-mcp`, as the repo-harness provider runtime. `ora
 
 Multi-turn works two ways: repeat `--follow-up` within one run, or reopen a saved conversation later with `browser-followup --session <id>` (which passes oracle `--followup <providerSessionId>`). A follow-up records the parent `providerSessionId`, only resumes from a session that reached a resumable terminal state, and uses the binding recorded on the parent repo-harness session. If the parent session predates binding metadata, repo-harness does not inject the current repository binding into the follow-up command.
 
+Create read-back is intentionally not a follow-up. It opens a new Oracle browser
+session so its `readBackSessionId` differs from the Create `sessionId`.
+
 The doctor status taxonomy is distinct per provider (no single overloaded `partial`): oracle -> `ready` | `unavailable` (`ORACLE_NOT_INSTALLED`) | `action_required` (`ORACLE_INCOMPATIBLE`); native -> `deprecated` (`NATIVE_PROVIDER_DEPRECATED`).
 
 `--write-output` is validated by repo-harness before the provider runs. By default it must be repo-relative, must not target denied paths, and must not overwrite an existing file unless `--overwrite-output` is passed. GPT Pro review/handoff outputs should live under `.ai/harness/handoff/gptpro/` and include a timestamp (and, when known, the reported session id) in the filename; fixed names such as `chatgpt-review.md` are too easy to confuse with a previous ChatGPT session. Absolute output paths require the human-only `--allow-absolute-output` flag and are not available through MCP browser tools.
@@ -195,7 +210,7 @@ repo-harness chatgpt browser-consult \
 
 The native provider launches installed Google Chrome and drives it through a local Chrome DevTools Protocol websocket. It opens ChatGPT Web, waits for a visible composer, submits the assembled prompt, waits for an assistant response, and saves the captured text into the same repo-local session store.
 
-Native provider consults require a bound ChatGPT product session in a non-default automation profile. Configure it with `browser-setup --profile-dir <dir>` and sign in to ChatGPT in that selected profile, or pass an explicit non-default `--profile-dir` for an ad hoc diagnostic run. Existing default Chrome profiles should use `--provider oracle`. The saved binding also carries the Chrome channel and ChatGPT URL, so normal consult and follow-up commands do not need to repeat them.
+Native provider consults require a bound ChatGPT product session in a non-default automation profile. Configure it with `browser-setup --profile-dir <dir>` and sign in to ChatGPT in that selected profile, or pass an explicit non-default `--profile-dir` for an ad hoc diagnostic run. Existing default Chrome profiles should use Oracle. The saved binding also carries the Chrome channel and ChatGPT URL, so normal consult and follow-up commands do not need to repeat them.
 
 Native provider runs use the current model and thinking mode already selected in the ChatGPT Web UI. Passing `--model` or `--thinking` with `--provider native` fails closed with `NATIVE_MODEL_SELECTION_UNSUPPORTED`; use the Oracle provider when provider-side model selection is required.
 
@@ -272,6 +287,8 @@ Enabled tools:
 - `open_chatgpt_browser_session`
 - `continue_chatgpt_browser_session`
 
+Create and Create read-back are not exposed as MCP tools in this MVP.
+
 Use `dryRun: true` for planning or policy inspection. Non-dry-run consults may create a real ChatGPT Web conversation through the configured provider.
 
 MCP browser consults restrict `writeOutput` to repo-harness workflow artifacts such as `.ai/harness/handoff/*.md`, `tasks/reviews/**`, `.ai/harness/checks/**`, `plans/prds/**`, and `plans/sprints/**`. Absolute paths, source paths, package manifests, lockfiles, secrets, and existing files without `overwriteOutput: true` are rejected before provider execution.
@@ -299,9 +316,9 @@ Denied by default:
 
 The engine rejects denied files before browser/provider execution.
 Allowed-path symlinks that resolve outside the repository are rejected.
-For delegate mode, path policy is only the first gate: `--secret-scan` also
-scans the fully rendered allowed content. Path acceptance alone is not evidence
-that a file is safe to send.
+For delegate and Create modes, path policy is only the first gate: the exact
+rendered content is also scanned before provider activity. Path acceptance
+alone is not evidence that a file is safe to send.
 
 ## Security Notes
 
@@ -310,5 +327,6 @@ that a file is safe to send.
 - Do not expose Chrome remote debugging outside localhost without an explicit tunnel/security plan.
 - Use `--dry-run --secret-scan` before sending any delegate context; transport
   the exact saved and hash-verified `prompt.md`, without later additions.
+- Use Create's mandatory scan and dry-run before a real mutating session.
 - Prefer narrow files over whole-repo dumps.
 - Treat generated ChatGPT output as review input, not authoritative code truth.
