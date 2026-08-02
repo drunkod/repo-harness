@@ -347,7 +347,7 @@ describe('chatgpt browser-create', () => {
             message: 'forbidden GitHub action',
           },
         ];
-        for (const item of cases) {
+        for (const [index, item] of cases.entries()) {
           const oracle = writeFakeOracle(binDir, {
             appPreselect: true,
             output: createEnvelope(item.override),
@@ -356,6 +356,7 @@ describe('chatgpt browser-create', () => {
             ...baseArgs(repoRoot),
             '--gitleaks-bin', gitleaks,
             '--oracle-bin', oracle,
+            '--write-output', `.ai/harness/handoff/chatgpt/mismatch-${index}.md`,
           ]);
           expect(result.status).toBe(2);
           const payload = JSON.parse(result.stdout);
