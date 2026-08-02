@@ -41,9 +41,9 @@ without a write.
 repo-harness chatgpt browser-create \
   --repo . \
   --chatgpt-app GitHub \
-  --repository drunkod/repo-harness \
+  --repository owner/repository \
   --default-branch main \
-  --base-commit 01c821d121577c461aea4fc9373ad5090ec3bdda \
+  --base-commit 1111111111111111111111111111111111111111 \
   --branch agent/example-change \
   --plan plans/plan-example-change.md \
   --contract tasks/contracts/example-change.contract.md \
@@ -52,25 +52,29 @@ repo-harness chatgpt browser-create \
   --dry-run
 ```
 
-Dry-run must show `--browser-app <name>`, a passed Gitleaks receipt, and
-`meta.create` containing repository, default branch, exact base commit, and
-target branch.
+Replace the repository, branch, base SHA, plan, and contract with the approved
+target values. Dry-run must show `--browser-app <name>`, a passed Gitleaks
+receipt, and `meta.create` containing repository, default branch, exact base
+commit, and target branch.
 
 ## Write boundary
 
 Create must:
 
 - operate only on the exact `owner/name`;
+- report `get_repo` and `fetch_commit` before its write actions;
 - create the `agent/*` branch directly from the exact base SHA;
+- report `create_branch`, `create_commit`, and `update_ref`;
 - read before writing;
 - stay inside the approved plan and contract;
-- never modify plan or contract;
+- never modify the plan or contract;
 - never write to the default or another branch;
 - never force-update a ref;
 - avoid unrelated work;
-- never merge, enable auto-merge, mark ready, resolve review threads, or rerun
-  CI;
-- open a draft PR only when requested.
+- never merge, enable auto-merge, mark ready, comment, review, resolve review
+  threads, or rerun CI;
+- report `create_pull_request` and matching draft-PR metadata only when a draft
+  PR was requested.
 
 ## Create result
 
@@ -82,13 +86,15 @@ Require exactly one `repo-harness-create-result` JSON block containing:
 - exact base commit;
 - exact target branch;
 - a different full implementation commit SHA;
-- safe non-empty changed files;
-- actual tool events;
-- when requested, a draft PR with matching URL, base, head, and head SHA.
+- safe non-empty changed files that exclude the attached plan and contract;
+- the required repository/base read actions and branch/commit/ref write actions;
+- when requested, `create_pull_request` plus a draft PR with matching URL, base,
+  head, and head SHA.
 
 Store accepted data under `meta.create.reportedGitHub` with
 `trust: "assistant_reported"`. Reject any repository/default/base/branch
-mismatch and any merge, auto-merge, ready, thread-resolution, or CI-rerun
+mismatch, missing required action, contradictory PR event, plan/contract change,
+or merge, auto-merge, ready, comment, review, thread-resolution, or CI-rerun
 action as `CREATE_SURFACE_BLOCKED`.
 
 ## Independent read-back
@@ -118,9 +124,10 @@ Compare the read-back result with the frozen Create context and
 `reportedGitHub`. Store it separately under `meta.create.readBack` with
 `trust: "assistant_reported_readback"`.
 
-`matched` means the second session reported consistent GitHub state.
-`mismatch` or malformed output fails closed. It does not erase or rewrite the
-original Create report.
+A match requires the implementation to be strictly ahead of the exact base
+(`aheadBy >= 1`, `behindBy = 0`), the same changed-file set, and all required
+read actions. `mismatch` or malformed output fails closed. It does not erase or
+rewrite the original Create report.
 
 Oracle does not yet export provider-attested GitHub tool telemetry, so neither
 trust label is direct API proof. Final Review and human acceptance remain
@@ -135,7 +142,8 @@ test is:
 bun run test:live:chatgpt-create
 ```
 
-It requires `REPO_HARNESS_LIVE_CHATGPT_CREATE=1` plus explicit repository,
-default branch, base commit, branch, plan, contract, and smoke-test file
-environment variables. It performs one bounded write and a new-session
+It is self-gated and remains skipped during ordinary `bun test` unless
+`REPO_HARNESS_LIVE_CHATGPT_CREATE=1` is present. It also requires explicit
+repository, default branch, base commit, branch, plan, contract, and smoke-test
+file environment variables. It performs one bounded write and a new-session
 read-back. It never merges or removes remote state.
