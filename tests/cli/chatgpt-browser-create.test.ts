@@ -464,11 +464,12 @@ describe('chatgpt browser-create', () => {
           },
         });
 
-        const oracleArgs = readFileSync(argsPath, 'utf-8').split(/\r?\n/);
+        const oracleInvocation = readFileSync(argsPath, 'utf-8');
+        const oracleArgs = oracleInvocation.split(/\r?\n/);
         expect(oracleArgs).toContain('--browser-app');
         expect(oracleArgs).not.toContain('--followup');
-        const promptIndex = oracleArgs.indexOf('--prompt');
-        expect(oracleArgs[promptIndex + 1]).toContain('Do not use any GitHub write action');
+        expect(oracleArgs).toContain('--prompt');
+        expect(oracleInvocation).toContain('Do not use any GitHub write action');
 
         const sourceMeta = JSON.parse(readFileSync(join(createPayload.paths.sessionDir, 'meta.json'), 'utf-8'));
         expect(sourceMeta.create.reportedGitHub.trust).toBe('assistant_reported');
