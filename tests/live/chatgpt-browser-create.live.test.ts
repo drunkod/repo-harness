@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { spawnSync } from 'child_process';
+import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import { join } from 'path';
 
 const ROOT = join(import.meta.dir, '../..');
@@ -13,7 +13,7 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-function runChatgpt(args: string[], cwd: string) {
+function runChatgpt(args: string[], cwd: string): SpawnSyncReturns<string> {
   return spawnSync('bun', [CLI, 'chatgpt', ...args], {
     cwd,
     encoding: 'utf-8',
@@ -21,6 +21,22 @@ function runChatgpt(args: string[], cwd: string) {
     timeout: 60 * 60 * 1000,
     maxBuffer: 16 * 1024 * 1024,
   });
+}
+
+function parseSuccessfulJson(result: SpawnSyncReturns<string>, label: string): Record<string, any> {
+  if (result.status !== 0) {
+    throw new Error([
+      `${label} exited ${result.status ?? 'without a status'}`,
+      result.error ? `spawn error: ${result.error.message}` : '',
+      result.stderr.trim() ? `stderr:\n${result.stderr.trim()}` : '',
+      result.stdout.trim() ? `stdout:\n${result.stdout.trim()}` : '',
+    ].filter(Boolean).join('\n\n'));
+  }
+  try {
+    return JSON.parse(result.stdout) as Record<string, any>;
+  } catch (error) {
+    throw new Error(`${label} returned non-JSON stdout: ${(error as Error).message}\n${result.stdout}`);
+  }
 }
 
 liveTest('opens ChatGPT Web, writes through the GitHub app, and reads the result back in a new browser session', () => {
@@ -34,9 +50,21 @@ liveTest('opens ChatGPT Web, writes through the GitHub app, and reads the result
   const targetFile = requiredEnv('REPO_HARNESS_LIVE_CREATE_FILE');
   const app = process.env.REPO_HARNESS_LIVE_CREATE_APP?.trim() || 'GitHub';
 
-  if (!branch.startsWith('agent/')) throw new Error('REPO_HARNESS_LIVE_CREATE_BRANCH must use agent/*');
-  if (branch === defaultBranch) throw new Error('live Create branch must differ from the default branch');
-  if (!/^[0-9a-f]{40}$/i.test(baseCommit)) throw new Error('REPO_HARNESS_LIVE_CREATE_BASE_COMMIT must be a full SHA');
+  if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) {
+    throw new Error('REPO_HARNESS_LIVE_CREATE_REPOSITORY must use owner/name form');
+  }
+  if (!branch.startsWith('agent/')) {
+    throw new Error('REPO_HARNESS_LIVE_CREATE_BRANCH must use agent/*');
+  }
+  if (branch === defaultBranch) {
+    throw new Error('live Create branch must differ from the default branch');
+  }
+  if (!/^[0-9a-f]{40}$/i.test(baseCommit)) {
+    throw new Error('REPO_HARNESS_LIVE_CREATE_BASE_COMMIT must be a full SHA');
+  }
+  if (targetFile === plan || targetFile === contract) {
+    throw new Error('REPO_HARNESS_LIVE_CREATE_FILE must differ from the plan and contract');
+  }
 
   const prompt = [
     `Create only "${targetFile}".`,
@@ -45,7 +73,7 @@ liveTest('opens ChatGPT Web, writes through the GitHub app, and reads the result
     'Commit the change and open a draft pull request.',
   ].join(' ');
 
-  const create = runChatgpt([
+  const create = parseSuccessfulJson(runChatgpt([
     'browser-create',
     '--repo', repoRoot,
     '--chatgpt-app', app,
@@ -57,41 +85,57 @@ liveTest('opens ChatGPT Web, writes through the GitHub app, and reads the result
     '--contract', contract,
     '--prompt', prompt,
     '--draft-pr',
-  ], repoRoot);
+  ], repoRoot), 'browser-create');
 
-  expect(create.status).toBe(0);
-  const created = JSON.parse(create.stdout);
-  expect(created.status).toBe('completed');
-  expect(created.create.outcome).toBe('reported');
-  expect(created.create.reportedGitHub).toMatchObject({
+  expect(create.status).toBe('completed');
+  expect(create.create.outcome).toBe('reported');
+  expect(create.create.reportedGitHub).toMatchObject({
+    trust: 'assistant_reported',
     repository,
     defaultBranch,
     baseCommit: baseCommit.toLowerCase(),
     branch,
     pullRequest: { draft: true, baseBranch: defaultBranch, headBranch: branch },
   });
-  expect(created.create.reportedGitHub.changedFiles).toEqual([targetFile]);
+  expect(create.create.reportedGitHub.changedFiles).toEqual([targetFile]);
 
-  const readBack = runChatgpt([
+  const reported = create.create.reportedGitHub;
+  const readBack = parseSuccessfulJson(runChatgpt([
     'browser-create-readback',
     '--repo', repoRoot,
-    '--session', created.sessionId,
-  ], repoRoot);
+    '--session', create.sessionId,
+  ], repoRoot), 'browser-create-readback');
 
-  expect(readBack.status).toBe(0);
-  const verified = JSON.parse(readBack.stdout);
-  expect(verified.status).toBe('completed');
-  expect(verified.readBackSessionId).not.toBe(created.sessionId);
-  expect(verified.create.readBack).toMatchObject({
+  expect(readBack.status).toBe('completed');
+  expect(readBack.createSessionId).toBe(create.sessionId);
+  expect(readBack.readBackSessionId).not.toBe(create.sessionId);
+  expect(readBack.create.readBack.sessionId).toBe(readBack.readBackSessionId);
+  expect(readBack.create.readBack).toMatchObject({
     outcome: 'matched',
+    requestedApp: app,
     evidence: {
       trust: 'assistant_reported_readback',
       repository,
       defaultBranch,
+      baseCommit: baseCommit.toLowerCase(),
       branch,
+      branchHead: reported.commitSha,
+      commitSha: reported.commitSha,
       commitExists: true,
       changedFiles: [targetFile],
-      comparison: { baseCommit: baseCommit.toLowerCase(), status: 'ahead' },
+      comparison: {
+        baseCommit: baseCommit.toLowerCase(),
+        headCommit: reported.commitSha,
+        status: 'ahead',
+      },
+      pullRequest: {
+        number: reported.pullRequest.number,
+        url: reported.pullRequest.url,
+        draft: true,
+        baseBranch: defaultBranch,
+        headBranch: branch,
+        headSha: reported.commitSha,
+      },
     },
   });
 });
