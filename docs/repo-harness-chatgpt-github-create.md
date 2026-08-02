@@ -46,9 +46,9 @@ are independent and mandatory:
   declared default branch.
 
 The former moving `--base <ref>` input is not accepted by strict Create.
-Before any write, the generated prompt requires the GitHub app to fetch the
+Before any write, the generated prompt instructs the GitHub app to fetch the
 named repository, confirm its actual default branch, and fetch the exact base
-commit. A mismatch must stop without writing.
+commit. A reported mismatch fails closed.
 
 ## Readiness
 
@@ -82,10 +82,10 @@ repo-harness chatgpt browser-create \
   --dry-run
 ```
 
-Replace all example identities with the approved target values. Dry-run
-validates inputs and output policy, builds the fixed prompt, scans the exact
-rendered bundle, records a `mode: "create"` session, and exposes the generated
-Oracle command without opening a browser.
+Replace all example identities with approved target values. Dry-run validates
+inputs and output policy, builds the fixed prompt, scans the exact rendered
+bundle, records a `mode: "create"` session, and exposes the generated Oracle
+command without opening a browser.
 
 Inspect:
 
@@ -122,18 +122,18 @@ repo-harness chatgpt browser-create \
   --draft-pr
 ```
 
-The fixed execution boundary requires the remote app to:
+The fixed execution boundary instructs the remote app to:
 
 - operate only on the exact `owner/name` repository;
-- read repository metadata and the exact base commit before writing;
+- fetch repository metadata and the exact base commit before writing;
 - stop if the actual default branch or base is different;
 - create the dedicated branch directly from the exact base SHA;
 - read existing target files before writing;
 - leave the attached plan and contract unchanged;
 - write only to the dedicated branch and never force-update a ref;
 - avoid unrelated cleanup, dependencies, fallbacks, and refactors;
-- never merge, enable auto-merge, mark ready, comment, submit a review, resolve
-  review threads, or rerun CI;
+- never merge, enable auto-merge, mark ready, resolve review threads, or rerun
+  CI;
 - open a draft pull request only when requested;
 - report only actions and checks supported by direct evidence.
 
@@ -173,22 +173,24 @@ The response must contain exactly one fenced JSON block:
 
 Use `null` for `pullRequest` when no pull request was requested.
 
-The Create contract requires:
+The parser enforces:
 
 - the exact selected app, repository, default branch, base commit, and target
   branch;
-- an implementation SHA different from the base SHA;
-- safe, non-empty changed files that do not include the attached plan or
-  contract;
-- `get_repo` and `fetch_commit` read evidence;
-- `create_branch`, `create_commit`, and `update_ref` write evidence;
-- when `--draft-pr` was requested, `create_pull_request` and matching draft-PR
-  URL, base, head, and head SHA;
-- when no PR was requested, neither PR metadata nor `create_pull_request`.
+- a full implementation SHA different from the base SHA;
+- safe, non-empty changed-file paths;
+- at least one recognized GitHub write action in `toolEvents`;
+- when `--draft-pr` was requested, matching draft-PR URL, base, head, and head
+  SHA;
+- when no PR was requested, no PR object;
+- no reported merge, auto-merge, ready-for-review, thread-resolution, or CI
+  rerun action.
 
-The parser rejects identity mismatches, missing required actions,
-plan/contract changes, contradictory PR evidence, and merge, auto-merge,
-ready-for-review, comment, review, thread-resolution, or CI-rerun actions.
+The prompt requests repository/base reads and a bounded branch/commit/ref
+sequence. Current Oracle output does not provider-attest each ChatGPT tool call,
+so `toolEvents` remains structured assistant-reported evidence rather than an
+independent execution log.
+
 Accepted data is stored under `meta.create.reportedGitHub` with:
 
 ```json
@@ -196,9 +198,6 @@ Accepted data is stored under `meta.create.reportedGitHub` with:
   "trust": "assistant_reported"
 }
 ```
-
-This is a structured Create-session report, not provider-attested GitHub
-telemetry.
 
 ## Independent GitHub read-back
 
@@ -219,9 +218,9 @@ The command:
 2. opens a new Oracle browser session rather than using `--followup`;
 3. selects the same GitHub app;
 4. prohibits all GitHub write actions;
-5. reads repository metadata, base commit, target branch head, implementation
-   commit, comparison, changed files, and PR state;
-6. compares the new report with the Create contract and result;
+5. requests repository metadata, base commit, target branch head,
+   implementation commit, comparison, changed files, and PR state;
+6. compares the new report with the Create context and result;
 7. stores it separately under `meta.create.readBack`.
 
 A successful envelope has this shape:
@@ -265,14 +264,17 @@ A successful envelope has this shape:
 
 A match requires:
 
-- a different `readBackSessionId` from the Create `sessionId`;
+- a new `readBackSessionId` distinct from the Create `sessionId`;
 - the exact repository/default/base/branch/app identity;
 - an existing implementation commit and matching branch head;
-- comparison status `ahead`, `aheadBy >= 1`, and `behindBy = 0`;
+- comparison status `ahead` for the exact base and implementation SHAs;
 - the same changed-file set as the Create result;
 - `get_repo`, `fetch_commit`, and `compare_commits`, plus a PR read action when
   a PR was reported;
-- no write action.
+- no reported write action.
+
+`aheadBy` and `behindBy` are retained as reported diagnostics; the enforced
+comparison gate is the exact base/head pair plus status `ahead`.
 
 A matching result records:
 
@@ -293,9 +295,9 @@ original `reportedGitHub` object.
 
 The second session is independent from the Create conversation, but Oracle does
 not export provider-attested ChatGPT app-selection or tool-call telemetry.
-`assistant_reported_readback` is therefore stronger than Create self-report
-alone but is not equivalent to a direct GitHub API read performed by
-repo-harness. Final Review and human acceptance remain required.
+`assistant_reported_readback` is stronger than Create self-report alone but is
+not equivalent to a direct GitHub API read performed by repo-harness. Final
+Review and human acceptance remain required.
 
 ## Outcomes
 
