@@ -8,7 +8,7 @@ import {
   runBrowserFollowup,
   runBrowserSetup,
 } from '../chatgpt-browser/engine';
-import { runBrowserCreate, runBrowserCreateFollowup } from '../chatgpt-browser/create-mode';
+import { runBrowserCreate, runBrowserCreateFollowup, runBrowserCreateReadBack } from '../chatgpt-browser/create-mode';
 import { cleanupBrowserSessions, listBrowserSessions } from '../chatgpt-browser/session-store';
 import type { BrowserProviderName, BrowserSessionMode, BrowserSessionStatus, NativeBrowserChannel, ThinkingLevel } from '../chatgpt-browser/types';
 import { runChatgptSkillProjection } from '../chatgpt-skill/installer';
@@ -78,11 +78,31 @@ interface BrowserCreateOptions {
   prompt: string;
   file?: string[];
   chatgptApp: string;
-  base: string;
+  repository: string;
+  defaultBranch: string;
+  baseCommit: string;
   branch: string;
   plan: string;
   contract: string;
   draftPr?: boolean;
+  model?: string;
+  thinking?: string;
+  timeoutMs?: string;
+  heartbeat?: string;
+  writeOutput?: string;
+  allowAbsoluteOutput?: boolean;
+  overwriteOutput?: boolean;
+  maxInlineChars?: string;
+  oracleBin?: string;
+  gitleaksBin?: string;
+  dryRun?: boolean;
+}
+
+interface BrowserCreateReadBackOptions {
+  repo: string;
+  session: string;
+  title?: string;
+  chatgptApp?: string;
   model?: string;
   thinking?: string;
   timeoutMs?: string;
@@ -339,12 +359,14 @@ export function buildChatgptCommand(): Command {
 
   chatgpt
     .command('browser-create')
-    .description('Run a first-class GitHub-app-backed Create session through the existing Browser Engine')
-    .requiredOption('--repo <path>', 'Repository root for files and session store')
+    .description('Run a repository-bound GitHub-app-backed Create session through the existing Browser Engine')
+    .requiredOption('--repo <path>', 'Local repository root for files and session storage')
     .requiredOption('--prompt <text>', 'Bounded implementation task appended after the fixed Create contract')
-    .requiredOption('--chatgpt-app <name>', 'Exact installed ChatGPT app name exposing GitHub write tools')
-    .requiredOption('--base <ref>', 'Exact base ref or commit for the dedicated branch')
-    .requiredOption('--branch <name>', 'Dedicated non-default target branch')
+    .requiredOption('--chatgpt-app <name>', 'Exact installed ChatGPT app name exposing GitHub tools')
+    .requiredOption('--repository <owner/name>', 'Exact remote GitHub repository; never inferred from the local path')
+    .requiredOption('--default-branch <name>', 'Actual remote default branch, verified by the GitHub app before writes')
+    .requiredOption('--base-commit <sha>', 'Exact 40-character commit SHA used to create the dedicated branch')
+    .requiredOption('--branch <name>', 'Dedicated agent/* target branch')
     .requiredOption('--plan <path>', 'Repo-relative approved plan path')
     .requiredOption('--contract <path>', 'Repo-relative approved task-contract path')
     .option('--title <title>', 'Session title slug')
@@ -368,7 +390,9 @@ export function buildChatgptCommand(): Command {
           title: rawOpts.title,
           prompt: rawOpts.prompt,
           chatgptApp: rawOpts.chatgptApp,
-          baseRef: rawOpts.base,
+          repository: rawOpts.repository,
+          defaultBranch: rawOpts.defaultBranch,
+          baseCommit: rawOpts.baseCommit,
           targetBranch: rawOpts.branch,
           planPath: rawOpts.plan,
           contractPath: rawOpts.contract,
@@ -396,6 +420,50 @@ export function buildChatgptCommand(): Command {
           dryRun: result.dryRun,
           error: result.error,
         }, null, 2));
+        if (result.status === 'failed' || result.status === 'surface_blocked') process.exitCode = 2;
+      });
+    });
+
+  chatgpt
+    .command('browser-create-readback')
+    .alias('browser-create-verify')
+    .description('Open a new read-only GitHub-app browser session and compare actual GitHub state with a Create result')
+    .requiredOption('--repo <path>', 'Local repository root containing the Create session')
+    .requiredOption('--session <session-id>', 'Completed Create session to read back')
+    .option('--title <title>', 'Read-back session title slug')
+    .option('--chatgpt-app <name>', 'Exact app name; defaults to the Create session app')
+    .option('--model <label>', 'Requested ChatGPT model label')
+    .option('--thinking <level>', 'Thinking level: light|standard|extended|heavy')
+    .option('--timeout-ms <ms>', 'Assistant timeout in milliseconds')
+    .option('--heartbeat <seconds>', 'Oracle provider heartbeat interval in seconds; 0 disables heartbeat (default: 59)')
+    .option('--max-inline-chars <chars>', 'Maximum inline chars per file', '120000')
+    .option('--write-output <path>', 'Repo-relative read-back report path; defaults under .ai/harness/handoff/chatgpt')
+    .option('--allow-absolute-output', 'Permit --write-output to target an absolute path')
+    .option('--overwrite-output', 'Allow --write-output to replace an existing file')
+    .option('--oracle-bin <path>', 'Explicit Oracle binary path')
+    .option('--gitleaks-bin <path>', 'Explicit trusted Gitleaks binary; read-back always requires secret scanning')
+    .option('--dry-run', 'Build and scan the independent read-back prompt without opening a browser')
+    .action((rawOpts: BrowserCreateReadBackOptions) => {
+      void runChatgptAction(async () => {
+        const result = await runBrowserCreateReadBack({
+          repoRoot: resolveRepoRoot(rawOpts.repo),
+          sessionId: rawOpts.session,
+          title: rawOpts.title,
+          chatgptApp: rawOpts.chatgptApp,
+          model: rawOpts.model,
+          thinking: parseThinking(rawOpts.thinking),
+          timeoutMs: parsePositiveInteger('timeout-ms', rawOpts.timeoutMs),
+          heartbeatSeconds: parseNonNegativeInteger('heartbeat', rawOpts.heartbeat),
+          writeOutput: rawOpts.writeOutput,
+          allowAbsoluteOutput: rawOpts.allowAbsoluteOutput === true,
+          overwriteOutput: rawOpts.overwriteOutput === true,
+          maxInlineChars: parsePositiveInteger('max-inline-chars', rawOpts.maxInlineChars),
+          oracleBin: rawOpts.oracleBin,
+          gitleaksBin: rawOpts.gitleaksBin,
+          dryRun: rawOpts.dryRun === true,
+          provider: 'oracle',
+        });
+        console.log(JSON.stringify(result, null, 2));
         if (result.status === 'failed' || result.status === 'surface_blocked') process.exitCode = 2;
       });
     });
