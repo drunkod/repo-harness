@@ -7,10 +7,12 @@ const PACKAGE_ROOT = join(ROOT, "assets", "skills", "repo-harness-chatgpt");
 const ROUTER = join(PACKAGE_ROOT, "SKILL.md");
 const CREATE = join(PACKAGE_ROOT, "references", "create.md");
 const DOC = join(ROOT, "docs", "repo-harness-chatgpt-github-create.md");
+const ENGINE_DOC = join(ROOT, "docs", "repo-harness-chatgpt-browser-engine.md");
 const RUNTIME = join(ROOT, "src", "cli", "chatgpt-browser", "create-mode.ts");
 const TYPES = join(ROOT, "src", "cli", "chatgpt-browser", "types.ts");
 const COMMAND = join(ROOT, "src", "cli", "commands", "chatgpt.ts");
 const RUNTIME_TEST = join(ROOT, "tests", "cli", "chatgpt-browser-create.test.ts");
+const READBACK_TEST = join(ROOT, "tests", "cli", "chatgpt-browser-create-readback.test.ts");
 const LIVE_TEST = join(ROOT, "tests", "live", "chatgpt-browser-create.live.test.ts");
 const MANIFEST = join(ROOT, "assets", "skill-commands", "manifest.json");
 
@@ -101,12 +103,18 @@ describe("repo-harness-chatgpt strict Create mode", () => {
 
   test("unit and opt-in live integration tests cover the browser-app chain", () => {
     const runtimeTest = readFileSync(RUNTIME_TEST, "utf-8");
+    const readBackTest = readFileSync(READBACK_TEST, "utf-8");
     const liveTest = readFileSync(LIVE_TEST, "utf-8");
 
     expect(runtimeTest).toContain("--browser-app");
     expect(runtimeTest).toContain("browser-create-readback");
     expect(runtimeTest).toContain("not.toContain('--followup')");
     expect(runtimeTest).toContain("CREATE_READBACK_MISMATCH");
+
+    expect(readBackTest).toContain("CREATE_READBACK_RESULT_REQUIRED");
+    expect(readBackTest).toContain("CREATE_READBACK_SURFACE_BLOCKED");
+    expect(readBackTest).toContain("readBackSessionId");
+    expect(readBackTest).toContain("without overwriting Create evidence");
 
     expect(liveTest).toContain("REPO_HARNESS_LIVE_CHATGPT_CREATE");
     expect(liveTest).toContain("test.skip");
@@ -118,13 +126,18 @@ describe("repo-harness-chatgpt strict Create mode", () => {
     expect(liveTest).toContain("readBack.create.readBack.sessionId");
   });
 
-  test("published guide is neutral, complete, and maps reusable tests", () => {
+  test("published guides have one ownership boundary and neutral examples", () => {
     const packageJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf-8"));
+    expect(packageJson.files).toContain("docs/repo-harness-chatgpt-browser-engine.md");
     expect(packageJson.files).toContain("docs/repo-harness-chatgpt-github-create.md");
     expect(packageJson.scripts["test:live:chatgpt-create"]).toContain("chatgpt-browser-create.live.test.ts");
 
     const guide = readFileSync(DOC, "utf-8");
+    const engineGuide = readFileSync(ENGINE_DOC, "utf-8");
     expect(guide).toContain("[ChatGPT Browser Engine](./repo-harness-chatgpt-browser-engine.md)");
+    expect(engineGuide).toContain("[ChatGPT + GitHub App Create](./repo-harness-chatgpt-github-create.md)");
+    expect(engineGuide).toContain("planning, bounded GitHub Create, and review workflows");
+    expect(engineGuide).toContain("Create and Create read-back are not exposed as MCP tools");
     expect(guide).toContain("--repository owner/repository");
     expect(guide).not.toContain("--repository drunkod/repo-harness");
     expect(guide).toContain("browser-create-readback");
@@ -159,7 +172,7 @@ describe("repo-harness-chatgpt strict Create mode", () => {
       "delegate_to",
     ];
     const violations: string[] = [];
-    for (const path of [CREATE, DOC]) {
+    for (const path of [CREATE, DOC, ENGINE_DOC]) {
       const content = readFileSync(path, "utf-8");
       const lower = content.toLowerCase();
       for (const pattern of stalePatterns) {
