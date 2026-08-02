@@ -31,9 +31,9 @@ Never infer the remote repository from the local path. Never accept a moving
 base ref. The target branch must start with `agent/` and differ from the actual
 default branch.
 
-Before any write, the GitHub app must read repository metadata, confirm the
-actual default branch, and fetch the exact base commit. Any mismatch stops
-without a write.
+Before any write, the GitHub app is instructed to read repository metadata,
+confirm the actual default branch, and fetch the exact base commit. Any
+reported identity mismatch fails closed.
 
 ## Dry run
 
@@ -59,22 +59,19 @@ commit, and target branch.
 
 ## Write boundary
 
-Create must:
+Create instructs the app to:
 
 - operate only on the exact `owner/name`;
-- report `get_repo` and `fetch_commit` before its write actions;
 - create the `agent/*` branch directly from the exact base SHA;
-- report `create_branch`, `create_commit`, and `update_ref`;
 - read before writing;
 - stay inside the approved plan and contract;
 - never modify the plan or contract;
 - never write to the default or another branch;
 - never force-update a ref;
 - avoid unrelated work;
-- never merge, enable auto-merge, mark ready, comment, review, resolve review
-  threads, or rerun CI;
-- report `create_pull_request` and matching draft-PR metadata only when a draft
-  PR was requested.
+- never merge, enable auto-merge, mark ready, resolve review threads, or rerun
+  CI;
+- open a draft PR only when requested.
 
 ## Create result
 
@@ -86,16 +83,20 @@ Require exactly one `repo-harness-create-result` JSON block containing:
 - exact base commit;
 - exact target branch;
 - a different full implementation commit SHA;
-- safe non-empty changed files that exclude the attached plan and contract;
-- the required repository/base read actions and branch/commit/ref write actions;
-- when requested, `create_pull_request` plus a draft PR with matching URL, base,
-  head, and head SHA.
+- safe non-empty changed files;
+- reported tool events containing at least one recognized GitHub write action;
+- when requested, a draft PR with matching URL, base, head, and head SHA.
 
 Store accepted data under `meta.create.reportedGitHub` with
-`trust: "assistant_reported"`. Reject any repository/default/base/branch
-mismatch, missing required action, contradictory PR event, plan/contract change,
-or merge, auto-merge, ready, comment, review, thread-resolution, or CI-rerun
-action as `CREATE_SURFACE_BLOCKED`.
+`trust: "assistant_reported"`. Reject repository/default/base/branch/app
+mismatches, an implementation SHA equal to the base, unsafe or empty changed
+files, missing write evidence, a mismatched requested draft PR, an unrequested
+PR object, and reported merge, auto-merge, ready, thread-resolution, or CI-rerun
+actions as `CREATE_SURFACE_BLOCKED`.
+
+The prompt asks for repository/base reads and a bounded branch/commit/ref
+sequence, but current Oracle output does not provider-attest individual ChatGPT
+tool calls. Treat `toolEvents` as structured assistant-reported evidence.
 
 ## Independent read-back
 
@@ -109,8 +110,8 @@ repo-harness chatgpt browser-create-readback \
 
 `browser-create-verify` is an alias.
 
-Read-back must open a new browser session, select the same GitHub app, prohibit
-all writes, and read:
+Read-back opens a new browser session, selects the same GitHub app, prohibits
+all writes, and requests:
 
 - repository metadata and actual default branch;
 - exact base commit;
@@ -124,10 +125,10 @@ Compare the read-back result with the frozen Create context and
 `reportedGitHub`. Store it separately under `meta.create.readBack` with
 `trust: "assistant_reported_readback"`.
 
-A match requires the implementation to be strictly ahead of the exact base
-(`aheadBy >= 1`, `behindBy = 0`), the same changed-file set, and all required
-read actions. `mismatch` or malformed output fails closed. It does not erase or
-rewrite the original Create report.
+A match requires the exact identity and commit, comparison status `ahead`, the
+same changed-file set, the required read actions, matching PR state when a PR
+was reported, and no reported write action. `mismatch` or malformed output
+fails closed without erasing the original Create report.
 
 Oracle does not yet export provider-attested GitHub tool telemetry, so neither
 trust label is direct API proof. Final Review and human acceptance remain
