@@ -14,6 +14,33 @@ const RUNTIME_TEST = join(ROOT, "tests", "cli", "chatgpt-browser-create.test.ts"
 const LIVE_TEST = join(ROOT, "tests", "live", "chatgpt-browser-create.live.test.ts");
 const MANIFEST = join(ROOT, "assets", "skill-commands", "manifest.json");
 
+const CREATE_FAILURE_CODES = [
+  "CREATE_APP_REQUIRED",
+  "CREATE_REPOSITORY_REQUIRED",
+  "CREATE_REPOSITORY_INVALID",
+  "CREATE_DEFAULT_BRANCH_REQUIRED",
+  "CREATE_DEFAULT_BRANCH_INVALID",
+  "CREATE_BASE_COMMIT_REQUIRED",
+  "CREATE_BASE_COMMIT_INVALID",
+  "CREATE_BRANCH_REQUIRED",
+  "CREATE_BRANCH_INVALID",
+  "CREATE_BRANCH_PREFIX_REQUIRED",
+  "CREATE_DEFAULT_BRANCH_REJECTED",
+  "CREATE_PLAN_REQUIRED",
+  "CREATE_PLAN_NOT_FOUND",
+  "CREATE_CONTRACT_REQUIRED",
+  "CREATE_CONTRACT_NOT_FOUND",
+  "CREATE_PROVIDER_UNSUPPORTED",
+  "CREATE_ORACLE_NOT_INSTALLED",
+  "ORACLE_APP_PRESELECT_UNSUPPORTED",
+  "CREATE_SURFACE_BLOCKED",
+  "CREATE_READBACK_MODE_MISMATCH",
+  "CREATE_READBACK_RESULT_REQUIRED",
+  "CREATE_READBACK_APP_MISMATCH",
+  "CREATE_READBACK_MISMATCH",
+  "CREATE_READBACK_SURFACE_BLOCKED",
+] as const;
+
 function hasStandaloneName(content: string, name: string): boolean {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(`(?<![A-Za-z0-9_-])${escaped}(?![A-Za-z0-9_-])`, "u").test(content);
@@ -29,7 +56,7 @@ describe("repo-harness-chatgpt strict Create mode", () => {
     expect(statSync(ROUTER).size).toBeLessThanOrEqual(2048);
   });
 
-  test("Create has one canonical reference home", () => {
+  test("Create has one canonical reference home and a declared closed-set entry", () => {
     expect(existsSync(CREATE)).toBe(true);
     expect(existsSync(join(PACKAGE_ROOT, "create.md"))).toBe(false);
     const packageTest = readFileSync(join(ROOT, "tests", "skill-surface", "chatgpt-package.test.ts"), "utf-8");
@@ -43,27 +70,31 @@ describe("repo-harness-chatgpt strict Create mode", () => {
       expect(protocol).toContain(flag);
     }
     expect(protocol).toContain("Never infer the remote repository");
-    expect(protocol).toContain("moving base ref");
+    expect(protocol).toContain("moving\nbase ref");
     expect(protocol).toContain("agent/");
     expect(protocol).toContain('trust: "assistant_reported"');
+    expect(protocol).toContain('trust: "assistant_reported_readback"');
+    expect(protocol).toContain("provider-attest individual ChatGPT");
   });
 
-  test("runtime validates strict target identity and a separate read-back envelope", () => {
+  test("runtime validates strict target identity and exposes a separate read-back envelope", () => {
     const runtime = readFileSync(RUNTIME, "utf-8");
     const types = readFileSync(TYPES, "utf-8");
     const command = readFileSync(COMMAND, "utf-8");
+
     expect(command).toContain("browser-create-readback");
     expect(command).toContain("browser-create-verify");
     expect(command).toContain("--repository <owner/name>");
     expect(command).toContain("--default-branch <name>");
     expect(command).toContain("--base-commit <sha>");
     expect(command).not.toContain("--base <ref>");
-    expect(runtime).toContain("CREATE_REPOSITORY_INVALID");
-    expect(runtime).toContain("CREATE_BASE_COMMIT_INVALID");
-    expect(runtime).toContain("CREATE_BRANCH_PREFIX_REQUIRED");
-    expect(runtime).toContain("CREATE_READBACK_MISMATCH");
+
+    for (const code of CREATE_FAILURE_CODES) {
+      expect(runtime, `runtime is missing ${code}`).toContain(code);
+    }
     expect(runtime).toContain("repo-harness-create-readback-result");
     expect(runtime).toContain("Do not use any GitHub write action");
+    expect(runtime).toContain("readBackSessionId: result.sessionId");
     expect(types).toContain("assistant_reported_readback");
     expect(types).toContain("BrowserCreateReadBackMeta");
   });
@@ -71,26 +102,47 @@ describe("repo-harness-chatgpt strict Create mode", () => {
   test("unit and opt-in live integration tests cover the browser-app chain", () => {
     const runtimeTest = readFileSync(RUNTIME_TEST, "utf-8");
     const liveTest = readFileSync(LIVE_TEST, "utf-8");
+
     expect(runtimeTest).toContain("--browser-app");
     expect(runtimeTest).toContain("browser-create-readback");
     expect(runtimeTest).toContain("not.toContain('--followup')");
     expect(runtimeTest).toContain("CREATE_READBACK_MISMATCH");
+
     expect(liveTest).toContain("REPO_HARNESS_LIVE_CHATGPT_CREATE");
+    expect(liveTest).toContain("test.skip");
     expect(liveTest).toContain("browser-create");
     expect(liveTest).toContain("browser-create-readback");
     expect(liveTest).toContain("--draft-pr");
+    expect(liveTest).toContain("readBack.createSessionId");
+    expect(liveTest).toContain("readBack.readBackSessionId");
+    expect(liveTest).toContain("readBack.create.readBack.sessionId");
   });
 
-  test("published guide documents strict Create, read-back, and the live smoke test", () => {
+  test("published guide is neutral, complete, and maps reusable tests", () => {
     const packageJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf-8"));
     expect(packageJson.files).toContain("docs/repo-harness-chatgpt-github-create.md");
     expect(packageJson.scripts["test:live:chatgpt-create"]).toContain("chatgpt-browser-create.live.test.ts");
+
     const guide = readFileSync(DOC, "utf-8");
     expect(guide).toContain("[ChatGPT Browser Engine](./repo-harness-chatgpt-browser-engine.md)");
-    expect(guide).toContain("--repository drunkod/repo-harness");
+    expect(guide).toContain("--repository owner/repository");
+    expect(guide).not.toContain("--repository drunkod/repo-harness");
     expect(guide).toContain("browser-create-readback");
     expect(guide).toContain("assistant_reported_readback");
     expect(guide).toContain("Live browser and GitHub-app acceptance test");
+    expect(guide).toContain("## Reusable test map");
+    for (const path of [
+      "tests/cli/chatgpt-browser.test.ts",
+      "tests/cli/chatgpt-browser-create.test.ts",
+      "tests/skill-surface/chatgpt-package.test.ts",
+      "tests/skill-surface/retired-names-scan.test.ts",
+      "tests/live/chatgpt-browser-create.live.test.ts",
+    ]) {
+      expect(guide).toContain(path);
+    }
+    for (const code of CREATE_FAILURE_CODES) {
+      expect(guide, `guide is missing ${code}`).toContain(code);
+    }
   });
 
   test("new Create documentation contains no retired package names or stale patterns", () => {
