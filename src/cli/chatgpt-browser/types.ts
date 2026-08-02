@@ -16,7 +16,9 @@ export interface BrowserFileInput {
 }
 
 export interface BrowserCreateSessionContext {
-  baseRef: string;
+  repository: string;
+  defaultBranch: string;
+  baseCommit: string;
   targetBranch: string;
   planPath: string;
   contractPath: string;
@@ -31,17 +33,64 @@ export interface BrowserCreatePullRequestEvidence {
   number?: number;
   url?: string;
   draft?: boolean;
+  baseBranch?: string;
+  headBranch?: string;
+  headSha?: string;
 }
 
 export interface BrowserCreateReportedGitHubEvidence {
   trust: 'assistant_reported';
   repository: string;
+  defaultBranch: string;
   baseCommit: string;
   branch: string;
   commitSha: string;
   pullRequest?: BrowserCreatePullRequestEvidence;
   changedFiles: string[];
   toolEvents: string[];
+}
+
+export type BrowserCreateReadBackOutcome =
+  | 'dry_run'
+  | 'matched'
+  | 'mismatch'
+  | 'surface_blocked'
+  | 'provider_failed'
+  | 'recoverable';
+
+export interface BrowserCreateComparisonEvidence {
+  baseCommit: string;
+  headCommit: string;
+  status: 'ahead' | 'identical' | 'diverged';
+  aheadBy?: number;
+  behindBy?: number;
+}
+
+export interface BrowserCreateReadBackEvidence {
+  trust: 'assistant_reported_readback';
+  repository: string;
+  defaultBranch: string;
+  baseCommit: string;
+  branch: string;
+  branchHead: string;
+  commitSha: string;
+  commitExists: boolean;
+  pullRequest?: BrowserCreatePullRequestEvidence;
+  changedFiles: string[];
+  comparison: BrowserCreateComparisonEvidence;
+  readActions: string[];
+}
+
+export interface BrowserCreateReadBackMeta {
+  sessionId: string;
+  outcome: BrowserCreateReadBackOutcome;
+  requestedApp: string;
+  evidence?: BrowserCreateReadBackEvidence;
+  error?: {
+    code: string;
+    message: string;
+    recovery?: string;
+  };
 }
 
 export interface BrowserCreateSessionMeta extends BrowserCreateSessionContext {
@@ -53,6 +102,7 @@ export interface BrowserCreateSessionMeta extends BrowserCreateSessionContext {
     source: 'oracle_request_only';
   };
   reportedGitHub?: BrowserCreateReportedGitHubEvidence;
+  readBack?: BrowserCreateReadBackMeta;
 }
 
 export interface BrowserConsultInput {
@@ -96,13 +146,35 @@ export interface BrowserCreateInput extends Omit<
   'chatgptApp' | 'files' | 'provider' | 'requireSecretScan' | 'sessionMode' | 'createContext'
 > {
   chatgptApp: string;
-  baseRef: string;
+  repository: string;
+  defaultBranch: string;
+  baseCommit: string;
   targetBranch: string;
   planPath: string;
   contractPath: string;
   draftPr?: boolean;
   files?: BrowserFileInput[];
   provider?: 'oracle';
+}
+
+export interface BrowserCreateReadBackInput extends Omit<
+  BrowserConsultInput,
+  'prompt' | 'files' | 'followups' | 'provider' | 'sourceSessionId' | 'providerSessionId' | 'parentProviderSessionId'
+> {
+  sessionId: string;
+  chatgptApp?: string;
+  provider?: 'oracle';
+}
+
+export interface BrowserCreateReadBackResult {
+  createSessionId: string;
+  readBackSessionId: string;
+  status: BrowserSessionStatus;
+  paths: BrowserSessionPaths;
+  meta: BrowserSessionMeta;
+  create: BrowserCreateSessionMeta;
+  dryRun?: BrowserConsultResult['dryRun'];
+  error?: BrowserConsultResult['error'];
 }
 
 export interface BrowserImportedArtifact {
