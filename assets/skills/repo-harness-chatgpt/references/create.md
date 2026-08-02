@@ -1,45 +1,49 @@
 # Create Mode: ChatGPT Web + GitHub App
 
-Create is the first-class mutating ChatGPT Browser mode. It opens ChatGPT Web
-through Oracle, requests the named GitHub app, attaches the approved plan and
-task contract, and asks ChatGPT to perform bounded GitHub writes.
+Create is the only mutating ChatGPT Browser mode. It reuses the Oracle Browser
+Engine, selects the named GitHub app, attaches the approved plan and contract,
+and performs bounded writes.
 
-Use the dedicated command:
+Use:
 
 ```bash
 repo-harness chatgpt browser-create
 ```
 
 Do not emulate Create with a hand-written `browser-consult` prompt. Plan and
-Review remain non-mutating consult sessions; Create has typed metadata,
-preconditions, mandatory egress scanning, and result classification.
+Review remain non-mutating.
 
-## Required inputs
+## Required target identity
 
-Create requires all of these:
+Require all of:
 
-- `--repo <path>`: local adopted repository root and session store;
-- `--chatgpt-app <name>`: exact installed ChatGPT app name;
-- `--base <ref>`: exact base ref or commit;
-- `--branch <name>`: dedicated non-default branch;
-- `--plan <path>`: repo-relative approved plan;
-- `--contract <path>`: repo-relative approved task contract;
-- `--prompt <text>`: bounded implementation request.
+- `--repo <path>` for the local session store;
+- `--chatgpt-app <name>`;
+- `--repository <owner/name>`;
+- `--default-branch <name>`;
+- `--base-commit <40-character SHA>`;
+- `--branch <agent/name>`;
+- `--plan <repo-relative path>`;
+- `--contract <repo-relative path>`;
+- `--prompt <bounded task>`.
 
-The plan and contract must exist before any provider activity. The target
-branch must differ from the base and cannot be `main` or `master`.
+Never infer the remote repository from the local path. Never accept a moving
+base ref. The target branch must start with `agent/` and differ from the actual
+default branch.
+
+Before any write, the GitHub app must read repository metadata, confirm the
+actual default branch, and fetch the exact base commit. Any mismatch stops
+without a write.
 
 ## Dry run
-
-Create always requires the normal fail-closed Gitleaks scan. Dry-run builds and
-scans the exact prompt bundle, records a `mode=create` session, and shows the
-Oracle command without opening a browser.
 
 ```bash
 repo-harness chatgpt browser-create \
   --repo . \
   --chatgpt-app GitHub \
-  --base main \
+  --repository drunkod/repo-harness \
+  --default-branch main \
+  --base-commit 01c821d121577c461aea4fc9373ad5090ec3bdda \
   --branch agent/example-change \
   --plan plans/plan-example-change.md \
   --contract tasks/contracts/example-change.contract.md \
@@ -48,145 +52,90 @@ repo-harness chatgpt browser-create \
   --dry-run
 ```
 
-Inspect:
+Dry-run must show `--browser-app <name>`, a passed Gitleaks receipt, and
+`meta.create` containing repository, default branch, exact base commit, and
+target branch.
 
-- `prompt.md`;
-- the attached-file manifest;
-- `dryRun.command`, including `--browser-app <name>`;
-- the secret-scan receipt;
-- `meta.json`, including `mode: "create"` and the Create context.
+## Write boundary
 
-A dry run does not prove that the installed Oracle can find the app in the
-live ChatGPT interface. The real command probes the Oracle binary for
-`--browser-app` support before browser launch.
+Create must:
 
-## Real run
-
-```bash
-repo-harness chatgpt browser-create \
-  --repo . \
-  --chatgpt-app GitHub \
-  --base main \
-  --branch agent/example-change \
-  --plan plans/plan-example-change.md \
-  --contract tasks/contracts/example-change.contract.md \
-  --prompt "Implement the approved contract." \
-  --draft-pr
-```
-
-Optional flags include additional `--file` inputs, model/thinking selection,
-Oracle and Gitleaks binary overrides, timeouts, heartbeat, and an explicit
-`--write-output` Creation Report path.
-
-When no output path is supplied, Create allocates a timestamped path under:
-
-```text
-.ai/harness/handoff/chatgpt/create-<timestamp>-<branch>.md
-```
-
-## Fixed execution boundary
-
-`browser-create` builds this boundary internally; the operator does not need to
-remember or paste it:
-
-- the approved task contract is authoritative;
+- operate only on the exact `owner/name`;
+- create the `agent/*` branch directly from the exact base SHA;
 - read before writing;
-- create and work only on the dedicated branch from the exact base;
-- do not modify the plan or contract;
-- do not write to the default branch;
-- do not force-update refs;
-- do not add unrelated cleanup, dependencies, fallbacks, or refactors;
-- do not merge, enable auto-merge, mark a PR ready, resolve review threads, or
-  rerun CI;
-- do not claim checks ran without direct evidence.
+- stay inside the approved plan and contract;
+- never modify plan or contract;
+- never write to the default or another branch;
+- never force-update a ref;
+- avoid unrelated work;
+- never merge, enable auto-merge, mark ready, resolve review threads, or rerun
+  CI;
+- open a draft PR only when requested.
 
-These are still instructions to the remote ChatGPT app. Repo-harness does not
-intercept GitHub tool calls, so human and Review verification remain required.
+## Create result
 
-## Structured result envelope
+Require exactly one `repo-harness-create-result` JSON block containing:
 
-Create requires the assistant response to end with exactly one fenced JSON
-block named `repo-harness-create-result`:
+- exact selected app;
+- exact repository;
+- exact default branch;
+- exact base commit;
+- exact target branch;
+- a different full implementation commit SHA;
+- safe non-empty changed files;
+- actual tool events;
+- when requested, a draft PR with matching URL, base, head, and head SHA.
 
-```repo-harness-create-result
-{
-  "selectedApp": "GitHub",
-  "repository": "owner/name",
-  "baseCommit": "<full commit SHA>",
-  "branch": "agent/example-change",
-  "commitSha": "<full commit SHA>",
-  "pullRequest": {
-    "number": 123,
-    "url": "https://github.com/owner/name/pull/123",
-    "draft": true
-  },
-  "changedFiles": ["path/to/file"],
-  "toolEvents": ["create_branch", "create_commit", "update_ref"]
-}
-```
+Store accepted data under `meta.create.reportedGitHub` with
+`trust: "assistant_reported"`. Reject any repository/default/base/branch
+mismatch and any merge, auto-merge, ready, thread-resolution, or CI-rerun
+action as `CREATE_SURFACE_BLOCKED`.
 
-Use `null` for `pullRequest` when no PR was requested.
+## Independent read-back
 
-Repo-harness parses this envelope into `meta.create.reportedGitHub`, separate
-from the raw assistant output. The evidence is explicitly marked:
-
-```json
-{
-  "trust": "assistant_reported"
-}
-```
-
-It is not independent proof that the GitHub app was selected or that the tool
-calls occurred. `appSelection.verified` remains `false` until a future provider
-can export structured ChatGPT tool telemetry.
-
-## Outcomes
-
-A Create session records one of these outcomes:
-
-- `dry_run`: prompt, inputs, app request, and scan receipt were recorded;
-- `reported`: one valid result envelope matched the requested branch and
-  contained at least one GitHub write action;
-- `surface_blocked`: Oracle completed, but the response lacked usable evidence,
-  reported the wrong branch/app, or contained no write action;
-- `recoverable`: provider capture may be incomplete; continue the same session;
-- `provider_failed`: provider execution failed before a usable result.
-
-`surface_blocked` is also a browser session status, so it is visible in
-`browser-list`, `browser-session --metadata-only`, and cleanup status filters.
-
-List only Create sessions:
+After a reported Create result, run:
 
 ```bash
-repo-harness chatgpt browser-list --repo . --mode create --json
+repo-harness chatgpt browser-create-readback \
+  --repo . \
+  --session <create-session-id>
 ```
 
-## Fail-closed behavior
+`browser-create-verify` is an alias.
 
-Create stops before browser launch when:
+Read-back must open a new browser session, select the same GitHub app, prohibit
+all writes, and read:
 
-- a required input is missing;
-- the plan or contract does not exist or escapes the repository;
-- the target is a default/base branch;
-- Oracle is unavailable;
-- Oracle does not advertise `--browser-app`;
-- the exact prompt bundle fails secret scanning;
-- the output target is denied or already exists.
+- repository metadata and actual default branch;
+- exact base commit;
+- target branch head;
+- implementation commit;
+- base/head comparison;
+- changed files;
+- draft PR state when present.
 
-If the provider returns `ORACLE_CAPTURE_INCOMPLETE`, inspect GitHub state before
-retrying because writes may already have happened. Continue the saved provider
-session instead of submitting the Create request again from zero.
+Compare the read-back result with the frozen Create context and
+`reportedGitHub`. Store it separately under `meta.create.readBack` with
+`trust: "assistant_reported_readback"`.
 
-## Review handoff
+`matched` means the second session reported consistent GitHub state.
+`mismatch` or malformed output fails closed. It does not erase or rewrite the
+original Create report.
 
-Create never reviews or accepts its own work. Give a new Review session:
+Oracle does not yet export provider-attested GitHub tool telemetry, so neither
+trust label is direct API proof. Final Review and human acceptance remain
+required.
 
-- approved plan and contract;
-- base and implementation commits;
-- changed-file list and PR patch;
-- CI/status evidence;
-- Creation Report;
-- `meta.create.reportedGitHub`, with its assistant-reported trust label.
+## Live acceptance
 
-A human remains the authority for comments, thread resolution, ready-for-review,
-merge, deployment, and rollback decisions.
+The default unit suite uses fake Oracle and Gitleaks binaries. The opt-in live
+test is:
+
+```bash
+bun run test:live:chatgpt-create
+```
+
+It requires `REPO_HARNESS_LIVE_CHATGPT_CREATE=1` plus explicit repository,
+default branch, base commit, branch, plan, contract, and smoke-test file
+environment variables. It performs one bounded write and a new-session
+read-back. It never merges or removes remote state.
