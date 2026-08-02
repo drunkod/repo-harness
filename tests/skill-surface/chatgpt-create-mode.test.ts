@@ -90,7 +90,7 @@ describe("repo-harness-chatgpt strict Create mode", () => {
     expect(command).not.toContain("--base <ref>");
 
     for (const code of CREATE_FAILURE_CODES) {
-      expect(runtime, `runtime is missing ${code}`).toContain(code);
+      expect(runtime).toContain(code);
     }
     expect(runtime).toContain("repo-harness-create-readback-result");
     expect(runtime).toContain("Do not use any GitHub write action");
@@ -141,7 +141,7 @@ describe("repo-harness-chatgpt strict Create mode", () => {
       expect(guide).toContain(path);
     }
     for (const code of CREATE_FAILURE_CODES) {
-      expect(guide, `guide is missing ${code}`).toContain(code);
+      expect(guide).toContain(code);
     }
   });
 
