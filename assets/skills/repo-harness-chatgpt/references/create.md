@@ -1,8 +1,9 @@
 # Create Mode: ChatGPT Web + GitHub App
 
-Create is the only mutating ChatGPT Browser mode. It reuses the Oracle Browser
-Engine, selects the named GitHub app, attaches the approved plan and contract,
-and performs bounded writes.
+Create is the only mutating ChatGPT Browser mode. It reuses the same Oracle
+Browser Engine transport as Plan and Review, names the expected GitHub app in
+the fixed prompt contract, attaches the approved plan and contract, and
+performs bounded writes.
 
 Use:
 
@@ -53,9 +54,10 @@ repo-harness chatgpt browser-create \
 ```
 
 Replace the repository, branch, base SHA, plan, and contract with the approved
-target values. Dry-run must show `--browser-app <name>`, a passed Gitleaks
-receipt, and `meta.create` containing repository, default branch, exact base
-commit, and target branch.
+target values. Dry-run must not show `--browser-app`; `paths.prompt` must name
+the expected app and require a no-write stop when that app or its tools are
+unavailable. It must also show a passed Gitleaks receipt and `meta.create`
+containing repository, default branch, exact base commit, and target branch.
 
 ## Write boundary
 
@@ -110,8 +112,8 @@ repo-harness chatgpt browser-create-readback \
 
 `browser-create-verify` is an alias.
 
-Read-back opens a new browser session, selects the same GitHub app, prohibits
-all writes, and requests:
+Read-back opens a new browser session, names the same expected GitHub app in its
+prompt contract, prohibits all writes, and requests:
 
 - repository metadata and actual default branch;
 - exact base commit;
@@ -130,9 +132,9 @@ same changed-file set, the required read actions, matching PR state when a PR
 was reported, and no reported write action. `mismatch` or malformed output
 fails closed without erasing the original Create report.
 
-Oracle does not yet export provider-attested GitHub tool telemetry, so neither
-trust label is direct API proof. Final Review and human acceptance remain
-required.
+Oracle does not export provider-attested app-selection or GitHub tool telemetry,
+so neither trust label is direct API proof. Final Review and human acceptance
+remain required.
 
 ## Live acceptance
 

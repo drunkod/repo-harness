@@ -1,10 +1,11 @@
 # ChatGPT + GitHub App Create
 
 `repo-harness chatgpt browser-create` is the first-class repo-harness mode for
-bounded GitHub writes through a selected ChatGPT app.
+bounded GitHub writes through a connected ChatGPT app named by the fixed
+prompt contract.
 
 General browser transport, Oracle resolution, profile binding, doctor output,
-app preselection, secret scanning, session storage, continuation, cleanup, and
+secret scanning, session storage, continuation, cleanup, and
 file policy remain canonical in the
 [ChatGPT Browser Engine](./repo-harness-chatgpt-browser-engine.md). This guide
 owns only the Create-specific target, write, result, and independent read-back
@@ -12,14 +13,16 @@ contracts.
 
 ```text
 Plan      = browser-consult + non-mutating planning prompt
-Create    = browser-create + selected GitHub app + bounded write contract
+Create    = browser-create + named GitHub app prompt contract + bounded write contract
 Read-back = browser-create-readback + new read-only GitHub-app browser session
 Review    = browser-consult + independent review prompt
 ```
 
 Create does not add another browser engine, store GitHub credentials, or
-implement a GitHub API client inside repo-harness. Oracle opens ChatGPT Web and
-requests the named app; the app supplies GitHub read and write actions.
+implement a GitHub API client inside repo-harness. It uses the same Oracle
+browser transport as Plan and Review. The fixed prompt names the expected app;
+the app supplies GitHub read and write actions when it is connected and exposed
+in the conversation.
 
 ## Strict target identity
 
@@ -61,9 +64,12 @@ repo-harness chatgpt browser-doctor \
   --json
 ```
 
-A real Create or read-back run also requires Oracle to advertise
-`--browser-app`. Failure is `ORACLE_APP_PRESELECT_UNSUPPORTED` before prompt
-submission. The app name is workspace-dependent; `GitHub` is only an example.
+Create and read-back do not require an Oracle app-selection flag. Published
+Oracle versions do not expose `--browser-app`; these modes intentionally use
+the same browser options as Plan and Review. The fixed prompt names the
+workspace-dependent app (`GitHub` is only an example) and instructs ChatGPT to
+stop without writing when that app or its tools are unavailable. App selection
+therefore remains unverified prompt-level evidence.
 
 ## Dry run
 
@@ -103,8 +109,10 @@ dryRun.command
 dryRun.secretScan
 ```
 
-`dryRun.command` must contain `--browser-app <exact-app-name>`. This proves
-command construction, not live app availability or GitHub state.
+`dryRun.command` must not contain `--browser-app`. Inspect `paths.prompt`
+instead: it must name the exact expected app and require a no-write stop when
+the app or GitHub tools are unavailable. This proves prompt construction, not
+live app availability or GitHub state.
 
 ## Real Create
 
@@ -216,7 +224,7 @@ The command:
 1. reads the frozen target identity and `reportedGitHub` result from the Create
    session;
 2. opens a new Oracle browser session rather than using `--followup`;
-3. selects the same GitHub app;
+3. names the same expected GitHub app in the read-only prompt contract;
 4. prohibits all GitHub write actions;
 5. requests repository metadata, base commit, target branch head,
    implementation commit, comparison, changed files, and PR state;
@@ -296,7 +304,8 @@ original `reportedGitHub` object.
 The second session is independent from the Create conversation, but Oracle does
 not export provider-attested ChatGPT app-selection or tool-call telemetry.
 `assistant_reported_readback` is stronger than Create self-report alone but is
-not equivalent to a direct GitHub API read performed by repo-harness. Final
+not proof that ChatGPT selected the named app, and is not equivalent to a
+direct GitHub API read performed by repo-harness. Final
 Review and human acceptance remain required.
 
 ## Outcomes
@@ -397,7 +406,6 @@ Reuse existing repository patterns rather than creating another harness:
 | `CREATE_CONTRACT_NOT_FOUND` | Contract missing, outside the repo, or invalid |
 | `CREATE_PROVIDER_UNSUPPORTED` | Create/read-back provider is not Oracle |
 | `CREATE_ORACLE_NOT_INSTALLED` | Oracle cannot be resolved |
-| `ORACLE_APP_PRESELECT_UNSUPPORTED` | Oracle lacks `--browser-app` |
 | `PROMPT_SECRET_SCAN_UNAVAILABLE` | Required scanner unavailable |
 | `PROMPT_SECRET_SCAN_FAILED` | Prompt bundle rejected |
 | `CREATE_SURFACE_BLOCKED` | Create output lacks usable evidence |

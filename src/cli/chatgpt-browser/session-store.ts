@@ -180,7 +180,7 @@ export function writeBrowserSession(opts: {
       appSelection: {
         requestedApp: opts.input.createContext.requestedApp,
         verified: false as const,
-        source: 'oracle_request_only' as const,
+        source: 'prompt_contract_only' as const,
       },
     }
     : inheritedCreate;

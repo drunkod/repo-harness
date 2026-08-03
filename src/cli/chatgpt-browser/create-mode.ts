@@ -1,7 +1,6 @@
 import { existsSync } from 'fs';
 import { isAbsolute, relative, resolve } from 'path';
 import { runBrowserConsult } from './engine';
-import { probeOracle, resolveOracleBin, supportsBrowserAppPreselect } from './oracle-provider';
 import { readBrowserSession, updateBrowserSessionMeta } from './session-store';
 import type {
   BrowserConsultInput,
@@ -188,8 +187,8 @@ export function assertCreatePreconditions(input: BrowserCreateInput): BrowserCre
   };
 }
 
-export function assertOracleAppPreselectCapability(
-  input: Pick<BrowserConsultInput, 'repoRoot' | 'oracleBin' | 'provider' | 'dryRun'>,
+export function assertCreateProvider(
+  input: Pick<BrowserConsultInput, 'provider'>,
 ): void {
   if ((input.provider ?? 'oracle') !== 'oracle') {
     throw new CreatePreconditionError(
@@ -198,28 +197,13 @@ export function assertOracleAppPreselectCapability(
       'Use the dedicated browser-create command without overriding its provider.',
     );
   }
-  if (input.dryRun === true) return;
-  const resolution = resolveOracleBin({ repoRoot: input.repoRoot, oracleBin: input.oracleBin });
-  if (!resolution.binary) {
-    throw new CreatePreconditionError(
-      'CREATE_ORACLE_NOT_INSTALLED',
-      'oracle binary not found; browser-create cannot verify --browser-app support',
-      'Run `repo-harness chatgpt browser-doctor --provider oracle --json` and resolve Oracle first.',
-    );
-  }
-  const probe = probeOracle(resolution.binary);
-  if (!supportsBrowserAppPreselect(probe.helpText)) {
-    throw new CreatePreconditionError(
-      'ORACLE_APP_PRESELECT_UNSUPPORTED',
-      'resolved oracle binary does not advertise --browser-app support',
-      'Upgrade Oracle or pass --oracle-bin for a version that supports --browser-app.',
-    );
-  }
 }
 
 export function buildCreatePrompt(input: BrowserCreateInput, context: BrowserCreateSessionContext): string {
   return [
-    `Use the selected ChatGPT app "${context.requestedApp}" as the Create entity.`,
+    `Use the connected ChatGPT app "${context.requestedApp}" as the Create entity.`,
+    'If that app or its GitHub tools are unavailable in this conversation, stop without writing and explain the missing capability.',
+    'Do not claim the app is selected or that a tool ran without direct evidence.',
     '',
     `Operate only on GitHub repository "${context.repository}".`,
     `The expected default branch is "${context.defaultBranch}".`,
@@ -546,7 +530,7 @@ function finalizeCreateResult(
 
 export async function runBrowserCreate(input: BrowserCreateInput): Promise<BrowserConsultResult> {
   const context = assertCreatePreconditions(input);
-  assertOracleAppPreselectCapability(input);
+  assertCreateProvider(input);
   const files = [
     { path: context.planPath },
     { path: context.contractPath },
@@ -558,7 +542,10 @@ export async function runBrowserCreate(input: BrowserCreateInput): Promise<Brows
     title: input.title ?? `create ${context.targetBranch}`,
     prompt: buildCreatePrompt(input, context),
     files,
-    chatgptApp: context.requestedApp,
+    // Plan, Create, and Review use the same Oracle transport. The expected
+    // app is enforced by the fixed prompt and result contract, not by an
+    // Oracle CLI flag (published Oracle has no --browser-app option).
+    chatgptApp: undefined,
     provider: 'oracle',
     requireSecretScan: true,
     writeOutput: context.creationReportPath,
@@ -574,7 +561,9 @@ function buildReadBackPrompt(
   reported: BrowserCreateReportedGitHubEvidence,
 ): string {
   return [
-    `Use the selected ChatGPT app "${context.requestedApp}" for an independent read-only GitHub read-back.`,
+    `Use the connected ChatGPT app "${context.requestedApp}" for an independent read-only GitHub read-back.`,
+    'If that app or its GitHub read tools are unavailable in this conversation, stop and report the missing capability.',
+    'Do not claim the app is selected or that a tool ran without direct evidence.',
     `This is a new browser session, not a continuation of Create session "${createSessionId}".`,
     '',
     'Do not use any GitHub write action. Do not create, update, delete, comment,',
@@ -763,14 +752,14 @@ export async function runBrowserCreateReadBack(input: BrowserCreateReadBackInput
       `read-back app ${requestedApp} does not match Create app ${create.requestedApp}`,
     );
   }
-  assertOracleAppPreselectCapability({ ...input, provider: 'oracle' });
+  assertCreateProvider({ ...input, provider: 'oracle' });
 
   const result = await runBrowserConsult({
     ...input,
     title: input.title ?? `readback ${create.targetBranch}`,
     prompt: buildReadBackPrompt(input.sessionId, create, create.reportedGitHub),
     files: [],
-    chatgptApp: requestedApp,
+    chatgptApp: undefined,
     provider: 'oracle',
     requireSecretScan: true,
     writeOutput: input.writeOutput ?? defaultCreateReadBackReportPath(create.targetBranch),
@@ -898,7 +887,7 @@ export async function runBrowserCreateFollowup(
     thinking: input.thinking ?? existing.meta.model.thinking,
     provider: 'oracle',
     chatgptUrl: input.chatgptUrl ?? existing.meta.browser.conversationUrl ?? existing.meta.browser.chatgptUrl,
-    chatgptApp: input.chatgptApp ?? existing.meta.browser.chatgptApp,
+    chatgptApp: undefined,
     profileDir: input.profileDir ?? existing.meta.browser.profileDir,
     profileDirectory: input.profileDirectory ?? existing.meta.browser.profileDirectory,
     browserChannel: input.browserChannel ?? existing.meta.browser.channel,

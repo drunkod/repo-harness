@@ -99,7 +99,7 @@ export interface BrowserCreateSessionMeta extends BrowserCreateSessionContext {
     requestedApp: string;
     reportedSelectedApp?: string;
     verified: false;
-    source: 'oracle_request_only';
+    source: 'prompt_contract_only';
   };
   reportedGitHub?: BrowserCreateReportedGitHubEvidence;
   readBack?: BrowserCreateReadBackMeta;
