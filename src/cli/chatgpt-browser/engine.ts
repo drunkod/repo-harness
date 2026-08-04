@@ -10,7 +10,7 @@ import {
 } from './binding';
 import { resolveBrowserOutputPath } from './file-policy';
 import { checkNativeChatgptSession, nativeDebuggingBlockedByDefaultProfile, nativeProviderAvailable, runNativeProvider } from './native-provider';
-import { buildOracleCommand, probeOracle, resolveOracleBin, runOracleProvider, supportsBrowserAppPreselect } from './oracle-provider';
+import { buildOracleCommand, probeOracle, resolveOracleBin, runOracleProvider } from './oracle-provider';
 import { assemblePromptBundle } from './prompt-assembler';
 import { scanPromptBundle } from './secret-scan';
 import {
@@ -261,9 +261,6 @@ export async function browserDoctor(
   const oraclePresent = Boolean(oracleResolution.binary);
   const oracleProbe = oracleResolution.binary ? probeOracle(oracleResolution.binary) : undefined;
   const oracleCapabilities = oracleProbe?.capabilities ?? EMPTY_ORACLE_CAPABILITIES;
-  const oracleOptionalCapabilities = {
-    browserAppPreselect: oracleProbe ? supportsBrowserAppPreselect(oracleProbe.helpText) : false,
-  };
   const missingOracleCapabilities = Object.entries(oracleCapabilities)
     .filter(([, supported]) => supported !== true)
     .map(([capability]) => capability);
@@ -361,7 +358,6 @@ export async function browserDoctor(
       version: oracleProbe?.version,
       nodeCompatible: oracleProbe?.nodeCompatible ?? false,
       capabilities: oracleCapabilities,
-      optionalCapabilities: oracleOptionalCapabilities,
       missingCapabilities: missingOracleCapabilities,
       error: oracleError,
     },
@@ -419,21 +415,6 @@ export async function runBrowserConsult(input: BrowserConsultInput): Promise<Bro
   const secretScan = effectiveInput.requireSecretScan === true
     ? scanPromptBundle(effectiveInput, bundle)
     : undefined;
-  if (effectiveInput.chatgptApp && provider !== 'oracle') {
-    return writeBrowserSession({
-      input: effectiveInput,
-      provider,
-      status: 'failed',
-      bundle,
-      output: `ChatGPT app preselection requires the oracle provider; ${provider} does not select composer apps.`,
-      error: {
-        code: 'CHATGPT_APP_PRESELECT_PROVIDER_UNSUPPORTED',
-        message: `ChatGPT app preselection is not supported by provider "${provider}"`,
-        recovery: 'Use --provider oracle with an Oracle binary that supports --browser-app, or omit --chatgpt-app and select the app manually.',
-      },
-      secretScan,
-    });
-  }
   if (effectiveInput.dryRun !== true) {
     if (provider === 'oracle') {
       const oracle = await runOracleProvider(effectiveInput, bundle);
@@ -510,7 +491,7 @@ export async function runBrowserFollowup(input: Omit<BrowserConsultInput, 'sourc
     thinking: input.thinking ?? existing.meta.model.thinking,
     provider,
     chatgptUrl: input.chatgptUrl ?? existing.meta.browser.conversationUrl ?? existing.meta.browser.chatgptUrl,
-    chatgptApp: input.chatgptApp ?? existing.meta.browser.chatgptApp,
+    chatgptApp: undefined,
     profileDir: input.profileDir ?? existing.meta.browser.profileDir,
     profileDirectory: input.profileDirectory ?? existing.meta.browser.profileDirectory,
     browserChannel: input.browserChannel ?? existing.meta.browser.channel,
