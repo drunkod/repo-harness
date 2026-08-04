@@ -377,8 +377,8 @@ Reuse existing repository patterns rather than creating another harness:
 
 | Test file | Reusable coverage |
 |---|---|
-| `tests/cli/chatgpt-browser.test.ts` | fake Oracle argv capture, app preselection, prompt/file/output policy, session/list/follow-up/cleanup behavior |
-| `tests/cli/chatgpt-browser-create.test.ts` | strict target validation, result parsing, draft-PR contract, separate read-back, mismatch classification |
+| `tests/cli/chatgpt-browser.test.ts` | fake Oracle argv capture without app preselection, prompt/file/output policy, session/list/follow-up/cleanup behavior |
+| `tests/cli/chatgpt-browser-create.test.ts` | strict target validation, prompt-contract app selection, result parsing, draft-PR contract, separate read-back, mismatch classification |
 | `tests/skill-surface/chatgpt-package.test.ts` | canonical reference closed set, router reachability, 2048-byte router budget |
 | `tests/skill-surface/chatgpt-create-mode.test.ts` | Create-specific documentation/runtime/packaging consistency |
 | `tests/skill-surface/retired-names-scan.test.ts` | repository-wide retired package-name guard |
@@ -405,7 +405,6 @@ Reuse existing repository patterns rather than creating another harness:
 | `CREATE_CONTRACT_REQUIRED` | Missing contract argument |
 | `CREATE_CONTRACT_NOT_FOUND` | Contract missing, outside the repo, or invalid |
 | `CREATE_PROVIDER_UNSUPPORTED` | Create/read-back provider is not Oracle |
-| `CREATE_ORACLE_NOT_INSTALLED` | Oracle cannot be resolved |
 | `PROMPT_SECRET_SCAN_UNAVAILABLE` | Required scanner unavailable |
 | `PROMPT_SECRET_SCAN_FAILED` | Prompt bundle rejected |
 | `CREATE_SURFACE_BLOCKED` | Create output lacks usable evidence |
