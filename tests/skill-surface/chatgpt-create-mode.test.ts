@@ -34,7 +34,6 @@ const CREATE_FAILURE_CODES = [
   "CREATE_CONTRACT_NOT_FOUND",
   "CREATE_PROVIDER_UNSUPPORTED",
   "CREATE_ORACLE_NOT_INSTALLED",
-  "ORACLE_APP_PRESELECT_UNSUPPORTED",
   "CREATE_SURFACE_BLOCKED",
   "CREATE_READBACK_MODE_MISMATCH",
   "CREATE_READBACK_RESULT_REQUIRED",
@@ -94,6 +93,8 @@ describe("repo-harness-chatgpt strict Create mode", () => {
     for (const code of CREATE_FAILURE_CODES) {
       expect(runtime).toContain(code);
     }
+    expect(runtime).not.toContain("assertOracleAppPreselectCapability");
+    expect(runtime).not.toContain("ORACLE_APP_PRESELECT_UNSUPPORTED");
     expect(runtime).toContain("repo-harness-create-readback-result");
     expect(runtime).toContain("Do not use any GitHub write action");
     expect(runtime).toContain("readBackSessionId: result.sessionId");
@@ -101,12 +102,13 @@ describe("repo-harness-chatgpt strict Create mode", () => {
     expect(types).toContain("BrowserCreateReadBackMeta");
   });
 
-  test("unit and opt-in live integration tests cover the browser-app chain", () => {
+  test("unit and opt-in live integration tests cover the standard browser transport", () => {
     const runtimeTest = readFileSync(RUNTIME_TEST, "utf-8");
     const readBackTest = readFileSync(READBACK_TEST, "utf-8");
     const liveTest = readFileSync(LIVE_TEST, "utf-8");
 
-    expect(runtimeTest).toContain("--browser-app");
+    expect(runtimeTest).toContain("not.toContain('--browser-app')");
+    expect(runtimeTest).toContain("prompt_contract_only");
     expect(runtimeTest).toContain("browser-create-readback");
     expect(runtimeTest).toContain("not.toContain('--followup')");
     expect(runtimeTest).toContain("CREATE_READBACK_MISMATCH");
@@ -138,6 +140,8 @@ describe("repo-harness-chatgpt strict Create mode", () => {
     expect(engineGuide).toContain("[ChatGPT + GitHub App Create](./repo-harness-chatgpt-github-create.md)");
     expect(engineGuide).toContain("planning, bounded GitHub Create, and review workflows");
     expect(engineGuide).toContain("Create and Create read-back are not exposed as MCP tools");
+    expect(engineGuide).not.toContain("--browser-app");
+    expect(engineGuide).not.toContain("browserAppPreselect");
     expect(guide).toContain("--repository owner/repository");
     expect(guide).not.toContain("--repository drunkod/repo-harness");
     expect(guide).toContain("browser-create-readback");
