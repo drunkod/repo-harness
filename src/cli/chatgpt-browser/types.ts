@@ -119,7 +119,8 @@ export interface BrowserConsultInput {
   followups?: string[];
   model?: string;
   thinking?: ThinkingLevel;
-  chatgptApp?: string;
+  /** Generic browser transport never selects a ChatGPT app. Create overrides this with its prompt-contract field. */
+  chatgptApp?: never;
   provider?: BrowserProviderName;
   chatgptUrl?: string;
   timeoutMs?: number;
@@ -159,7 +160,7 @@ export interface BrowserCreateInput extends Omit<
 
 export interface BrowserCreateReadBackInput extends Omit<
   BrowserConsultInput,
-  'prompt' | 'files' | 'followups' | 'provider' | 'sourceSessionId' | 'providerSessionId' | 'parentProviderSessionId'
+  'prompt' | 'files' | 'followups' | 'provider' | 'sourceSessionId' | 'providerSessionId' | 'parentProviderSessionId' | 'chatgptApp'
 > {
   sessionId: string;
   chatgptApp?: string;
@@ -240,6 +241,7 @@ export interface BrowserSessionMeta {
   browser: {
     mode: 'manual-login';
     chatgptUrl: string;
+    /** Legacy read compatibility only; current sessions do not populate this field. */
     chatgptApp?: string;
     channel?: NativeBrowserChannel;
     profileDir?: string;
