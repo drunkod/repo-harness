@@ -172,14 +172,20 @@ The wrapper maps repo-harness input to `oracle --engine browser --browser-archiv
 
 The oracle binary is resolved in a fixed, auditable order — `--oracle-bin`, then `REPO_HARNESS_ORACLE_BIN`, then repo-local `node_modules/.bin/oracle`, then `oracle` on `PATH`. A missing binary fails with `ORACLE_NOT_INSTALLED`; explicitly configured binaries (`--oracle-bin` or `REPO_HARNESS_ORACLE_BIN`) fail closed when invalid and do not silently fall through to the next source. repo-harness never implicitly downloads or `npx`-executes an unpinned oracle. `browser-doctor --provider oracle --json` runs `--help`, `--debug-help`, `--version`, plus an isolated `--browser-thinking-time` dry-run parser probe, and reports `installed`, resolved `binary`, `version`, `nodeCompatible`, a `capabilities` map (`browserEngine`, `writeOutput`, `browserFollowup`, `sessionFollowup`, `browserArchive`, `browserModelStrategy`, `browserCookiePath`, `browserThinkingTime`, `chatgptUrl`, `heartbeat`), and opt-in `agent_actions` when a GPT Pro setup repair can install, upgrade, or re-point the selected pinned external CLI; `status:"ready"` requires every capability for every flag repo-harness may send at runtime.
 
-When a ChatGPT MCP Connector app must be active for read-back, use `--chatgpt-app <serverName>` with the server name recorded by `repo-harness mcp doctor --repo <repo> --json` under `chatgpt.serverName`. repo-harness maps that to Oracle `--browser-app <serverName>` so Oracle selects the composer app before submitting the prompt. This is an opt-in capability: it is reported under `oracle.optionalCapabilities.browserAppPreselect` and is required only when `--chatgpt-app` is present. If the selected Oracle binary lacks `--browser-app`, the run fails before prompt submission with `ORACLE_APP_PRESELECT_UNSUPPORTED`; do not rely on plain prompt text such as `@serverName` as evidence that ChatGPT exposed MCP tools.
+Plan, Create, Review, read-back, and follow-up use the same Oracle browser
+transport. Published Oracle versions do not expose a supported app-selection
+flag, so generic `browser-consult` and `browser-followup` do not expose a
+ChatGPT-app option, Browser Doctor does not advertise app preselection, and
+repo-harness never emits an Oracle app-selection argument.
 
-App selection and tool availability are separate gates. `--chatgpt-app` only
-selects the Connector in the composer; ChatGPT can still see a stale scanned
-tool schema. If a run proves the app is selected but ChatGPT reports a specific
-tool unavailable, compare the live MCP `/mcp` `tools/list` against the
-Connector's visible tools and use ChatGPT Connector **Scan Tools** to refresh the
-schema.
+Create and Create read-back still require the expected connected app name as a
+repo-harness contract value. That value is written into the fixed prompt,
+session metadata, and structured result validation only. It is not provider-
+attested: if the named app or its GitHub tools are unavailable in the
+conversation, ChatGPT must stop without writing and report the missing
+capability. App selection and tool availability therefore remain unverified
+prompt-level evidence until an independent read-back and Review confirm the
+remote state.
 
 Long Oracle browser runs default to `--heartbeat 59`. repo-harness streams Oracle diagnostics and heartbeat lines to stderr while preserving stdout for the final JSON payload, so humans and agents get a periodic liveness signal without breaking automation that parses command output.
 
@@ -210,7 +216,7 @@ repo-harness chatgpt browser-consult \
 
 The native provider launches installed Google Chrome and drives it through a local Chrome DevTools Protocol websocket. It opens ChatGPT Web, waits for a visible composer, submits the assembled prompt, waits for an assistant response, and saves the captured text into the same repo-local session store.
 
-Native provider consults require a bound ChatGPT product session in a non-default automation profile. Configure it with `browser-setup --profile-dir <dir>` and sign in to ChatGPT in that selected profile, or pass an explicit non-default `--profile-dir` for an ad hoc diagnostic run. Existing default Chrome profiles should use Oracle. The saved binding also carries the Chrome channel and ChatGPT URL, so normal consult and follow-up commands do not need to repeat them.
+Native provider consults require a bound ChatGPT product session in a non-default automation profile. Configure it with `browser-setup --profile-dir <dir>` and sign in to ChatGPT in that selected profile, or pass an explicit non-default `--profile-dir` for an ad hoc diagnostic run. Existing default Chrome profiles should use `--provider oracle`. The saved binding also carries the Chrome channel and ChatGPT URL, so normal consult and follow-up commands do not need to repeat them.
 
 Native provider runs use the current model and thinking mode already selected in the ChatGPT Web UI. Passing `--model` or `--thinking` with `--provider native` fails closed with `NATIVE_MODEL_SELECTION_UNSUPPORTED`; use the Oracle provider when provider-side model selection is required.
 
@@ -319,6 +325,9 @@ Allowed-path symlinks that resolve outside the repository are rejected.
 For delegate and Create modes, path policy is only the first gate: the exact
 rendered content is also scanned before provider activity. Path acceptance
 alone is not evidence that a file is safe to send.
+For delegate mode, path policy is only the first gate: `--secret-scan` also
+scans the fully rendered allowed content. Path acceptance alone is not evidence
+that a file is safe to send.
 
 ## Security Notes
 
