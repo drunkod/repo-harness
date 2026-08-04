@@ -1,67 +1,80 @@
 # ChatGPT + GitHub App Create MVP — Research and Implementation Notes
 
 Date: 2026-07-31
-Updated: 2026-08-01
+Updated: 2026-08-04
 
 ## Research inputs
 
 - User-supplied DeepWiki session export covering the ChatGPT Browser Plan and
   Review call path.
 - User-supplied full-repository DeepWiki export.
-- Current `drunkod/repo-harness` `main` at
-  `01c821d121577c461aea4fc9373ad5090ec3bdda` (`repo-harness` 0.12.0).
+- Current `drunkod/repo-harness` branch
+  `agent/chatgpt-github-create-mvp`.
 - User-tested ChatGPT GitHub app action surface.
-- Follow-up implementation report identifying the gap between a skill-level
-  Create protocol and a first-class runtime entity.
-- Canonical-form follow-up report covering package layout, router budget,
-  stale-name gates, documentation ownership, and reusable Browser Engine tests.
+- Follow-up implementation reports comparing the Create-scoped patch with the
+  shared Browser Engine architecture.
+- Oracle 0.16.1 command help showing that no supported `--browser-app` option
+  exists.
 
 ## Findings
 
-1. “ChatGPT Browser Plan” and “ChatGPT Browser Review” are prompt-level uses of
-   the shared `repo-harness chatgpt browser-consult` engine rather than
-   independent browser providers.
-2. The browser engine already forwards `--chatgpt-app <name>` to Oracle as
-   `--browser-app <name>` and fails closed when the resolved Oracle binary does
-   not advertise that flag.
-3. Browser Doctor already exposes app-preselection support under
-   `oracle.optionalCapabilities.browserAppPreselect`, but general readiness
-   does not make that optional capability mandatory.
-4. The canonical `repo-harness-chatgpt` skill is the existing explicit-setup
-   integration package and routes behavior through `references/*.md`.
-5. The tested GitHub app can perform repository reads and writes, including
-   branch, file, blob/tree/commit, ref, pull-request, review, and Actions
-   operations.
-6. Repo-harness should not absorb GitHub credentials or duplicate the GitHub
-   API implementation.
-7. Oracle currently returns provider output, session identifiers, and the
-   conversation URL, but not an independently attested stream of ChatGPT app
-   selection or GitHub tool-call events.
+1. Plan, Create, Review, Create read-back, and follow-up all use the shared
+   `runBrowserConsult` Browser Engine path. They are distinguished by their
+   fixed prompts, attached files, validation, and metadata—not by separate
+   browser providers.
+2. The original generic Browser Engine incorrectly modeled ChatGPT app
+   preselection as an Oracle capability. It probed help text for
+   `--browser-app`, emitted that argument when `chatgptApp` was set, reported
+   `browserAppPreselect` in Browser Doctor, and could fail before launch with
+   `ORACLE_APP_PRESELECT_UNSUPPORTED`.
+3. Published Oracle versions, including the tested 0.16.1 binary, do not expose
+   that option. `--chatgpt-url`, `--browser-tab`, model strategy, cookie path,
+   heartbeat, attachments, and follow-ups do not select a connected ChatGPT
+   app.
+4. Commit `c2598edca63dfad3efb79f6b587d00d112e37c91` correctly fixed the
+   Create-specific path: Create/read-back/follow-up stopped forwarding the app
+   to Oracle, prompts changed from "selected" to "connected", and app metadata
+   changed to `prompt_contract_only`.
+5. The architecture still required a follow-up cleanup because generic Plan and
+   Review consults retained the dead preselection surface after `c2598ed`.
+6. Repo-harness must not absorb GitHub credentials or duplicate the GitHub API.
+   The connected ChatGPT GitHub app remains the external capability used by the
+   browser conversation.
+7. Oracle returns provider output, session identifiers, and a conversation URL,
+   but not independently attested app-selection or GitHub tool-call telemetry.
 
-## Runtime decision
+## Final runtime decision
 
-Create is implemented as a thin, first-class runtime wrapper over the existing
-Browser Engine:
+Use one standard Oracle browser transport for every Browser Engine mode:
 
 ```text
-repo-harness chatgpt browser-create
-  -> validate Create inputs
-  -> build fixed bounded prompt
-  -> require exact-bundle secret scan
-  -> require Oracle app-preselection support
+Plan / Create / Review / read-back / follow-up
+  -> validate mode-specific inputs
+  -> build mode-specific prompt and attachments
+  -> apply shared file/output/secret-scan policy
   -> runBrowserConsult
-  -> persist mode=create metadata
-  -> parse the Create result envelope
-  -> classify reported or surface_blocked
+  -> buildOracleCommand using supported Oracle browser options only
+  -> persist mode-specific metadata
+  -> validate the mode-specific result envelope
 ```
 
-No second browser provider or duplicated session engine was introduced.
+There is no Oracle app-selection argument and no substitute Plan/Review option.
 
-## Implemented MVP
+Create keeps `--chatgpt-app <name>` only as a required repo-harness contract
+value. The value is used in:
+
+- the fixed Create/read-back prompt;
+- session `create.requestedApp` metadata;
+- `appSelection.source: "prompt_contract_only"` with `verified: false`;
+- structured result validation requiring the reported `selectedApp` to match.
+
+It is never translated into an Oracle CLI flag. If the named app or its GitHub
+tools are unavailable in the conversation, the fixed prompt requires ChatGPT
+to stop without writing and explain the missing capability.
+
+## Implemented Create surface
 
 ### Dedicated command
-
-Added:
 
 ```bash
 repo-harness chatgpt browser-create
@@ -73,31 +86,41 @@ Required arguments:
 --repo
 --prompt
 --chatgpt-app
---base
+--repository
+--default-branch
+--base-commit
 --branch
 --plan
 --contract
 ```
 
-The command rejects missing plan/contract files, repository escapes, default
-branches, and branch/base equality before provider activity.
+The command rejects missing or unsafe repository/default/base/branch identity,
+missing plan/contract files, repository escapes, default-branch writes, and
+non-`agent/*` branches before provider activity.
 
 ### Typed Create identity
 
-Browser metadata now records:
+Browser metadata records:
 
 ```json
 {
   "mode": "create",
   "create": {
-    "baseRef": "...",
-    "targetBranch": "...",
-    "planPath": "...",
-    "contractPath": "...",
+    "repository": "owner/repository",
+    "defaultBranch": "main",
+    "baseCommit": "<full SHA>",
+    "targetBranch": "agent/example",
+    "planPath": "plans/plan-example.md",
+    "contractPath": "tasks/contracts/example.contract.md",
     "draftPr": false,
     "requestedApp": "GitHub",
-    "creationReportPath": "...",
-    "outcome": "..."
+    "creationReportPath": ".ai/harness/handoff/chatgpt/create-...md",
+    "outcome": "...",
+    "appSelection": {
+      "requestedApp": "GitHub",
+      "verified": false,
+      "source": "prompt_contract_only"
+    }
   }
 }
 ```
@@ -108,16 +131,16 @@ outcome.
 
 ### Fixed execution contract
 
-`browser-create` builds the write boundary internally. It does not rely on the
-operator copying a safety prompt from documentation.
-
-The prompt requires a dedicated branch, prohibits default-branch and force-ref
-writes, prohibits unrelated scope, and excludes merge, auto-merge,
-ready-for-review, review-thread, and CI-rerun actions.
+`browser-create` builds the write boundary internally. The prompt requires
+GitHub read checks before writes, an exact repository/default/base/branch,
+creation of a dedicated `agent/*` branch, and adherence to the approved plan and
+contract. It prohibits default-branch writes, force ref updates, unrelated
+scope, merge, auto-merge, ready-for-review transitions, review-thread mutation,
+and CI reruns.
 
 ### Mandatory egress scan
 
-Create calls the existing Browser Engine with:
+Create and independent read-back call the existing Browser Engine with:
 
 ```text
 requireSecretScan: true
@@ -126,17 +149,27 @@ requireSecretScan: true
 The exact rendered prompt and attached bytes must pass Gitleaks before session
 or provider activity.
 
-### Oracle readiness
+### Standard Oracle readiness
 
-A real Create run resolves and probes Oracle before browser launch. Missing
-`--browser-app` support fails with:
+A real Create run uses the same required Oracle capability set as Plan and
+Review. Browser Doctor verifies only flags repo-harness actually sends:
 
 ```text
-ORACLE_APP_PRESELECT_UNSUPPORTED
+browserEngine
+writeOutput
+browserFollowup
+sessionFollowup
+browserArchive
+browserModelStrategy
+browserCookiePath
+browserThinkingTime
+chatgptUrl
+heartbeat
 ```
 
-Dry-run remains possible without a live Oracle probe and exposes the generated
-Oracle command for inspection.
+Browser Doctor no longer reports an optional `browserAppPreselect` field. No
+run fails on `ORACLE_APP_PRESELECT_UNSUPPORTED`, and no generated or real Oracle
+command contains `--browser-app`.
 
 ### Creation Report path
 
@@ -150,10 +183,9 @@ path under:
 ### Structured result envelope
 
 The Create prompt requires exactly one `repo-harness-create-result` fenced JSON
-block containing the reported app, repository, base commit, branch, commit,
-optional draft PR, changed files, and tool names.
-
-Parsed data is stored separately from raw assistant prose at:
+block containing the reported app, repository, default branch, base commit,
+branch, implementation commit, optional draft PR, changed files, and tool names.
+Parsed data is stored separately from raw prose at:
 
 ```text
 meta.create.reportedGitHub
@@ -167,8 +199,14 @@ with the explicit trust label:
 }
 ```
 
-App selection remains `verified: false` and records
-`source: "oracle_request_only"`.
+### Independent read-back
+
+`browser-create-readback` / `browser-create-verify` opens a new Oracle browser
+session rather than using Oracle `--followup`. It names the same expected app in
+a read-only prompt, prohibits GitHub writes, requests repository/commit/compare/
+PR evidence, and validates a `repo-harness-create-readback-result` envelope.
+The result is stored with `assistant_reported_readback` trust and never erases
+the original Create evidence.
 
 ### Result classification
 
@@ -182,61 +220,68 @@ recoverable
 provider_failed
 ```
 
-`surface_blocked` is also a browser session status. It is used when Oracle
-completed but the output lacked a single valid result envelope, reported the
-wrong branch/app, or reported no GitHub write action.
+Read-back outcomes are:
 
-### Canonical package and documentation form
+```text
+dry_run
+matched
+mismatch
+surface_blocked
+recoverable
+provider_failed
+```
 
-- `create.md` has one home:
-  `assets/skills/repo-harness-chatgpt/references/create.md`.
-- The closed `REFERENCES` set declares `create.md`; no duplicate package-root
-  copy exists.
-- `SKILL.md` remains a routing-only document with `## Mode Selection` and
-  `## Boundaries`, no top-level `## Protocol`, and the shared 2048-byte ceiling.
-- `package.json` explicitly publishes
-  `docs/repo-harness-chatgpt-github-create.md`.
-- The Create guide links to the canonical Browser Engine guide for Oracle,
-  profile, doctor, app-preselection, secret-scan, and session mechanics rather
-  than maintaining a competing explanation.
-- Create reference and guide text are checked against manifest-derived retired
-  package names and the canonical stale-pattern set.
-- No artificial provenance line was added to the genuinely new Create
-  reference; the existing directory-level provenance convention remains
-  unchanged.
+`surface_blocked` is used when provider output lacks one valid envelope or
+reports an invalid/mismatched surface. `mismatch` is reserved for a structurally
+valid read-back that disagrees with the frozen target or reported Create result.
 
-### Runtime tests
+## Full-parity cleanup completed
 
-Execution-focused tests use the existing Browser Engine test patterns and fake
-Oracle/Gitleaks binaries. Coverage includes:
+The follow-up change removes the obsolete generic preselection architecture:
 
-- command help and required flags;
-- default-branch rejection;
-- missing plan and missing contract rejection;
+- `oracle-provider.ts` no longer exports `supportsBrowserAppPreselect`, emits
+  `--browser-app`, or returns `ORACLE_APP_PRESELECT_UNSUPPORTED`.
+- `engine.ts` no longer reports `browserAppPreselect`, rejects provider app
+  preselection, or inherits an app value in generic follow-ups.
+- `commands/chatgpt.ts` no longer exposes `--chatgpt-app` on generic
+  `browser-consult` or `browser-followup`; Create/read-back retain their
+  prompt-contract app argument.
+- generic Browser Engine tests now assert that help, dry-run commands, real
+  Oracle invocations, follow-ups, and doctor JSON contain no app-preselection
+  surface.
+- Create tests retain the app in the prompt/result contract while asserting no
+  Oracle command contains `--browser-app`.
+- the Browser Engine guide and canonical consult reference describe one standard
+  Oracle transport and prompt-contract-only Create app selection.
+
+## Runtime test coverage
+
+Execution-focused tests reuse the existing fake Oracle/Gitleaks patterns and
+cover:
+
+- generic consult/follow-up help without `--chatgpt-app`;
+- dry-run and real Oracle argv without `--browser-app`;
+- Browser Doctor without `optionalCapabilities.browserAppPreselect`;
+- Create/read-back/follow-up operation with an Oracle binary that advertises no
+  app-preselection capability;
+- connected-app prompt wording and no-write stop clause;
+- `prompt_contract_only` metadata;
+- strict repository/default/base/branch validation;
 - mandatory secret scanning;
-- generated dry-run `--browser-app` command;
-- Browser Doctor `browserAppPreselect` capability visibility;
-- unsupported Oracle failure before browser launch;
-- real Oracle invocation receiving `--browser-app GitHub`;
 - `mode=create` persistence and Create-only listing;
-- inherited Creation Report output-path denial, overwrite, and allowed-path
-  behavior;
+- Creation Report output-path policy;
 - parsed assistant-reported GitHub identifiers;
 - no-PR and requested-draft-PR result contracts;
-- missing evidence classification as `surface_blocked`;
-- reported branch mismatch classification;
-- Create follow-up recovery and mode-aware cleanup.
-
-The existing repo-wide retired-name scan remains unchanged and continues to
-cover the canonical skill reference surface. The Create-specific skill test
-adds coverage for the published guide, which sits outside that scan's fixed
-`docs/` subdirectory list.
+- malformed result classification as `surface_blocked`;
+- read-back match/mismatch classification;
+- mode-aware follow-up and cleanup behavior.
 
 ## Safety model
 
 - no direct writes to a default/base branch in the declared Create scope;
 - no force ref updates in the fixed prompt contract;
-- no implicit repository or app-name selection;
+- no implicit repository selection;
+- app name is explicit but prompt-contract-only and unverified;
 - no scope beyond the approved contract;
 - draft PR only when requested;
 - no merge, auto-merge, ready-for-review transition, review-thread mutation,
@@ -247,13 +292,13 @@ adds coverage for the published guide, which sits outside that scan's fixed
 
 ## Known boundary
 
-Repo-harness cannot currently intercept the GitHub app's remote tool calls or
-prove the visible ChatGPT app selection. The MVP therefore enforces local
-preconditions and output structure, but does not claim provider-attested GitHub
-telemetry.
+Repo-harness cannot currently intercept the connected GitHub app's remote tool
+calls or prove the visible ChatGPT app selection. The MVP enforces local
+preconditions, prompt policy, secret scanning, and result structure, but does
+not claim provider-attested GitHub telemetry.
 
-Independent Review should resolve the reported commit and pull request through
-GitHub and compare actual state with the plan and contract.
+Independent read-back and final Review must resolve the reported commit and pull
+request through GitHub and compare actual state with the plan and contract.
 
 ## Deferred beyond MVP
 
