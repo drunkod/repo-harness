@@ -51,7 +51,6 @@ interface BrowserConsultOptions extends BrowserCommonOptions {
   followUp?: string[];
   model?: string;
   thinking?: string;
-  chatgptApp?: string;
   provider?: string;
   chatgptUrl?: string;
   timeoutMs?: string;
@@ -123,7 +122,6 @@ interface BrowserFollowupOptions extends BrowserCommonOptions {
   followUp?: string[];
   model?: string;
   thinking?: string;
-  chatgptApp?: string;
   provider?: string;
   timeoutMs?: string;
   heartbeat?: string;
@@ -297,7 +295,6 @@ export function buildChatgptCommand(): Command {
     .option('--follow-up <text>', 'Follow-up prompt for the same conversation', (value, previous: string[] = []) => [...previous, value], [])
     .option('--model <label>', 'Requested ChatGPT model label')
     .option('--thinking <level>', 'Thinking level: light|standard|extended|heavy')
-    .option('--chatgpt-app <name>', 'Select a ChatGPT app/connector by name before submitting the prompt')
     .option('--provider <provider>', 'Browser provider: oracle|native', 'oracle')
     .option('--chatgpt-url <url>', 'ChatGPT URL to open')
     .option('--timeout-ms <ms>', 'Assistant timeout in milliseconds')
@@ -327,7 +324,6 @@ export function buildChatgptCommand(): Command {
           followups: rawOpts.followUp,
           model: rawOpts.model,
           thinking: parseThinking(rawOpts.thinking),
-          chatgptApp: rawOpts.chatgptApp,
           provider: parseProvider(rawOpts.provider),
           chatgptUrl: rawOpts.chatgptUrl,
           timeoutMs: parsePositiveInteger('timeout-ms', rawOpts.timeoutMs),
@@ -491,7 +487,6 @@ export function buildChatgptCommand(): Command {
     .option('--follow-up <text>', 'Additional follow-up prompt', (value, previous: string[] = []) => [...previous, value], [])
     .option('--model <label>', 'Override requested ChatGPT model label')
     .option('--thinking <level>', 'Thinking level: light|standard|extended|heavy')
-    .option('--chatgpt-app <name>', 'Select a ChatGPT app/connector by name before submitting the follow-up')
     .option('--provider <provider>', 'Browser provider: oracle|native')
     .option('--timeout-ms <ms>', 'Assistant timeout in milliseconds')
     .option('--heartbeat <seconds>', 'Oracle provider heartbeat interval in seconds; 0 disables Oracle heartbeat (default: 59)')
@@ -518,7 +513,6 @@ export function buildChatgptCommand(): Command {
           followups: rawOpts.followUp,
           model: rawOpts.model,
           thinking: parseThinking(rawOpts.thinking),
-          chatgptApp: rawOpts.chatgptApp,
           provider: rawOpts.provider ? parseProvider(rawOpts.provider) : undefined,
           timeoutMs: parsePositiveInteger('timeout-ms', rawOpts.timeoutMs),
           heartbeatSeconds: parseNonNegativeInteger('heartbeat', rawOpts.heartbeat),
