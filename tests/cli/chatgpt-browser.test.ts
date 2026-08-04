@@ -96,9 +96,13 @@ describe('chatgpt browser command', () => {
     expect(consult.stdout).toContain('--keep-browser');
     expect(consult.stdout).toContain('--allow-absolute-output');
     expect(consult.stdout).toContain('--heartbeat');
-    expect(consult.stdout).toContain('--chatgpt-app');
+    expect(consult.stdout).not.toContain('--chatgpt-app');
     expect(consult.stdout).toContain('--secret-scan');
     expect(consult.stdout).toContain('--gitleaks-bin');
+
+    const followup = runChatgpt(['browser-followup', '--help']);
+    expect(followup.status).toBe(0);
+    expect(followup.stdout).not.toContain('--chatgpt-app');
   });
 
   test('secret scan covers the exact prompt bundle and follow-ups fail closed before a new session', () => {
@@ -358,7 +362,7 @@ describe('chatgpt browser command', () => {
     }
   });
 
-  test('dry-run consult writes a repo-local session with inline files', () => {
+  test('dry-run consult writes a repo-local session with inline files and standard Oracle transport', () => {
     withRepo((repoRoot) => {
       const result = runChatgpt([
         'browser-consult',
@@ -377,14 +381,13 @@ describe('chatgpt browser command', () => {
         'GPT-5.5 Pro',
         '--thinking',
         'heavy',
-        '--chatgpt-app',
-        'team-review-mcp',
       ]);
       expect(result.status).toBe(0);
       const payload = JSON.parse(result.stdout);
       expect(payload.status).toBe('dry_run');
       expect(payload.sessionId).toMatch(/^chgpt_\d{8}_\d{6}_review-sprint$/);
       expect(payload.dryRun.files[0].path).toBe('plans/sprints/example.sprint.md');
+      expect(payload.dryRun.command).not.toContain('--browser-app');
 
       const metaPath = join(repoRoot, '.ai/harness/chatgpt/sessions', payload.sessionId, 'meta.json');
       expect(existsSync(metaPath)).toBe(true);
@@ -392,9 +395,7 @@ describe('chatgpt browser command', () => {
       expect(meta.engine).toBe('chatgpt-browser');
       expect(meta.provider).toBe('oracle');
       expect(meta.browser.profileDir).toBeUndefined();
-      expect(meta.browser.chatgptApp).toBe('team-review-mcp');
-      expect(payload.dryRun.command).toContain('--browser-app');
-      expect(payload.dryRun.command).toContain('team-review-mcp');
+      expect(meta.browser.chatgptApp).toBeUndefined();
 
       const read = runChatgpt(['browser-session', '--repo', repoRoot, payload.sessionId]);
       expect(read.status).toBe(0);
@@ -417,9 +418,10 @@ describe('chatgpt browser command', () => {
       expect(followup.status).toBe(0);
       const followupPayload = JSON.parse(followup.stdout);
       expect(followupPayload.sourceSessionId).toBe(payload.sessionId);
+      expect(followupPayload.dryRun.command).not.toContain('--browser-app');
       const followupMeta = JSON.parse(readFileSync(join(repoRoot, '.ai/harness/chatgpt/sessions', followupPayload.sessionId, 'meta.json'), 'utf-8'));
       expect(followupMeta.sourceSessionId).toBe(payload.sessionId);
-      expect(followupMeta.browser.chatgptApp).toBe('team-review-mcp');
+      expect(followupMeta.browser.chatgptApp).toBeUndefined();
 
       const cleanupPlan = runChatgpt(['browser-cleanup', '--repo', repoRoot, '--status', 'dry_run', '--limit', '1', '--json']);
       expect(cleanupPlan.status).toBe(0);
@@ -549,23 +551,6 @@ describe('chatgpt browser command', () => {
       expect(meta.provider).toBe('native');
       expect(meta.status).toBe('dry_run');
       expect(meta.browser.profileDir).toBeUndefined();
-
-      const appPreselectDryRun = runChatgpt([
-        'browser-consult',
-        '--repo',
-        repoRoot,
-        '--provider',
-        'native',
-        '--dry-run',
-        '--prompt',
-        'Reply exactly OK',
-        '--chatgpt-app',
-        'team-review-mcp',
-      ]);
-      expect(appPreselectDryRun.status).toBe(0);
-      const appPreselectPayload = JSON.parse(appPreselectDryRun.stdout);
-      expect(appPreselectPayload.status).toBe('failed');
-      expect(appPreselectPayload.error.code).toBe('CHATGPT_APP_PRESELECT_PROVIDER_UNSUPPORTED');
 
       const unsupported = runChatgpt([
         'browser-consult',
@@ -802,6 +787,7 @@ describe('chatgpt browser command', () => {
         expect(output).toContain('--browser-archive never');
         expect(output).toContain('--browser-model-strategy select');
         expect(output).toContain(`--file ${join(repoRoot, 'docs/example.md')}`);
+        expect(output).not.toContain('--browser-app');
         expect(output).not.toContain('--browser-manual-login');
         expect(output).not.toContain('DO NOT INHERIT');
         expect(output).not.toContain(`PWD: ${repoRoot}`);
@@ -880,6 +866,7 @@ describe('chatgpt browser command', () => {
         expect(output).toContain('--browser-model-strategy current');
         expect(output).toContain(`--browser-cookie-path ${join(profileDir, 'Cookies')}`);
         expect(output).toContain('--chatgpt-url https://chatgpt.com/');
+        expect(output).not.toContain('--browser-app');
         const meta = JSON.parse(readFileSync(join(repoRoot, '.ai/harness/chatgpt/sessions', payload.sessionId, 'meta.json'), 'utf-8'));
         expect(meta.browser.profileDir).toBe(userDataDir);
         expect(meta.browser.profileDirectory).toBe('Profile 1');
@@ -944,6 +931,7 @@ describe('chatgpt browser command', () => {
         const output = readFileSync(payload.paths.output, 'utf-8');
         expect(output).toContain(`--browser-cookie-path ${join(networkDir, 'Cookies')}`);
         expect(output).not.toContain(`--browser-cookie-path ${join(profileDir, 'Cookies')}`);
+        expect(output).not.toContain('--browser-app');
       } finally {
         rmSync(binDir, { recursive: true, force: true });
       }
@@ -1079,6 +1067,7 @@ describe('chatgpt browser command', () => {
         const output = readFileSync(payload.paths.output, 'utf-8');
         expect(output).toContain('--model gpt-5.5-pro --browser-model-strategy select');
         expect(output).toContain('--browser-thinking-time heavy');
+        expect(output).not.toContain('--browser-app');
         const meta = JSON.parse(readFileSync(join(repoRoot, '.ai/harness/chatgpt/sessions', payload.sessionId, 'meta.json'), 'utf-8'));
         expect(meta.model.thinking).toBe('heavy');
       } finally {
@@ -1087,100 +1076,7 @@ describe('chatgpt browser command', () => {
     });
   });
 
-  test('oracle app preselection fails closed when the binary lacks browser-app support', () => {
-    withRepo((repoRoot) => {
-      const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-fake-oracle-no-app-'));
-      try {
-        const oraclePath = join(binDir, 'oracle');
-        writeFileSync(
-          oraclePath,
-          [
-            '#!/bin/sh',
-            'case "$1" in',
-            '  --version) printf "%s\\n" "0.14.1"; exit 0;;',
-            '  --help|--debug-help) printf "%s\\n" "Usage: oracle --engine browser --write-output <p> --browser-thinking-time <level>"; exit 0;;',
-            'esac',
-            'for a in "$@"; do',
-            '  if [ "$a" = "--dry-run" ]; then exit 0; fi',
-            'done',
-            'printf "%s\\n" "unexpected oracle execution" >&2',
-            'exit 23',
-          ].join('\n'),
-        );
-        chmodSync(oraclePath, 0o755);
-        const result = runChatgpt([
-          'browser-consult',
-          '--repo',
-          repoRoot,
-          '--prompt',
-          'Review this.',
-          '--chatgpt-app',
-          'team-review-mcp',
-          '--oracle-bin',
-          oraclePath,
-        ]);
-        expect(result.status).toBe(0);
-        const payload = JSON.parse(result.stdout);
-        expect(payload.status).toBe('failed');
-        expect(payload.error.code).toBe('ORACLE_APP_PRESELECT_UNSUPPORTED');
-        const output = readFileSync(payload.paths.output, 'utf-8');
-        expect(output).toContain('does not support ChatGPT app preselection');
-        expect(output).not.toContain('unexpected oracle execution');
-      } finally {
-        rmSync(binDir, { recursive: true, force: true });
-      }
-    });
-  });
-
-  test('oracle provider passes ChatGPT app preselection to Oracle when supported', () => {
-    withRepo((repoRoot) => {
-      const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-fake-oracle-app-'));
-      try {
-        const oraclePath = join(binDir, 'oracle');
-        writeFileSync(
-          oraclePath,
-          [
-            '#!/bin/sh',
-            'case "$1" in',
-            '  --version) printf "%s\\n" "0.14.2"; exit 0;;',
-            '  --help|--debug-help) printf "%s\\n" "Usage: oracle --engine browser --write-output <p> --browser-app <name> --browser-thinking-time <level>"; exit 0;;',
-            'esac',
-            'ARGS="$*"',
-            'OUT=""',
-            'PREV=""',
-            'for a in "$@"; do',
-            '  if [ "$PREV" = "--write-output" ]; then OUT="$a"; fi',
-            '  PREV="$a"',
-            'done',
-            'if [ -n "$OUT" ]; then printf "%s\\n" "Oracle saw: $ARGS" > "$OUT"; fi',
-          ].join('\n'),
-        );
-        chmodSync(oraclePath, 0o755);
-        const result = runChatgpt([
-          'browser-consult',
-          '--repo',
-          repoRoot,
-          '--prompt',
-          'Review this.',
-          '--chatgpt-app',
-          'team-review-mcp',
-          '--oracle-bin',
-          oraclePath,
-        ]);
-        expect(result.status).toBe(0);
-        const payload = JSON.parse(result.stdout);
-        expect(payload.status).toBe('completed');
-        const output = readFileSync(payload.paths.output, 'utf-8');
-        expect(output).toContain('--browser-app team-review-mcp');
-        const meta = JSON.parse(readFileSync(join(repoRoot, '.ai/harness/chatgpt/sessions', payload.sessionId, 'meta.json'), 'utf-8'));
-        expect(meta.browser.chatgptApp).toBe('team-review-mcp');
-      } finally {
-        rmSync(binDir, { recursive: true, force: true });
-      }
-    });
-  });
-
-  test('oracle doctor probes binary capabilities and reports ready', () => {
+  test('oracle doctor probes binary capabilities and reports ready without app-preselection metadata', () => {
     withRepo((repoRoot) => {
       const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-fake-oracle-doctor-'));
       try {
@@ -1216,9 +1112,7 @@ describe('chatgpt browser command', () => {
           chatgptUrl: true,
           heartbeat: true,
         });
-        expect(readiness.oracle.optionalCapabilities).toEqual({
-          browserAppPreselect: false,
-        });
+        expect(readiness.oracle.optionalCapabilities).toBeUndefined();
         expect(readiness.oracle.missingCapabilities).toEqual([]);
 
         const missing = runChatgpt(['browser-doctor', '--repo', repoRoot, '--provider', 'oracle', '--oracle-bin', join(binDir, 'nope'), '--json'], ROOT, {
@@ -1413,11 +1307,13 @@ describe('chatgpt browser command', () => {
         expect(output).toContain('--followup oracle_upstream_123');
         expect(output).not.toContain(initialPayload.sessionId);
         expect(output).not.toContain('--browser-cookie-path');
+        expect(output).not.toContain('--browser-app');
         const followupMeta = JSON.parse(readFileSync(join(repoRoot, '.ai/harness/chatgpt/sessions', followupPayload.sessionId, 'meta.json'), 'utf-8'));
         // Parent linkage points at the source conversation; the new session's own
         // providerSessionId reflects what oracle returned for the reopened run.
         expect(followupMeta.parentProviderSessionId).toBe('oracle_upstream_123');
         expect(followupMeta.providerSessionId).toBe('oracle_followup_456');
+        expect(followupMeta.browser.chatgptApp).toBeUndefined();
       } finally {
         rmSync(binDir, { recursive: true, force: true });
       }
@@ -1448,7 +1344,8 @@ describe('chatgpt browser command', () => {
     expect(readFileSync(guide, 'utf-8')).toContain('Oracle CLI package currently requires `node >=24`');
     expect(readFileSync(guide, 'utf-8')).toContain('agent_actions');
     expect(readFileSync(guide, 'utf-8')).toContain('chatgpt-oracle-install-pinned');
-    expect(readFileSync(guide, 'utf-8')).toContain('--chatgpt-app <serverName>');
+    expect(readFileSync(guide, 'utf-8')).not.toContain('--chatgpt-app <serverName>');
+    expect(readFileSync(guide, 'utf-8')).not.toContain('--browser-app');
     expect(readFileSync(guide, 'utf-8')).toContain('chatgpt install-skill --target both');
     expect(readFileSync(guide, 'utf-8')).toContain('PROMPT_SECRET_SCAN_FAILED');
     expect(readFileSync(guide, 'utf-8')).toContain('meta.security.promptSecretScan');
@@ -1477,6 +1374,8 @@ describe('chatgpt browser command', () => {
     expect(consult).toContain('minutes or more');
     expect(consult).toContain('Do not treat elapsed time as failure');
     expect(consult).toContain('no thinking status detected yet');
+    expect(consult).not.toContain('--chatgpt-app');
+    expect(consult).not.toContain('--browser-app');
     expect(consult).not.toContain('gptpro-consult.md');
 
     const readBack = readFileSync(join(ROOT, 'assets/skills/repo-harness-chatgpt/references/read-back.md'), 'utf-8');
