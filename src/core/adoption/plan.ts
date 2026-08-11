@@ -4,6 +4,7 @@ import type { AdoptionPlan } from "./operations";
 import { summarizeOperations } from "./summary";
 import { withRollbackMetadata } from "./rollback";
 import { planStandardAdoption } from "./standard-plan";
+import { planWorkflowDirectoryPersistence } from "./workflow-directory-persistence";
 import { isRepoHarnessSourceCheckout } from "./source-checkout";
 
 export interface PlanAdoptionOptions {
@@ -40,7 +41,10 @@ export function planAdoption(opts: PlanAdoptionOptions): AdoptionPlan {
     };
   }
   const planned = planStandardAdoption({ repoRoot, mode, env: opts.env });
-  const operations = planned.operations.map(withRollbackMetadata);
+  const operations = [
+    ...planned.operations,
+    ...planWorkflowDirectoryPersistence({ repoRoot, mode }),
+  ].map(withRollbackMetadata);
 
   return {
     protocol: 1,
