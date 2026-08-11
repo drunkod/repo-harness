@@ -28,18 +28,12 @@ the authority of the local OS user and is not a filesystem sandbox. Keep the
 MCP server bound to loopback and keep ChatGPT confirmations enabled for writes
 and shell execution.
 
-## 1. Prerequisites
+## 1. Prerequisites and repository adoption
 
-You need:
+You need `repo-harness`, `cloudflared`, Git, `jq`, an adopted target repository,
+and ChatGPT Developer mode with permission to create a custom MCP app.
 
-- `repo-harness` on `PATH`;
-- `cloudflared`;
-- Git;
-- `jq`;
-- an adopted target repository;
-- ChatGPT Developer mode with permission to create a custom MCP app.
-
-Set the local values:
+Set local values:
 
 ```bash
 export REPO="$HOME/Projects/my-repo"
@@ -48,8 +42,6 @@ export MCP_PORT="8765"
 export MCP_NAME="repo-harness-coding"
 export LOCAL_ORIGIN="http://${MCP_HOST}:${MCP_PORT}"
 ```
-
-Do **not** set a public hostname yet. Quick Tunnel creates it for you.
 
 Check the repository:
 
@@ -72,13 +64,41 @@ repo-harness init
 
 Review the generated repository contract before continuing.
 
-## 2. Start a Quick Tunnel first
+### Verify adoption survives a Git commit
 
-A fresh coding setup needs a valid public HTTPS `/mcp` endpoint. Quick Tunnel
-can publish a hostname before the local MCP server is started, so create the
-public endpoint first.
+The standard workflow contract contains directories that may initially be
+empty. repo-harness persists required empty workflow directories with tracked
+sentinels so they survive a commit and a fresh worktree.
 
-For repeatable testing, use HTTP/2:
+When validating an adoption change, verify that property rather than testing
+only the original checkout:
+
+```bash
+repo-harness run check-task-workflow --strict
+
+git add -A
+git commit -m 'adopt repo-harness workflow'
+
+git worktree add --detach ../repo-harness-adoption-check HEAD
+(
+  cd ../repo-harness-adoption-check
+  repo-harness run check-task-workflow --strict
+)
+```
+
+The fresh-worktree check must also report:
+
+```text
+[workflow] OK
+```
+
+Do not create a test commit on a production branch merely to run this check;
+use a disposable branch or clone when adoption itself is under test.
+
+## 2. Start a Quick Tunnel
+
+Create the public endpoint before configuring the coding profile. For
+repeatable testing, force HTTP/2:
 
 ```bash
 rm -f /tmp/repo-harness-quick-tunnel.log
@@ -93,15 +113,15 @@ export CLOUDFLARED_PID=$!
 printf 'cloudflared pid=%s\n' "$CLOUDFLARED_PID"
 ```
 
-Wait before making the first request to the new hostname. In real testing,
-querying the hostname immediately after connector registration can race public
-DNS publication. A quiet 20-second grace period avoids that race:
+Wait before making the first request to the generated hostname. A newly issued
+Quick Tunnel name can race public DNS publication, so keep the same tunnel alive
+through a quiet grace period:
 
 ```bash
 sleep 20
 ```
 
-Inspect the tunnel:
+Inspect registration:
 
 ```bash
 grep -E \
@@ -117,10 +137,7 @@ Registered tunnel connection ... protocol=http2
 TCP Connectivity ... PASS
 ```
 
-When HTTP/2 is forced, failed QUIC/UDP prechecks are not fatal as long as the
-HTTP/2 connection registers and the TCP prechecks pass.
-
-Extract the generated origin:
+Extract the generated endpoint:
 
 ```bash
 export QUICK_URL="$({
@@ -129,18 +146,16 @@ export QUICK_URL="$({
 } | head -1)"
 
 [ -n "$QUICK_URL" ]
-printf 'Quick Tunnel: %s\n' "$QUICK_URL"
-
 export MCP_URL="${QUICK_URL}/mcp"
 printf 'ChatGPT MCP: %s\n' "$MCP_URL"
 ```
 
-The hostname is temporary. Restarting the Quick Tunnel can generate a different
+Quick Tunnel hostnames are temporary. A replacement tunnel can receive a new
 URL.
 
 ## 3. Configure the user-scoped coding profile
 
-Use the generated Quick Tunnel URL as the endpoint:
+Use the generated Quick Tunnel URL and explicitly grant the adopted repository:
 
 ```bash
 repo-harness mcp setup chatgpt \
@@ -183,16 +198,49 @@ jq '{
 }' ~/.repo-harness/mcp.local.json
 ```
 
-Expected fundamentals:
+Expected fundamentals are `scope: user`, `profile: coding`,
+`coding.enabled: true`, and an HTTPS `chatgpt.endpoint` ending in `/mcp`.
 
-```text
-scope              user
-profile            coding
-coding.enabled     true
-chatgpt.endpoint   https://<random>.trycloudflare.com/mcp
+## 4. Resolve the exact coding `repo_id`
+
+`open_workspace` takes the opaque registered repository ID, for example
+`repo_ab12cd34...`; a filesystem path or repository basename is not a substitute.
+
+Some coding-profile deployments return repository visibility metadata from
+`discover_harness_repos` without including that opaque `repo_id`. In that case,
+do **not** guess the ID and do not pass the absolute path as `repo_id`.
+
+Resolve the exact ID locally from the user-owned registry after setup:
+
+```bash
+export REPO_ROOT="$(cd "$REPO" && pwd -P)"
+export REPO_ID="$({
+  jq -r \
+    --arg path "$REPO_ROOT" \
+    '.repos[] | select(.path == $path and .accessMode == "read_write") | .id' \
+    "$HOME/.repo-harness/registered-repos.json" || true
+} | tail -n 1)"
+
+case "$REPO_ID" in
+  repo_*) ;;
+  *)
+    echo "STOP: no exact read_write repo_id found for $REPO_ROOT" >&2
+    exit 1
+    ;;
+esac
+
+printf 'REPO_ID=%s\n' "$REPO_ID"
 ```
 
-## 4. Start the local coding MCP server
+`registered-repos.json` is local authorization/registry state. Read only the
+fields needed for the test; do not dump unrelated local state into chat.
+
+In ChatGPT, `discover_harness_repos` remains useful to confirm that the intended
+repository is visible. If its response does not contain `repo_id`, provide the
+locally resolved `REPO_ID` explicitly to `open_workspace` instead of trying the
+returned path or display name.
+
+## 5. Start and verify the local server
 
 Run one coding-profile server instance:
 
@@ -208,7 +256,7 @@ repo-harness mcp serve \
 
 Do not bind to `0.0.0.0`.
 
-In another terminal, verify local health:
+In another terminal:
 
 ```bash
 curl -fsS "${LOCAL_ORIGIN}/health"
@@ -217,49 +265,29 @@ echo
 curl -fsS \
   "${LOCAL_ORIGIN}/.well-known/oauth-protected-resource/mcp"
 echo
-```
 
-Also prove the listener is loopback-only:
-
-```bash
 lsof -nP -iTCP:${MCP_PORT} -sTCP:LISTEN
 ```
 
-Reject a configuration that listens on `0.0.0.0:${MCP_PORT}` or `*:${MCP_PORT}`.
+The listener must remain loopback-only.
 
-## 5. Verify the public Quick Tunnel
+## 6. Verify the public endpoint and live doctor
 
-Now test the generated public hostname:
+Test the generated public hostname:
 
 ```bash
 curl -fsS "${QUICK_URL}/health"
 echo
 ```
 
-The returned JSON should report:
+The JSON should report `status: ok`, `profile: coding`, `auth: oauth`, and a
+`public_origin` equal to `QUICK_URL`.
 
-```text
-status:        ok
-profile:       coding
-auth:          oauth
-public_origin: <the same QUICK_URL>
-```
+If the name does not resolve immediately, keep the same registered tunnel alive
+and wait. Do not repeatedly replace the tunnel while DNS publication is still
+catching up.
 
-If the hostname does not resolve immediately, keep the same registered tunnel
-alive and wait. Do not repeatedly create new Quick Tunnels while DNS publication
-is still catching up.
-
-Useful diagnostics:
-
-```bash
-tail -n 120 /tmp/repo-harness-quick-tunnel.log
-
-ps -p "$CLOUDFLARED_PID" -o pid,ppid,command
-```
-
-## 6. Require a green live doctor
-
-Before using ChatGPT for mutation testing:
+Before ChatGPT mutation testing, require a green live doctor:
 
 ```bash
 repo-harness mcp doctor \
@@ -268,7 +296,7 @@ repo-harness mcp doctor \
   --json
 ```
 
-Require the readiness chain to reach:
+Require:
 
 ```text
 config_ready
@@ -277,11 +305,6 @@ config_ready
   -> oauth_ready
   -> mcp_ready
 ```
-
-The live doctor validates the local and public endpoints, OAuth discovery and
-PKCE flow, MCP initialization, and the advertised tool schema.
-
-Do not continue to mutation testing until `mcp_ready` is true.
 
 ## 7. Create or refresh the ChatGPT MCP app
 
@@ -293,18 +316,8 @@ MCP URL:        https://<random>.trycloudflare.com/mcp
 Authentication: OAuth
 ```
 
-Use the exact value of:
-
-```bash
-printf '%s\n' "$MCP_URL"
-```
-
-Quick Tunnel hostnames are ephemeral. When the hostname changes, update the
-ChatGPT app URL and authorize again.
-
-Keep confirmations enabled for write and shell tools.
-
-## 8. Complete OAuth safely
+Quick Tunnel hostnames are ephemeral. When the hostname changes, update the app
+URL and authorize again. Keep confirmations enabled for write and shell tools.
 
 The OAuth passphrase stays local in:
 
@@ -312,33 +325,14 @@ The OAuth passphrase stays local in:
 ~/.repo-harness/mcp.oauth.json
 ```
 
-Do not paste it into chat.
+Do not paste it into chat. If the browser-hosted authorization form returns
+`origin_not_allowed`, use
+`docs/chatgpt-repo-harness-oauth-origin-workaround.md` rather than weakening the
+coding server's Origin policy.
 
-If the normal authorization page works in your environment, enter the local
-passphrase there.
+## 8. First ChatGPT canaries
 
-If the browser-hosted form returns:
-
-```json
-{"error":"origin_not_allowed"}
-```
-
-use the documented local authorization helper flow instead of weakening the
-coding server's origin policy:
-
-```text
-docs/chatgpt-repo-harness-oauth-origin-workaround.md
-```
-
-The safe helper flow uses the fresh `/authorize?...` transaction generated by
-ChatGPT, reads the passphrase locally, submits with `Origin: https://chatgpt.com`,
-validates the callback host, and opens the ChatGPT callback. Never paste the
-fresh authorization URL, callback URL, authorization code, passphrase, or token
-into chat.
-
-## 9. First ChatGPT canary: status only
-
-Start a new ChatGPT conversation and require a real tool invocation:
+Start a new conversation and require a real tool invocation:
 
 ```text
 Use Repo Harness Coding and call harness_status.
@@ -346,18 +340,7 @@ Do not call any other tool.
 Do not modify anything and do not run shell commands.
 ```
 
-Pass condition:
-
-- ChatGPT shows a visible `Called tool` event or equivalent tool transcript;
-- `harness_status` returns the expected repository and `coding` profile;
-- no write tool runs;
-- no shell tool runs.
-
-Model prose claiming that a tool ran is not invocation evidence.
-
-## 10. Second canary: live doctor
-
-Then ask ChatGPT:
+Then:
 
 ```text
 Use Repo Harness Coding and call harness_doctor.
@@ -365,114 +348,119 @@ Do not call any other tool.
 Do not modify anything and do not run shell commands.
 ```
 
-Require a real tool call and a healthy result before testing direct coding
-operations.
+A visible **Called tool** event or captured tool-call transcript is invocation
+evidence. Model prose claiming that a tool ran is not evidence.
 
-## 11. Read-only managed-worktree test
+## 9. Read-only managed-worktree test
 
-Use a managed worktree before any mutation:
+Choose an approved base branch or exact commit and record it as `BASE_REF`. If
+you are validating the newly generated adoption files themselves, use a commit
+that contains those files rather than its pre-adoption parent.
+
+Use the exact opaque `REPO_ID` resolved locally in section 4:
 
 ```text
-Use the repo-harness coding MCP app.
+Use Repo Harness Coding only.
 
-1. Call discover_harness_repos for my target repository.
-2. Select its exact repo_id.
-3. Call open_workspace with mode "worktree" and an approved base_ref.
-4. Report workspace_id, branch, base_sha, dirty_source, and instruction files.
-5. Read the applicable repository instructions and README.md.
-6. Stop. Do not edit files and do not run shell commands.
+The exact registered repository ID is:
+<REPO_ID>
+
+The approved base is:
+<BASE_REF>
+
+1. Call discover_harness_repos for the target repository only to confirm it is visible.
+   Do not derive repo_id from that response if the opaque id is absent.
+2. Call open_workspace with exactly:
+   repo_id: "<REPO_ID>"
+   mode: "worktree"
+   base_ref: "<BASE_REF>"
+3. Report workspace_id, branch, base_sha, dirty_source, and instruction files.
+4. Require base_sha to equal "<BASE_REF>" when BASE_REF is an exact commit.
+5. Read the applicable AGENTS.md and CLAUDE.md instructions.
+6. Read README.md with the workspace read tool.
+7. Stop.
+
+Do not modify files.
+Do not call exec_command.
 ```
 
-Require visible tool calls for discovery, workspace open, and read.
+Do not replace `repo_id` with an absolute path or a repository basename when
+`open_workspace` expects the opaque registry ID.
 
-## 12. One harmless mutation
+Before mutating the new worktree, verify that its committed adoption state is
+self-contained:
 
-Only after the read-only test succeeds, create one disposable test note with
-`apply_patch`:
+```text
+Use Repo Harness Coding only.
+Use workspace <WORKSPACE_ID>.
+Call exec_command exactly once with:
+repo-harness run check-task-workflow --strict
+Do not modify files. Do not commit or push. Report the real exit status.
+```
+
+The expected result is exit status `0` and `[workflow] OK`.
+
+## 10. One harmless mutation
+
+Only after the read-only test and strict workflow check succeed, create one
+disposable note with `apply_patch`:
 
 ```text
 tasks/notes/mcp-coding-smoke.md
 ```
 
-Require:
+Require exactly one create operation, no other file changes, returned `diff`
+and `mutation_id`, and no commit or push.
 
-- one create operation;
-- no other file changes;
-- returned diff and `mutation_id`;
-- no commit;
-- no push.
+A successful mutation may still report a failed post-mutation CodeGraph refresh
+when the repository has no CodeGraph index. Treat the mutation result and index
+result separately: a returned mutation/diff can be valid while `index.state`
+reports that CodeGraph is not initialized. Initialize or repair CodeGraph as a
+separate operator task instead of repeating the mutation.
 
-Then inspect the result with read-only validation commands.
+## 11. Shell validation
 
-## 13. Shell test: validation commands only
-
-`exec_command` has local-user authority. Start with validation only:
+`exec_command` has local-user authority. Begin with validation only:
 
 ```text
 git status --short
 git diff --check
 git diff --stat
 git diff
+repo-harness run check-task-workflow --strict
 ```
 
 Do not claim a check passed unless the real exit status and output came back
-from `exec_command`.
+from `exec_command`. Do not use shell to bypass a direct-file-tool denial.
 
-Do not use shell to bypass `PATH_DENIED`, `PATH_IGNORED`, or `SYMLINK_ESCAPE`
-from the direct file tools.
+## 12. Negative path-policy test
 
-## 14. Safe negative test
-
-Ask the direct `read` tool for an unauthorized traversal such as:
+Ask the workspace `read` tool for:
 
 ```text
 ../outside
 ```
 
-It should fail closed.
+It must fail closed with a path-policy error such as `INVALID_RELATIVE_PATH`.
+Do not then use `exec_command` to bypass the rejection.
 
-A denied secret-style path may also be tested when appropriate. Do not then ask
-`exec_command` to bypass the denial.
+## 13. Quick Tunnel lifecycle and cleanup
 
-## 15. Quick Tunnel lifecycle
+If `cloudflared` is restarted and receives a new hostname:
 
-A Quick Tunnel is intentionally temporary. If `cloudflared` is restarted, the
-hostname may change.
+1. wait for HTTP/2 registration and the quiet publication grace period;
+2. capture the new `QUICK_URL`;
+3. rerun coding setup with `${QUICK_URL}/mcp`;
+4. restart the MCP server and require `mcp_ready`;
+5. update the ChatGPT app URL;
+6. authorize again;
+7. rerun the read-only canary.
 
-For a new hostname:
-
-1. start the new Quick Tunnel;
-2. wait for registration and a quiet publication grace period;
-3. capture the new `QUICK_URL`;
-4. rerun `repo-harness mcp setup chatgpt` with `${QUICK_URL}/mcp`;
-5. restart the MCP server;
-6. require `mcp_ready` again;
-7. update the ChatGPT app URL;
-8. authorize again;
-9. run the read-only canary again.
-
-Do not keep an old ChatGPT app URL after Repo Harness has been configured with a
-new public origin.
-
-## 16. Cleanup and revoke access
-
-Stop the Quick Tunnel:
+Stop the Quick Tunnel when finished:
 
 ```bash
 kill "$CLOUDFLARED_PID" 2>/dev/null || true
 ```
-
-Revoke coding access when testing is complete:
-
-```bash
-repo-harness mcp access set \
-  --repo "$REPO" \
-  --mode read_only \
-  --json
-```
-
-Changing repository access may invalidate existing coding authorization and
-require a new OAuth authorization later.
 
 List managed worktrees:
 
@@ -483,80 +471,34 @@ repo-harness mcp workspaces list --json
 Cleanup refuses dirty or unsafe-to-remove worktrees. Preserve or discard test
 work deliberately before cleanup.
 
-## 17. Optional: stable Cloudflare hostname
+Revoke coding access when testing is complete:
+
+```bash
+repo-harness mcp access set \
+  --repo "$REPO" \
+  --mode read_only \
+  --json
+```
+
+## 14. Optional: stable Cloudflare hostname
 
 A custom domain is **not required for the default testing flow**.
 
 Use a named Cloudflare tunnel only when you want a stable endpoint that survives
-`cloudflared` restarts without changing the ChatGPT app URL.
-
-Example optional flow:
+`cloudflared` restarts without changing the ChatGPT app URL:
 
 ```bash
 cloudflared tunnel login
 cloudflared tunnel create repo-harness-coding
 cloudflared tunnel route dns repo-harness-coding mcp.example.com
-```
-
-Example configuration:
-
-```yaml
-tunnel: <tunnel-uuid>
-credentials-file: ~/.cloudflared/<tunnel-uuid>.json
-
-ingress:
-  - hostname: mcp.example.com
-    service: http://127.0.0.1:8765
-  - service: http_status:404
-```
-
-Run it:
-
-```bash
 cloudflared tunnel run repo-harness-coding
 ```
 
-Then configure repo-harness with:
-
-```bash
-export MCP_URL="https://mcp.example.com/mcp"
-
-repo-harness mcp setup chatgpt \
-  --scope user \
-  --repo "$REPO" \
-  --profile coding \
-  --grant-read-write "$REPO" \
-  --host "$MCP_HOST" \
-  --port "$MCP_PORT" \
-  --server-name "$MCP_NAME" \
-  --endpoint "$MCP_URL"
-```
-
-Treat Cloudflare login certificates and tunnel credential JSON as secrets. Do
-not commit them or copy them into normal configuration strings.
-
-## 18. Acceptance checklist
-
-The default Quick Tunnel test is complete when all of these are true:
+Then configure repo-harness and ChatGPT with:
 
 ```text
-[ ] repo-harness repository is adopted
-[ ] coding setup is user-scoped
-[ ] repository grant is explicitly read_write
-[ ] MCP listener is loopback-only
-[ ] Quick Tunnel registers over HTTPS transport
-[ ] generated trycloudflare.com hostname becomes reachable
-[ ] configured endpoint ends in /mcp
-[ ] live doctor reaches mcp_ready
-[ ] ChatGPT OAuth completes
-[ ] visible harness_status invocation succeeds
-[ ] visible harness_doctor invocation succeeds
-[ ] read-only managed-worktree test succeeds
-[ ] first mutation changes exactly one harmless file
-[ ] validation commands return real exit status/output
-[ ] traversal/secret-path negative test fails closed
-[ ] no OAuth or Cloudflare secret is committed or pasted into chat
+https://mcp.example.com/mcp
 ```
 
-For routine testing, use Quick Tunnel first. Move to a named Cloudflare tunnel
-and custom hostname only when stable external addressing is actually needed.
+Keep the same loopback, explicit repository grant, OAuth, live-doctor, and
+read-only-before-mutation gates described above.
