@@ -10,6 +10,11 @@ API. Oracle is the default provider; native (Chrome CDP) is deprecated and
 kept only for diagnostics. Never route through the removed Chrome
 extension/`browser-bind` provider.
 
+Plan and Review use the standard Oracle browser transport. Generic consult and
+follow-up commands do not select ChatGPT apps or connectors; any required tool
+availability must be stated in the prompt and treated as unverified until the
+result is independently checked.
+
 Use GPT Pro wording with the user while treating `browser-*` as the
 implementation:
 
@@ -68,9 +73,6 @@ implementation:
 - `ORACLE_CAPTURE_INCOMPLETE`: do not auto-retry on native; the prompt may
   already be submitted. Reattach through the saved provider session instead
   (see `continue.md`).
-- `ORACLE_APP_PRESELECT_UNSUPPORTED`: the selected Oracle binary cannot
-  preselect the ChatGPT app; report it as a browser-trigger blocker instead of
-  relying on prompt text.
 - Files include secrets, denied paths, symlink escapes, or oversized bundles:
   preserve the failed dry-run evidence and do not run the real consult.
 

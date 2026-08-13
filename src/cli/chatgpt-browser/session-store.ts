@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { basename, dirname, join, relative } from 'path';
 import { resolveBrowserOutputPath } from './file-policy';
 import type {
@@ -7,6 +7,7 @@ import type {
   BrowserImportedArtifact,
   BrowserProviderName,
   BrowserSessionMeta,
+  BrowserSessionMode,
   BrowserSessionPaths,
   BrowserSessionStatus,
   PromptBundle,
@@ -47,6 +48,13 @@ function assertValidSessionId(sessionId: string): void {
   }
 }
 
+function normalizeBrowserSessionMeta(meta: BrowserSessionMeta): BrowserSessionMeta {
+  return {
+    ...meta,
+    mode: meta.mode ?? 'consult',
+  };
+}
+
 export function createBrowserSessionId(input: Pick<BrowserConsultInput, 'title' | 'prompt'>, date = new Date()): string {
   return `chgpt_${timestamp(date)}_${slugify(input.title ?? input.prompt.split(/\r?\n/)[0] ?? 'consult')}`;
 }
@@ -73,10 +81,12 @@ function renderTranscript(meta: BrowserSessionMeta, bundle: PromptBundle, output
   return [
     `# ChatGPT Browser Session: ${meta.sessionId}`,
     '',
+    `- Mode: ${meta.mode}`,
     `- Status: ${meta.status}`,
     `- Provider: ${meta.provider}`,
     `- Model: ${meta.model.requested ?? 'current'}`,
     `- Thinking: ${meta.model.thinking ?? 'unspecified'}`,
+    ...(meta.create ? [`- Create Outcome: ${meta.create.outcome}`] : []),
     ...(meta.browser.chatgptApp ? [`- ChatGPT App: ${meta.browser.chatgptApp}`] : []),
     ...(meta.sourceSessionId ? [`- Source Session: ${meta.sourceSessionId}`] : []),
     ...(meta.browser.conversationUrl ? [`- Conversation: ${meta.browser.conversationUrl}`] : []),
@@ -121,6 +131,20 @@ function allocateBrowserSessionPaths(input: BrowserConsultInput): { sessionId: s
   throw new Error(`could not allocate unique ChatGPT browser session id for ${baseSessionId}`);
 }
 
+function inheritedCreateMeta(input: BrowserConsultInput): BrowserSessionMeta['create'] | undefined {
+  if (!input.sourceSessionId) return undefined;
+  try {
+    const source = readBrowserSession(input.repoRoot, input.sourceSessionId, input.sessionRoot).meta.create;
+    return source ? {
+      ...source,
+      outcome: input.dryRun === true ? 'dry_run' : 'pending',
+      reportedGitHub: undefined,
+    } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function writeBrowserSession(opts: {
   input: BrowserConsultInput;
   provider: BrowserProviderName;
@@ -148,10 +172,24 @@ export function writeBrowserSession(opts: {
   const { sessionId, paths } = allocateBrowserSessionPaths(opts.input);
   const now = new Date().toISOString();
   const copiedArtifacts = copyArtifacts(paths.artifactsDir, opts.artifacts);
+  const inheritedCreate = inheritedCreateMeta(opts.input);
+  const create = opts.input.createContext
+    ? {
+      ...opts.input.createContext,
+      outcome: opts.input.dryRun === true ? 'dry_run' as const : 'pending' as const,
+      appSelection: {
+        requestedApp: opts.input.createContext.requestedApp,
+        verified: false as const,
+        source: 'prompt_contract_only' as const,
+      },
+    }
+    : inheritedCreate;
+  const mode = opts.input.sessionMode ?? (create ? 'create' : 'consult');
   const meta: BrowserSessionMeta = {
     version: 1,
     sessionId,
     engine: 'chatgpt-browser',
+    mode,
     provider: opts.provider,
     status: opts.status,
     repo: opts.input.repoRoot,
@@ -191,10 +229,11 @@ export function writeBrowserSession(opts: {
     },
     diagnostics: {
       dryRun: opts.input.dryRun === true,
-      reattachable: opts.status === 'incomplete_capture' || opts.status === 'recoverable',
+      reattachable: opts.status === 'incomplete_capture' || opts.status === 'recoverable' || opts.status === 'surface_blocked',
       lastCaptureAt: now,
     },
     security: opts.secretScan ? { promptSecretScan: opts.secretScan } : undefined,
+    create,
     sourceSessionId: opts.input.sourceSessionId,
     providerSessionId: opts.providerSessionId,
     parentProviderSessionId: opts.parentProviderSessionId ?? opts.input.parentProviderSessionId,
@@ -205,7 +244,7 @@ export function writeBrowserSession(opts: {
   writeFileSync(paths.prompt, opts.bundle.rendered, 'utf-8');
   writeFileSync(paths.output, opts.output.trimEnd() + '\n', 'utf-8');
   writeFileSync(paths.transcript, renderTranscript(meta, opts.bundle, opts.output), 'utf-8');
-  writeFileSync(paths.events, JSON.stringify({ ts: now, event: 'session.created', sessionId, status: opts.status }) + '\n', 'utf-8');
+  writeFileSync(paths.events, JSON.stringify({ ts: now, event: 'session.created', sessionId, mode, status: opts.status }) + '\n', 'utf-8');
   if (outputTarget?.ok) {
     mkdirSync(dirname(outputTarget.absolutePath), { recursive: true });
     writeFileSync(outputTarget.absolutePath, opts.output.trimEnd() + '\n', 'utf-8');
@@ -229,18 +268,72 @@ export function writeBrowserSession(opts: {
   };
 }
 
-export function listBrowserSessions(repoRoot: string, customRoot?: string, limit = 20): StoredBrowserSessionSummary[] {
+export function updateBrowserSessionMeta(
+  repoRoot: string,
+  sessionId: string,
+  update: (meta: BrowserSessionMeta) => BrowserSessionMeta,
+  customRoot?: string,
+): BrowserSessionMeta {
+  const paths = browserSessionPaths(repoRoot, sessionId, customRoot);
+  const metaPath = join(paths.sessionDir, 'meta.json');
+  if (!existsSync(metaPath)) throw new Error(`session not found: ${sessionId}`);
+  const current = normalizeBrowserSessionMeta(JSON.parse(readFileSync(metaPath, 'utf-8')) as BrowserSessionMeta);
+  const now = new Date().toISOString();
+  const updated = update(current);
+  const next = normalizeBrowserSessionMeta({
+    ...updated,
+    diagnostics: {
+      ...updated.diagnostics,
+      reattachable: updated.status === 'incomplete_capture'
+        || updated.status === 'recoverable'
+        || updated.status === 'surface_blocked',
+    },
+    updatedAt: now,
+  });
+  writeFileSync(metaPath, JSON.stringify(next, null, 2) + '\n', 'utf-8');
+  if (existsSync(paths.transcript)) {
+    let transcript = readFileSync(paths.transcript, 'utf-8');
+    transcript = transcript.replace(/^- Mode: .*$/m, `- Mode: ${next.mode}`);
+    transcript = transcript.replace(/^- Status: .*$/m, `- Status: ${next.status}`);
+    if (next.create) {
+      if (/^- Create Outcome: .*$/m.test(transcript)) {
+        transcript = transcript.replace(/^- Create Outcome: .*$/m, `- Create Outcome: ${next.create.outcome}`);
+      } else {
+        transcript = transcript.replace(/^- Thinking: .*$/m, (line) => `${line}\n- Create Outcome: ${next.create?.outcome}`);
+      }
+    }
+    writeFileSync(paths.transcript, transcript, 'utf-8');
+  }
+  appendFileSync(paths.events, JSON.stringify({
+    ts: now,
+    event: 'session.metadata_updated',
+    sessionId,
+    mode: next.mode,
+    status: next.status,
+    createOutcome: next.create?.outcome,
+  }) + '\n', 'utf-8');
+  return next;
+}
+
+export function listBrowserSessions(
+  repoRoot: string,
+  customRoot?: string,
+  limit = 20,
+  mode?: BrowserSessionMode,
+): StoredBrowserSessionSummary[] {
   const root = sessionRoot(repoRoot, customRoot);
   if (!existsSync(root)) return [];
   return readdirSync(root, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => join(root, entry.name, 'meta.json'))
     .filter((path) => existsSync(path))
-    .map((path) => JSON.parse(readFileSync(path, 'utf-8')) as BrowserSessionMeta)
+    .map((path) => normalizeBrowserSessionMeta(JSON.parse(readFileSync(path, 'utf-8')) as BrowserSessionMeta))
+    .filter((meta) => mode === undefined || meta.mode === mode)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, limit)
     .map((meta) => ({
       sessionId: meta.sessionId,
+      mode: meta.mode,
       status: meta.status,
       provider: meta.provider,
       createdAt: meta.createdAt,
@@ -249,6 +342,7 @@ export function listBrowserSessions(repoRoot: string, customRoot?: string, limit
       outputPath: `${DEFAULT_SESSION_ROOT}/${meta.sessionId}/output.md`,
       transcriptPath: `${DEFAULT_SESSION_ROOT}/${meta.sessionId}/transcript.md`,
       conversationUrl: meta.browser.conversationUrl,
+      createOutcome: meta.create?.outcome,
     }));
 }
 
@@ -256,7 +350,7 @@ export function readBrowserSession(repoRoot: string, sessionId: string, customRo
   const paths = browserSessionPaths(repoRoot, sessionId, customRoot);
   if (!existsSync(join(paths.sessionDir, 'meta.json'))) throw new Error(`session not found: ${sessionId}`);
   return {
-    meta: JSON.parse(readFileSync(join(paths.sessionDir, 'meta.json'), 'utf-8')) as BrowserSessionMeta,
+    meta: normalizeBrowserSessionMeta(JSON.parse(readFileSync(join(paths.sessionDir, 'meta.json'), 'utf-8')) as BrowserSessionMeta),
     prompt: readFileSync(paths.prompt, 'utf-8'),
     transcript: readFileSync(paths.transcript, 'utf-8'),
     output: readFileSync(paths.output, 'utf-8'),
@@ -280,6 +374,7 @@ export function cleanupBrowserSessions(repoRoot: string, opts: {
   customRoot?: string;
   olderThanDays?: number;
   status?: BrowserSessionStatus;
+  mode?: BrowserSessionMode;
   dryRun?: boolean;
   limit?: number;
 } = {}): { removed: string[]; candidates: string[]; dryRun: boolean } {
@@ -292,10 +387,11 @@ export function cleanupBrowserSessions(repoRoot: string, opts: {
       const sessionDir = join(root, entry.name);
       const metaPath = join(sessionDir, 'meta.json');
       if (!existsSync(metaPath)) return null;
-      const meta = JSON.parse(readFileSync(metaPath, 'utf-8')) as BrowserSessionMeta;
-      const stat = statSync(sessionDir);
+      const meta = normalizeBrowserSessionMeta(JSON.parse(readFileSync(metaPath, 'utf-8')) as BrowserSessionMeta);
       if (opts.status && meta.status !== opts.status) return null;
-      if (cutoff !== undefined && stat.mtimeMs >= cutoff) return null;
+      if (opts.mode && meta.mode !== opts.mode) return null;
+      const activityMs = Date.parse(meta.updatedAt);
+      if (cutoff !== undefined && (!Number.isFinite(activityMs) || activityMs >= cutoff)) return null;
       return { sessionId: entry.name, sessionDir };
     })
     .filter((entry): entry is { sessionId: string; sessionDir: string } => entry !== null)

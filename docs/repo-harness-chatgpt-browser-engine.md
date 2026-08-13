@@ -1,6 +1,12 @@
 # repo-harness ChatGPT Browser Engine
 
-`repo-harness chatgpt browser-*` uses a locally authenticated ChatGPT Web browser session for planning and review workflows. It does not use the OpenAI API and does not require `OPENAI_API_KEY`.
+`repo-harness chatgpt browser-*` uses a locally authenticated ChatGPT Web
+browser session for planning, bounded GitHub Create, and review workflows. It
+does not use the OpenAI API and does not require `OPENAI_API_KEY`.
+
+Create-specific target, write, result, and independent read-back rules live in
+[ChatGPT + GitHub App Create](./repo-harness-chatgpt-github-create.md); this page
+remains authoritative for the shared browser transport and session lifecycle.
 
 ## What It Does
 
@@ -11,6 +17,7 @@
 - Supports dry-run preview without opening a browser.
 - Supports an Oracle provider wrapper for `oracle --engine browser` (the default, recommended main path).
 - Supports linked follow-up sessions, conversation URL readback, and safe cleanup planning.
+- Supports repository-bound Create and a separate read-only Create read-back through the same Oracle browser engine.
 - Exposes optional MCP tools only when the MCP server is started with `--enable-chatgpt-browser`.
 
 ## What It Does Not Do
@@ -22,6 +29,7 @@
 - It does not import local artifact paths from ordinary provider stdout.
 - It does not auto-fall back from Oracle to another provider. Oracle may have already submitted the prompt before a capture drop, so silent retries would double-ask.
 - It does not generate, install, or require a Chrome extension.
+- It does not provider-attest ChatGPT app tool calls; Create/read-back evidence remains explicitly trust-labelled and requires Review.
 
 ## Provider Posture
 
@@ -142,6 +150,10 @@ the saved `prompt.md` before transporting it through Codex's built-in browser.
 review consults retain the path gate without silently enabling this delegate
 contract.
 
+Create and Create read-back enable the same fail-closed scan internally; their
+operators do not add a separate `--secret-scan` flag. See the Create guide for
+their required inputs and outcomes.
+
 ## Oracle Provider
 
 ```bash
@@ -160,14 +172,20 @@ The wrapper maps repo-harness input to `oracle --engine browser --browser-archiv
 
 The oracle binary is resolved in a fixed, auditable order — `--oracle-bin`, then `REPO_HARNESS_ORACLE_BIN`, then repo-local `node_modules/.bin/oracle`, then `oracle` on `PATH`. A missing binary fails with `ORACLE_NOT_INSTALLED`; explicitly configured binaries (`--oracle-bin` or `REPO_HARNESS_ORACLE_BIN`) fail closed when invalid and do not silently fall through to the next source. repo-harness never implicitly downloads or `npx`-executes an unpinned oracle. `browser-doctor --provider oracle --json` runs `--help`, `--debug-help`, `--version`, plus an isolated `--browser-thinking-time` dry-run parser probe, and reports `installed`, resolved `binary`, `version`, `nodeCompatible`, a `capabilities` map (`browserEngine`, `writeOutput`, `browserFollowup`, `sessionFollowup`, `browserArchive`, `browserModelStrategy`, `browserCookiePath`, `browserThinkingTime`, `chatgptUrl`, `heartbeat`), and opt-in `agent_actions` when a GPT Pro setup repair can install, upgrade, or re-point the selected pinned external CLI; `status:"ready"` requires every capability for every flag repo-harness may send at runtime.
 
-When a ChatGPT MCP Connector app must be active for read-back, use `--chatgpt-app <serverName>` with the server name recorded by `repo-harness mcp doctor --repo <repo> --json` under `chatgpt.serverName`. repo-harness maps that to Oracle `--browser-app <serverName>` so Oracle selects the composer app before submitting the prompt. This is an opt-in capability: it is reported under `oracle.optionalCapabilities.browserAppPreselect` and is required only when `--chatgpt-app` is present. If the selected Oracle binary lacks `--browser-app`, the run fails before prompt submission with `ORACLE_APP_PRESELECT_UNSUPPORTED`; do not rely on plain prompt text such as `@serverName` as evidence that ChatGPT exposed MCP tools.
+Plan, Create, Review, read-back, and follow-up use the same Oracle browser
+transport. Published Oracle versions do not expose a supported app-selection
+flag, so generic `browser-consult` and `browser-followup` do not expose a
+ChatGPT-app option, Browser Doctor does not advertise app preselection, and
+repo-harness never emits an Oracle app-selection argument.
 
-App selection and tool availability are separate gates. `--chatgpt-app` only
-selects the Connector in the composer; ChatGPT can still see a stale scanned
-tool schema. If a run proves the app is selected but ChatGPT reports a specific
-tool unavailable, compare the live MCP `/mcp` `tools/list` against the
-Connector's visible tools and use ChatGPT Connector **Scan Tools** to refresh the
-schema.
+Create and Create read-back still require the expected connected app name as a
+repo-harness contract value. That value is written into the fixed prompt,
+session metadata, and structured result validation only. It is not provider-
+attested: if the named app or its GitHub tools are unavailable in the
+conversation, ChatGPT must stop without writing and report the missing
+capability. App selection and tool availability therefore remain unverified
+prompt-level evidence until an independent read-back and Review confirm the
+remote state.
 
 Long Oracle browser runs default to `--heartbeat 59`. repo-harness streams Oracle diagnostics and heartbeat lines to stderr while preserving stdout for the final JSON payload, so humans and agents get a periodic liveness signal without breaking automation that parses command output.
 
@@ -176,6 +194,9 @@ Oracle browser mode supports model selection through `--model` and thinking inte
 Use the Oracle CLI, not `oracle-mcp`, as the repo-harness provider runtime. `oracle-mcp` is useful when an external MCP host wants Oracle as a tool, but repo-harness needs per-run isolation for `ORACLE_HOME_DIR`, working directory, `ORACLE_*` environment, `--write-output` answer authority, session metadata, and fail-closed capability probes. A long-lived MCP server would move those boundaries into process state, so it remains an optional external integration surface rather than the default ChatGPT browser provider.
 
 Multi-turn works two ways: repeat `--follow-up` within one run, or reopen a saved conversation later with `browser-followup --session <id>` (which passes oracle `--followup <providerSessionId>`). A follow-up records the parent `providerSessionId`, only resumes from a session that reached a resumable terminal state, and uses the binding recorded on the parent repo-harness session. If the parent session predates binding metadata, repo-harness does not inject the current repository binding into the follow-up command.
+
+Create read-back is intentionally not a follow-up. It opens a new Oracle browser
+session so its `readBackSessionId` differs from the Create `sessionId`.
 
 The doctor status taxonomy is distinct per provider (no single overloaded `partial`): oracle -> `ready` | `unavailable` (`ORACLE_NOT_INSTALLED`) | `action_required` (`ORACLE_INCOMPATIBLE`); native -> `deprecated` (`NATIVE_PROVIDER_DEPRECATED`).
 
@@ -272,6 +293,8 @@ Enabled tools:
 - `open_chatgpt_browser_session`
 - `continue_chatgpt_browser_session`
 
+Create and Create read-back are not exposed as MCP tools in this MVP.
+
 Use `dryRun: true` for planning or policy inspection. Non-dry-run consults may create a real ChatGPT Web conversation through the configured provider.
 
 MCP browser consults restrict `writeOutput` to repo-harness workflow artifacts such as `.ai/harness/handoff/*.md`, `tasks/reviews/**`, `.ai/harness/checks/**`, `plans/prds/**`, and `plans/sprints/**`. Absolute paths, source paths, package manifests, lockfiles, secrets, and existing files without `overwriteOutput: true` are rejected before provider execution.
@@ -299,6 +322,9 @@ Denied by default:
 
 The engine rejects denied files before browser/provider execution.
 Allowed-path symlinks that resolve outside the repository are rejected.
+For delegate and Create modes, path policy is only the first gate: the exact
+rendered content is also scanned before provider activity. Path acceptance
+alone is not evidence that a file is safe to send.
 For delegate mode, path policy is only the first gate: `--secret-scan` also
 scans the fully rendered allowed content. Path acceptance alone is not evidence
 that a file is safe to send.
@@ -310,5 +336,6 @@ that a file is safe to send.
 - Do not expose Chrome remote debugging outside localhost without an explicit tunnel/security plan.
 - Use `--dry-run --secret-scan` before sending any delegate context; transport
   the exact saved and hash-verified `prompt.md`, without later additions.
+- Use Create's mandatory scan and dry-run before a real mutating session.
 - Prefer narrow files over whole-repo dumps.
 - Treat generated ChatGPT output as review input, not authoritative code truth.

@@ -1,4 +1,6 @@
-export type BrowserSessionStatus = 'completed' | 'running' | 'incomplete_capture' | 'recoverable' | 'failed' | 'cancelled' | 'dry_run';
+export type BrowserSessionStatus = 'completed' | 'running' | 'incomplete_capture' | 'recoverable' | 'failed' | 'cancelled' | 'dry_run' | 'surface_blocked';
+
+export type BrowserSessionMode = 'consult' | 'create';
 
 export type BrowserProviderName = 'oracle' | 'native';
 
@@ -11,6 +13,97 @@ export type BrowserWriteOutputPolicy = 'cli' | 'mcp';
 export interface BrowserFileInput {
   path: string;
   delivery?: 'inline';
+}
+
+export interface BrowserCreateSessionContext {
+  repository: string;
+  defaultBranch: string;
+  baseCommit: string;
+  targetBranch: string;
+  planPath: string;
+  contractPath: string;
+  draftPr: boolean;
+  requestedApp: string;
+  creationReportPath: string;
+}
+
+export type BrowserCreateOutcome = 'pending' | 'dry_run' | 'reported' | 'surface_blocked' | 'provider_failed' | 'recoverable';
+
+export interface BrowserCreatePullRequestEvidence {
+  number?: number;
+  url?: string;
+  draft?: boolean;
+  baseBranch?: string;
+  headBranch?: string;
+  headSha?: string;
+}
+
+export interface BrowserCreateReportedGitHubEvidence {
+  trust: 'assistant_reported';
+  repository: string;
+  defaultBranch: string;
+  baseCommit: string;
+  branch: string;
+  targetBranchExisted: boolean;
+  commitSha: string;
+  pullRequest?: BrowserCreatePullRequestEvidence;
+  changedFiles: string[];
+  toolEvents: string[];
+}
+
+export type BrowserCreateReadBackOutcome =
+  | 'dry_run'
+  | 'matched'
+  | 'mismatch'
+  | 'surface_blocked'
+  | 'provider_failed'
+  | 'recoverable';
+
+export interface BrowserCreateComparisonEvidence {
+  baseCommit: string;
+  headCommit: string;
+  status: 'ahead' | 'identical' | 'diverged';
+  aheadBy?: number;
+  behindBy?: number;
+}
+
+export interface BrowserCreateReadBackEvidence {
+  trust: 'assistant_reported_readback';
+  repository: string;
+  defaultBranch: string;
+  baseCommit: string;
+  branch: string;
+  branchHead: string;
+  commitSha: string;
+  commitExists: boolean;
+  pullRequest?: BrowserCreatePullRequestEvidence;
+  changedFiles: string[];
+  comparison: BrowserCreateComparisonEvidence;
+  readActions: string[];
+}
+
+export interface BrowserCreateReadBackMeta {
+  sessionId: string;
+  outcome: BrowserCreateReadBackOutcome;
+  requestedApp: string;
+  evidence?: BrowserCreateReadBackEvidence;
+  error?: {
+    code: string;
+    message: string;
+    recovery?: string;
+  };
+}
+
+export interface BrowserCreateSessionMeta extends BrowserCreateSessionContext {
+  outcome: BrowserCreateOutcome;
+  appSelection: {
+    requestedApp: string;
+    reportedSelectedApp?: string;
+    verified: false;
+    source: 'prompt_contract_only';
+  };
+  reportedGitHub?: BrowserCreateReportedGitHubEvidence;
+  readBack?: BrowserCreateReadBackMeta;
 }
 
 export interface BrowserConsultInput {
@@ -27,7 +120,8 @@ export interface BrowserConsultInput {
   followups?: string[];
   model?: string;
   thinking?: ThinkingLevel;
-  chatgptApp?: string;
+  /** Generic browser transport never selects a ChatGPT app. Create overrides this with its prompt-contract field. */
+  chatgptApp?: never;
   provider?: BrowserProviderName;
   chatgptUrl?: string;
   timeoutMs?: number;
@@ -45,6 +139,44 @@ export interface BrowserConsultInput {
   browserChannel?: NativeBrowserChannel;
   keepBrowser?: boolean;
   headless?: boolean;
+  sessionMode?: BrowserSessionMode;
+  createContext?: BrowserCreateSessionContext;
+}
+
+export interface BrowserCreateInput extends Omit<
+  BrowserConsultInput,
+  'chatgptApp' | 'files' | 'provider' | 'requireSecretScan' | 'sessionMode' | 'createContext'
+> {
+  chatgptApp: string;
+  repository: string;
+  defaultBranch: string;
+  baseCommit: string;
+  targetBranch: string;
+  planPath: string;
+  contractPath: string;
+  draftPr?: boolean;
+  files?: BrowserFileInput[];
+  provider?: 'oracle';
+}
+
+export interface BrowserCreateReadBackInput extends Omit<
+  BrowserConsultInput,
+  'prompt' | 'files' | 'followups' | 'provider' | 'sourceSessionId' | 'providerSessionId' | 'parentProviderSessionId' | 'chatgptApp'
+> {
+  sessionId: string;
+  chatgptApp?: string;
+  provider?: 'oracle';
+}
+
+export interface BrowserCreateReadBackResult {
+  createSessionId: string;
+  readBackSessionId: string;
+  status: BrowserSessionStatus;
+  paths: BrowserSessionPaths;
+  meta: BrowserSessionMeta;
+  create: BrowserCreateSessionMeta;
+  dryRun?: BrowserConsultResult['dryRun'];
+  error?: BrowserConsultResult['error'];
 }
 
 export interface BrowserImportedArtifact {
@@ -96,6 +228,7 @@ export interface BrowserSessionMeta {
   version: 1;
   sessionId: string;
   engine: 'chatgpt-browser';
+  mode: BrowserSessionMode;
   provider: BrowserProviderName;
   status: BrowserSessionStatus;
   repo: string;
@@ -109,6 +242,7 @@ export interface BrowserSessionMeta {
   browser: {
     mode: 'manual-login';
     chatgptUrl: string;
+    /** Legacy read compatibility only; current sessions do not populate this field. */
     chatgptApp?: string;
     channel?: NativeBrowserChannel;
     profileDir?: string;
@@ -136,6 +270,7 @@ export interface BrowserSessionMeta {
   security?: {
     promptSecretScan: PromptSecretScanReceipt;
   };
+  create?: BrowserCreateSessionMeta;
   sourceSessionId?: string;
   providerSessionId?: string;
   parentProviderSessionId?: string;
@@ -153,6 +288,7 @@ export interface BrowserSessionMeta {
 
 export interface StoredBrowserSessionSummary {
   sessionId: string;
+  mode: BrowserSessionMode;
   status: BrowserSessionStatus;
   provider: BrowserProviderName;
   createdAt: string;
@@ -161,6 +297,7 @@ export interface StoredBrowserSessionSummary {
   outputPath: string;
   transcriptPath: string;
   conversationUrl?: string;
+  createOutcome?: BrowserCreateOutcome;
 }
 
 export interface StoredBrowserSession {
