@@ -1,0 +1,32 @@
+schemaVersion: archcontext.node/v2
+id: capability.verification.codegraph-readiness
+kind: capability
+name: CodeGraph Readiness
+status: active
+summary: Resolves and verifies the repository CodeGraph runtime and index readiness.
+responsibilities:
+  - Own CodeGraph installation detection, status normalization, and readiness diagnostics.
+source:
+  include:
+    - "scripts/ensure-codegraph.sh"
+    - "src/cli/tools/codegraph.ts"
+    - "src/cli/mcp/codegraph-adapter.ts"
+    - "tests/cli/codegraph-resolver.test.ts"
+    - "docs/architecture/modules/verification/codegraph-readiness.md"
+  entrypoints:
+    - id: entrypoint.codegraph-readiness.primary
+      path: "src/cli/tools/codegraph.ts"
+      symbols:
+        - name: "ensureCodegraph"
+          sinks:
+            - id: sink.codegraph-readiness.primary
+              path: "src/cli/tools/codegraph.ts"
+              symbol: "checkCodegraph"
+extensions:
+  contractFiles:
+    agents: "AGENTS.md"
+    claude: "CLAUDE.md"
+  lspProfile: "typescript-lsp"
+  verification:
+    - "bun test tests/check-agent-tooling.test.ts tests/cli/codegraph-resolver.test.ts"
+    - "bash scripts/ensure-codegraph.sh --check --json"

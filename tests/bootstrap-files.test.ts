@@ -79,7 +79,7 @@ describe("Bootstrap Script Contracts", () => {
       { name: "deep-reasoner", model: "gpt-5.6-terra", effort: "xhigh", sandboxMode: "read-only" },
       { name: "fast-worker", model: "gpt-5.6-luna", effort: "max", sandboxMode: "workspace-write" },
       { name: "deep-worker", model: "gpt-5.6-terra", effort: "xhigh", sandboxMode: "workspace-write" },
-      { name: "gatekeeper", model: "gpt-5.6-sol", effort: "xhigh", sandboxMode: "read-only" },
+      { name: "gatekeeper", model: "gpt-5.6-terra", effort: "xhigh", sandboxMode: "read-only" },
       { name: "root-cause-prover", model: "gpt-5.6-terra", effort: "high", sandboxMode: "workspace-write" },
       { name: "harness-evaluator", model: "gpt-5.6-terra", effort: "high", sandboxMode: "workspace-write" },
     ];
@@ -165,7 +165,7 @@ describe("Bootstrap Script Contracts", () => {
     expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(pkg.private).toBeUndefined();
     expect(pkg.bin["repo-harness"]).toBe("src/cli/index.ts");
-    expect(pkg.bin["repo-harness-hook"]).toBe("src/cli/hook-entry.ts");
+    expect(pkg.bin["repo-harness-hook"]).toBe("dist/hook-entry.js");
     expect(pkg.files).toContain("assets/");
     expect(pkg.files).not.toContain("docs/reference-configs/");
     expect(cliEntry).toContain("CLI_VERSION");
@@ -498,7 +498,10 @@ describe("Bootstrap Script Contracts", () => {
     expect(claudeMode).toContain("read-only reviewer");
     expect(claudeMode).toContain("no `Bash`/`Edit`/`Write`");
     expect(claudeMode).toContain("Pinned to the `fable` alias");
-    expect(claudeMode).toContain("retries exactly once on `opus`");
+    expect(claudeMode).toContain("Exactly two attempts");
+    expect(claudeMode).toContain("attempt 2 always re-runs on `opus`");
+    expect(claudeMode).toContain("`skipped`: advisory and\n  non-blocking (exit 0)");
+    expect(claudeMode).toContain("do not re-run the review");
     expect(claudeMode).toContain("330 seconds");
     expect(claudeMode).toContain("~/.claude/projects/<project>/<session-id>.jsonl");
     expect(claudeMode).toContain("malformed_transcript");
@@ -511,6 +514,9 @@ describe("Bootstrap Script Contracts", () => {
     expect(codexMode).toContain("resolved commit SHA");
     expect(codexMode).toContain('model_reasoning_effort="high"');
     expect(codexMode).toContain("1800 seconds");
+    expect(codexMode).toContain("Exactly two attempts");
+    expect(codexMode).toContain("`skipped`: advisory and\n  non-blocking (exit 0)");
+    expect(codexMode).toContain("do not re-run the review");
     expect(codexMode).toContain("repo-harness cross-review --provider codex");
     expect(codexMode).toContain("No merge-gate");
     expect(codexMode).toContain("retried against Claude");

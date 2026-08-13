@@ -4,6 +4,9 @@ node_modules/
 # Test coverage
 coverage/
 
+# Prepack-built single-file hook bundle (projection of src/cli/hook-entry.ts)
+dist/
+
 # Bun
 bun.lockb
 
@@ -13,6 +16,7 @@ bun.lockb
 # IDE
 .idea/
 .vscode/settings.json
+.cursor/
 
 # Sisyphus internal state (not project deliverables)
 .sisyphus/boulder.json
@@ -44,6 +48,7 @@ tasks/.current.md.tmp.*
 .ai/harness/handoff/resume.md
 .ai/harness/capability-context/
 .ai/harness/journal/
+.ai/harness/architecture-projection/
 .ai/harness/security/*
 !.ai/harness/security/.gitkeep
 .ai/harness/planning/*
@@ -68,8 +73,7 @@ tasks/.current.md.tmp.*
 !.ai/harness/mcp/.gitkeep
 .ai/harness/triage/*
 !.ai/harness/triage/.gitkeep
-.repo-harness/chatgpt-browser.local.json
-.repo-harness/chatgpt-browser.tokens.json
+.repo-harness/
 .codex/*
 !.codex/
 !.codex/agents/
@@ -84,11 +88,18 @@ autoresearch/
 *.tgz
 _ref/
 _ops/
-.repo-harness/mcp.local.json
-.repo-harness/mcp.tokens.json
-.repo-harness/chatgpt-browser.local.json
-.repo-harness/chatgpt-browser.tokens.json
-.archcontext/
+.archcontext/*
+!.archcontext/manifest.yaml
+!.archcontext/product.yaml
+!.archcontext/model/
+.archcontext/model/*
+!.archcontext/model/nodes/
+!.archcontext/model/relations/
+!.archcontext/model/flows/
+!.archcontext/decisions/
+!.archcontext/policies/
+!.archcontext/practices/
+!.archcontext/projections/
 .codegraph/
 .understand-anything/
 # Environment
@@ -100,5 +111,3 @@ _ops/
 # Operations
 # Local operations state
 .claude/worktrees/
-.repo-harness/mcp.oauth.json
-.repo-harness/mcp.oauth-tokens.json

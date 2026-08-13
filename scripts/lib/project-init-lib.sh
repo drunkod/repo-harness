@@ -15,7 +15,18 @@ coverage/
 
 # External references
 _ref/
-.archcontext/
+.archcontext/*
+!.archcontext/manifest.yaml
+!.archcontext/product.yaml
+!.archcontext/model/
+.archcontext/model/*
+!.archcontext/model/nodes/
+!.archcontext/model/relations/
+!.archcontext/model/flows/
+!.archcontext/decisions/
+!.archcontext/policies/
+!.archcontext/practices/
+!.archcontext/projections/
 .codegraph/
 
 # Local operations state
@@ -55,6 +66,7 @@ tasks/.current.md.tmp.*
 .ai/harness/handoff/resume.md
 .ai/harness/capability-context/
 .ai/harness/journal/
+.ai/harness/architecture-projection/
 .ai/harness/security/*
 !.ai/harness/security/.gitkeep
 .ai/harness/planning/*
@@ -73,8 +85,7 @@ tasks/.current.md.tmp.*
 .ai/harness/chatgpt/sessions/
 .ai/harness/triage/*
 !.ai/harness/triage/.gitkeep
-.repo-harness/chatgpt-browser.local.json
-.repo-harness/chatgpt-browser.tokens.json
+.repo-harness/
 .codex/*
 .claude/.plan-state/
 EOF_RUNTIME
@@ -354,9 +365,7 @@ delegation:
   runner:
     preferred:
       - subagent
-      - codex-exec
-      - main-thread
-    fallback: main-thread
+    fallback: null
     brief_is_authoritative: true
 ```
 
@@ -1750,6 +1759,8 @@ pi_write_harness_policy() {
     "capability_resolver": "repo-harness run capability-resolver",
     "capability_config": "repo-harness run capability-config",
     "capability_match_rule": "longest-prefix; same-length ambiguity fails",
+    "capability_source": "registry",
+    "capability_source_rule": "single authority selected by capability_source; registry reads .ai/context/capabilities.json, archcontext reads .archcontext/model/nodes/*.yaml; no dual-read and no fallback",
     "functional_block_selector": {
       "script": "repo-harness run select-agent-context-blocks",
       "config_file": ".ai/context/agent-context-blocks.txt",
@@ -1778,6 +1789,11 @@ pi_write_harness_policy() {
     "diagram_skill": "mermaid",
     "diagram_skill_source": "~/.codex/skills/mermaid",
     "vendoring_policy": "do-not-vendor-diagram-skill-assets",
+    "projection_provider": "disabled",
+    "projection_apply": "disabled",
+    "projection_failure_gate": "advisory",
+    "projection_version": "0.4.2",
+    "projection_timeout_ms": 120000,
     "freshness_gate": "advisory",
     "gate_min_severity": "medium",
     "pending_card_scope": "capability",
@@ -1857,13 +1873,11 @@ pi_write_harness_policy() {
     "strict_max_agents": 3,
     "max_depth": 1,
     "allow_parallel_writers": false,
-    "stop_fallback": true,
     "state_file": ".ai/harness/delegation/latest.json",
-    "preferred_runners": ["subagent", "codex-subagent", "codex-exec", "main-thread"],
-    "fallback_runner": "main-thread",
+    "preferred_runners": ["subagent"],
     "brief_source": "tasks/contracts/<stem>.contract.md",
-    "runner_rule": "the active task contract is the authoritative execution brief consumed by contract-run; native subagent (Claude) or codex-subagent (Codex's own native subagent) is an optional parallelism accelerator, preferred first per host. Degrade to codex-exec, then sequential main-thread, on the SAME contract when spawn is unavailable, sandboxed, or unreliable. Runner-availability fallback MUST be recorded in the contract-run manifest and MUST NOT silently succeed; it is a runner-availability fallback, not a product-semantics compatibility fallback.",
-    "rule": "UserPromptSubmit.delegation only injects bounded subagent context after explicit user authorization such as /delegate, /parallel, spawn subagents, or parallel investigation, regardless of delegation.mode. When delegation.mode resolves to \"auto\", the in-process session-context builder (src/cli/hook/session-context.ts) instead injects one standing bounded-delegation authorization block at SessionStart (Codex host only) for the whole session; UserPromptSubmit.delegation does not re-assert it on later prompts. The global ~/.repo-harness/config.json delegation.mode value, when exactly \"auto\" or \"explicit\", takes precedence over this repo policy value when resolving that SessionStart mode."
+    "runner_rule": "the active task contract is the authoritative execution brief. Claude uses its native subagent surface. Codex uses native spawn_agent with the exact installed agent_type and fork_turns=none; official SubagentStart agent_type/model fields are the runtime observation. Missing, default, mismatched, invalid, or unverified native routing fails closed without an alternate fleet runner. Reasoning effort remains configured_unverified until Codex exposes an official runtime field.",
+    "rule": "UserPromptSubmit.delegation injects bounded delegation context only for the typed /delegate or /parallel command. Natural-language inference and SessionStart standing authorization are not delegation authorities."
   },
   "sidecar_research": {
     "default": true,
@@ -2012,6 +2026,18 @@ pi_write_harness_policy() {
       "project_init_command": "codegraph init -i .",
       "sync_command": "codegraph sync .",
       "vendoring_policy": "do-not-add-package-dependency"
+    },
+    "archctx": {
+      "cli_package": "archctx",
+      "contracts_package": "archctx-contracts",
+      "contracts_scope": "release-gated-packed-schema-authority",
+      "install_mode": "release-gated-runtime-dependency-when-projection-enabled",
+      "readiness": "advisory",
+      "hook_policy": "do-not-block-hooks",
+      "vendoring_policy": "do-not-vendor",
+      "model_dir": ".archcontext/model",
+      "nodes_dir": ".archcontext/model/nodes",
+      "capability_source_key": ".ai/harness/policy.json#context.capability_source"
     }
   },
   "agentic_development": {
@@ -2389,7 +2415,6 @@ CURRENT_STATUS_EOF
 
 - Latest snapshot: (none yet)
 - Semantic diagram source: (none yet)
-- Latest human diagram: (none yet)
 
 ## Architecture Drift Flow
 
@@ -2398,7 +2423,7 @@ CURRENT_STATUS_EOF
 - `repo-harness run context-contract-sync` keeps only the controlled architecture block in functional-block `AGENTS.md` and `CLAUDE.md` files aligned.
 - `repo-harness run workstream-sync` keeps durable multi-session progress under `tasks/workstreams/<domain>/<capability>/` and projects only pointers into local contracts.
 - Semantic architecture diagrams live as Mermaid fenced blocks in the relevant module or snapshot Markdown.
-- Human-readable architecture diagrams are optional `mermaid` HTML files in `docs/architecture/diagrams/` and should link back to the Markdown semantic source.
+- Markdown Mermaid fenced blocks are the only architecture diagram artifacts; do not generate standalone HTML.
 
 ## Pending Requests
 

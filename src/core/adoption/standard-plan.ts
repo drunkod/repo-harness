@@ -242,6 +242,19 @@ function jsonFile(repoRoot: string, path: string): JsonObject | undefined {
   }
 }
 
+/**
+ * The target repo's capability authority selector, read from the merged policy.
+ * Anything other than the explicit `archcontext` opt-in stays on the registry
+ * default so downstream scaffolding is unaffected.
+ */
+function capabilitySourceOf(policy: JsonObject): "registry" | "archcontext" {
+  const context = policy.context;
+  const value = context && typeof context === "object" && !Array.isArray(context)
+    ? (context as JsonObject).capability_source
+    : undefined;
+  return value === "archcontext" ? "archcontext" : "registry";
+}
+
 function deepMergeDefaults(defaults: JsonObject, current: JsonObject | undefined, path: readonly string[] = []): JsonObject {
   const result: JsonObject = { ...defaults };
   if (!current) return result;
@@ -301,6 +314,8 @@ export function defaultPolicy(documentationProfile: string): JsonObject {
       map_file: ".ai/context/context-map.json",
       capability_registry_file: ".ai/context/capabilities.json",
       capability_match_rule: "longest-prefix; same-length ambiguity fails",
+      capability_source: "registry",
+      capability_source_rule: "single authority selected by capability_source; registry reads .ai/context/capabilities.json, archcontext reads .archcontext/model/nodes/*.yaml; no dual-read and no fallback",
     },
     worktree_strategy: {
       base_branch: "main",
@@ -386,7 +401,6 @@ function architectureIndexContent(): string {
 
 - Latest snapshot: (none yet)
 - Semantic diagram source: (none yet)
-- Latest human diagram: (none yet)
 
 ## Pending Requests
 
@@ -783,7 +797,12 @@ export function planStandardAdoption(opts: StandardPlanOptions): { operations: A
   }
 
   operations.push(writeOperation(opts.repoRoot, ".ai/harness/policy.json", jsonContent(policy), "Merge canonical harness policy defaults without discarding explicit repo settings", { risk: "medium" }));
-  operations.push(writeOperation(opts.repoRoot, ".ai/context/capabilities.json", jsonContent(jsonFile(opts.repoRoot, ".ai/context/capabilities.json") ?? { version: 1, capabilities: [] }), "Install canonical empty capability registry when absent", { ifMissing: true }));
+  // Seeding an empty registry into an archcontext-authority repo would
+  // reinstate the retired second authority, so the capability_source selector
+  // gates the seed. Registry-mode repos (the scaffold default) are unchanged.
+  if (capabilitySourceOf(policy) === "registry") {
+    operations.push(writeOperation(opts.repoRoot, ".ai/context/capabilities.json", jsonContent(jsonFile(opts.repoRoot, ".ai/context/capabilities.json") ?? { version: 1, capabilities: [] }), "Install canonical empty capability registry when absent", { ifMissing: true }));
+  }
   operations.push(writeOperation(opts.repoRoot, ".ai/context/context-map.json", jsonContent(jsonFile(opts.repoRoot, ".ai/context/context-map.json") ?? {
     version: 1,
     root_context_files: ["CLAUDE.md", "AGENTS.md", "docs/spec.md", "tasks/current.md", "tasks/todos.md", ".ai/context/capabilities.json", ".ai/harness/policy.json"],

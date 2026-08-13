@@ -201,6 +201,7 @@ rather than inferring those values from turns, tool names, or timestamps.
 - Use `repo-harness capability-context status|request|sync` to keep paired local context files aligned with the registry. The command writes only the controlled `CAPABILITY CONTEXT` block and preserves hand-authored content plus the separate architecture contract block.
 - `.ai/context/capability-source-map.json` is the optional human-edited source-map manifest for capability positioning and source pointers. Missing entries fall back to registry/architecture/workstream metadata; `--auto-fill-positioning` writes deterministic draft entries explicitly, not from hooks.
 - `.ai/harness/capability-context/` is ignored runtime queue state. Post-edit hooks may enqueue requests, and `SessionStart` only reminds the current agent to run `repo-harness capability-context sync --pending --apply`.
+- `.ai/harness/architecture-projection/` is ignored durable projection runtime state. It owns one running provider job per repository, pending jobs, typed receipts, refresh receipts, and dead letters; source observations are acknowledged only after a terminal receipt. SessionStart exposes the exact oldest dead-letter id for the explicit `architecture-projection retry-dead-letter` recovery command.
 - `SessionStart` also summarizes pending architecture request cards so a resumed agent can see drift debt before claiming finish.
 
 ## Initializer and Runtime Model
@@ -219,6 +220,44 @@ Maintainer-facing detail on how the initializer and runtime defaults are wired.
   `.ai/hooks/lib/workflow-state.sh` is an operator helper projection, not a
   second host-event runtime.
 - Generated and migrated repos keep discovery and complex/design planning in the parent agent: `geju` opens the pre-contract frame, then the parent completes P1/P2/P3 and freezes the accepted direction. Daily small/medium work uses Waza with Codex-first runtime copies in `~/.codex/skills`; durable knowledge stays in repo-authored research and lessons.
-- `repo-harness install` bootstraps the Codex/Claude runtime pieces for the default workflow: refreshes `repo-harness` skill aliases, installs global Codex/Claude hook adapters, installs Waza skills (`think`, `hunt`, `check`, `health`) and Mermaid through the skills CLI, persists the brain root in `~/.repo-harness/config.json`, and configures CodeGraph MCP for selected host agents. `repo-harness init` remains a compatibility alias for existing automation.
-- Other external tooling stays advisory-only: `repo-harness run check-agent-tooling --host both --check-updates`; Waza update checks compare upstream `tw93/Waza` `SKILL.md` hashes without running `npx skills check`; no automatic CodeGraph daemon or provider setup.
+- `repo-harness install` bootstraps the package-owned Codex/Claude runtime pieces for the default workflow: refreshes `repo-harness` skill aliases, installs global Codex/Claude hook adapters, persists the brain root in `~/.repo-harness/config.json`, and configures CodeGraph MCP for selected host agents. Mutable Waza and Mermaid providers are installed only after explicit selection. `repo-harness init` remains a compatibility alias for existing automation.
+- The recommended `reverse-skill-router` remains explicit-only through `--with-reverse-skill` because its upstream authorization assumption cannot replace independently verified scope; the pinned selected tree is integrity-checked before host projection.
+- Read-only external-tooling audit stays advisory: `repo-harness run check-agent-tooling --host both --check-updates`. The explicit mutating boundary is `repo-harness update`, which reconciles mandatory ArchContext packages and runtime and updates the global CodeGraph CLI/MCP; mutable Waza/Mermaid providers require `--with-external-skills`. It does not initialize or sync a repository CodeGraph index.
 - Manual distillation stays repo-local: repeated corrections -> `tasks/lessons.md`; deep findings and hidden contracts -> topic-scoped `docs/researches/*.md`; sprint verification evidence -> `tasks/reviews/*.review.md`; durable capability progress -> `tasks/workstreams/`; release history -> `docs/CHANGELOG.md`.
+
+### Package Manager Defaults
+
+- General default priority: `bun > pnpm > npm`.
+- **Plan G/H** (Python-centric) default to **`uv`** as the primary package manager.
+
+### Runtime Profiles
+
+The initializer offers exactly three runtime profiles:
+
+- `Plan-only (recommended)` (default)
+- `Plan + Permissionless`
+- `Standard (ask before each action)`
+
+They are configured in `assets/initializer-question-pack.v4.json` and consumed by
+`scripts/initializer-question-pack.ts`.
+
+### Package Authority Files
+
+Maintainer-facing map of which package file owns which contract:
+
+| File | Owns |
+|---|---|
+| `SKILL.md` | Root Skill spec |
+| `CLAUDE.md`, `AGENTS.md` | Root routing docs |
+| `assets/plan-map.json` | Plan catalog mapping |
+| `assets/initializer-question-pack.v4.json` | Question pack |
+| `assets/hooks/` | Canonical hook asset source |
+| `assets/reference-configs/` | Runtime reference docs, resolved through `repo-harness docs` |
+| `assets/workflow-contract.v1.json` | Workflow contract manifest |
+| `docs/reference-configs/*.md` | Source-repo projection of the runtime reference docs |
+| `scripts/assemble-template.ts` | Explicit template assembly |
+| `scripts/initializer-question-pack.ts` | Question inference helper |
+| `scripts/inspect-project-state.ts` | State inspector |
+| `src/core/adoption/standard-plan.ts` | Canonical adoption planner |
+| `scripts/check-agent-tooling.sh` | External tooling detector |
+| `scripts/init-project.sh`, `scripts/create-project-dirs.sh` | Scaffolding steps |

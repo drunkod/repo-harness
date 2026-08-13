@@ -190,6 +190,11 @@ function isolatedEnv(cwd: string, extra: NodeJS.ProcessEnv = {}): NodeJS.Process
       || key === 'REPO_HARNESS_WORKFLOW_STATE_LIB'
       || key === 'REPO_HARNESS_BUN_BIN'
       || key === 'REPO_HARNESS_HOOK_CLI'
+      // MainLoopDispatchGuard is armed purely from the environment and these
+      // cells pin HOOK_HOST=claude, so an operator shell that exported it
+      // would turn the lite.edit cell's frozen `allow` into a block --
+      // the same operator-machine leakage the PATH filter below prevents.
+      || key === 'REPO_HARNESS_MAIN_LOOP_EDIT_GUARD'
       || key.startsWith('CONTRACT_RUN_')
     ) {
       delete env[key];
@@ -640,7 +645,7 @@ function captureEdit(profile: Profile): Record<string, unknown> {
       contract_exists: workPackage.contractExists,
       ordering: observedSourceOrder(MUTATION_GUARD_SOURCE, [
         { name: 'resolve_effective_state', marker: 'ctx.collector.getPreEditEffectiveState(allTargetPaths)' },
-        { name: 'contract_scope', marker: 'const activeContract = getActiveContractPath(ctx);' },
+        { name: 'contract_scope', marker: 'const activeContract = effective?.contract?.path ?? null;' },
         { name: 'plan_gate', marker: 'runEditPlanGate(ctx, filePath, workflowProfile);' },
         { name: 'strict_contract', marker: '[StrictContractGuard] Strict profile requires an active contract for' },
         { name: 'strict_worktree', marker: '[StrictWorktreeGuard] Strict profile requires an isolated contract worktree for' },
@@ -698,7 +703,6 @@ function captureStop(profile: Profile): Record<string, unknown> {
         { name: 'minimal_change_review', marker: 'const minimal = minimalChangeReview(repoRoot);' },
         { name: 'review_freshness_warning', marker: "if (state?.review.path && ['stale'" },
         { name: 'plan_completeness_gate', marker: 'const planGate = planCompletenessBlock(' },
-        { name: 'delegation_fallback', marker: 'if (claimDelegationFallback(repoRoot, payload, env, now' },
       ]),
       side_effects: writtenPaths(before, after),
       missing_semantic_fields: missingSemanticFields(

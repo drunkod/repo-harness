@@ -2,7 +2,353 @@
 
 All notable changes to this skill are documented here.
 
-## [Unreleased]
+## [0.15.0] - 2026-08-12
+
+### Added
+
+- Adds a repo-level architecture-drift changed-set cursor as the single
+  mutation authority used by Stop and manual drain paths. Multi-file patches
+  and shell-written files now reach the same deterministic projection instead
+  of depending on a single tool-reported path.
+
+### Changed
+
+- Cuts architecture cascade discovery over to the frozen Stop diff and retires
+  the journal's architecture dirty bit, removing the duplicate authoring path
+  while preserving cursor acknowledgement only after the cascade succeeds.
+- Aligns the Claude planning brief with the architect-consultation packet and
+  refreshes generated architecture projections against the 0.14.2 baseline.
+- Clarifies the Codex native fleet contract against the 0.147 model catalog:
+  Sol/Terra roots use the repository's v2 packet shape, while Luna-rooted v1
+  sessions still discover custom agent roles through their distinct lifecycle
+  surface.
+
+### Fixed
+
+- Keeps the architecture-drift cursor pending when the legacy cascade runner is
+  unavailable, when the follow-up fails, or when manual drain cannot complete.
+  A later Stop can therefore retry the same changed set instead of silently
+  acknowledging lost work.
+
+## [0.14.2] - 2026-08-11
+
+### Added
+
+- Registers `zhaoxuya520/reverse-skill`'s `reverse-skill-router` as a recommended
+  explicit-only external Skill for Claude and Codex, installed through
+  `--with-reverse-skill`. It is deliberately excluded from both profiles
+  because its upstream target-mention authorization assumption is not a valid
+  repo-harness authority boundary. External provider projection is now
+  catalog- and host-driven; the provider is commit-pinned and its selected tree
+  is integrity-checked before host projection. Optional toolchains remain
+  on-demand.
+
+### Changed
+
+- Makes native Codex `spawn_agent` with the exact installed `agent_type` the
+  sole fleet identity/lifecycle authority. Official `SubagentStart` role/model
+  evidence is now persisted even without advisor state; reasoning effort stays
+  explicitly `configured_unverified`.
+- Removes the Codex delegation-mode installer/config surface, SessionStart
+  standing authorization, natural-language delegation inference, and
+  App-thread/`codex-exec`/main-thread fleet fallbacks. `/delegate` and
+  `/parallel` remain prompt-start typed commands. New contract templates select
+  only `subagent` and declare no fallback; Stop no longer synthesizes a second
+  dispatch instruction.
+- Syncs the mandatory `archctx` / `archctx-contracts` closure to 0.4.2 across
+  package pins, policy `projection_version`, `ARCHCTX_REQUIRED_VERSION`, the
+  downstream policy templates, and eval fixtures.
+- Bounds cross-review retries and adds an advisory skipped status.
+
+### Fixed
+
+- Reclaims the least-recently-used idle Streamable HTTP MCP session when a new
+  `initialize` request reaches the configured session cap, while preserving
+  sessions with in-flight requests. This prevents abandoned ChatGPT Connector
+  reconnect sessions from accumulating until `SESSION_LIMIT_REACHED` (#174).
+  `/health` now reports cumulative created, closed, expired, and evicted session
+  counters for lifecycle diagnosis.
+- Modernizes the axr5 clean-room integration proof for bun 1.3 install layouts:
+  workspace packages link from the checkout's declared workspace list, consumer
+  `file:` dependencies probe both install roots, and `prepareReleaseVersion`
+  accepts an already-at-version source while still failing closed on a missing
+  declaration. The proof is regenerated against the published archctx 0.4.2.
+- Makes `repo-harness update` reconcile and read back its mandatory
+  `archctx@0.4.2` and `archctx-contracts@0.4.2` dependency closure instead of
+  trusting a successful Bun global install. A stale global dependency tree is
+  reported with an explicit operator repair command; update never removes the
+  working CLI before a replacement is known-good, and unresolved mismatches
+  fail closed before host configuration is mutated.
+- Propagates ArchContext's exact Node `>=24 <26` runtime contract, invokes the
+  package-local ArchContext binary with a compatible PATH-owned Node, and
+  reports a hard readiness error when that runtime is unavailable.
+- Refreshes the exact CodeGraph CLI during update. Mutable third-party Waza and
+  Mermaid providers remain behind explicit `--with-external-skills`; the
+  ArchContext package-local CodeGraph and user-level CodeGraph MCP remain
+  independently versioned and independently verified.
+- Requires the complete ArchContext base model (`manifest.yaml`,
+  `product.yaml`, and model nodes) before projection apply is reported as
+  enabled.
+
+## [0.14.1] - 2026-08-10
+
+### Fixed
+
+- Makes Markdown Mermaid the single architecture diagram artifact across the
+  `repo-harness-architecture` skill, architecture queue follow-up prompt,
+  generated architecture indexes, capability contract projections, and
+  reference docs. Standalone HTML generation and discovery are removed;
+  the external `mermaid` skill remains authoring/review-only.
+- Adds regression coverage that renders a real architecture request and proves
+  it contains the Mermaid-only instruction with no HTML artifact route, while
+  preserving the existing consumer E2E invariant of zero architecture HTML.
+
+## [0.14.0] - 2026-08-09
+
+### Added
+
+- Makes the public `archctx@0.4.0` runtime and
+  `archctx-contracts@0.4.0` schema surface exact production dependencies when
+  the ArchContext projection provider is enabled. The release keeps the
+  package boundary fail-closed: no checkout overlay, global PATH fallback, or
+  vendored diagram runtime is used.
+
+### Changed
+
+- Promotes this self-host repository's projection failure and architecture
+  freshness gates from advisory to strict after AXR1-AXR7 proved the complete
+  producer-to-consumer flow. Major module changes now enqueue an architecture
+  refresh signal, the runtime drains the typed request through `archctx`, and
+  Stop/readiness cannot report clean while a projection failure, dead letter,
+  or qualifying stale request remains.
+- Architecture documents remain Markdown with Mermaid `flowchart` and
+  `sequenceDiagram` sources only. Mermaid validation stays an authoring-time
+  skill/dev concern; the npm package contains no HTML or browser runtime.
+
+## [0.13.2] - 2026-08-07
+
+### Security
+
+- Collapses every authored `.repo-harness/` gitignore projection to a single
+  directory-level rule (#164). The generated managed block
+  (`src/core/adoption/gitignore-plan.ts`) and the shell scaffold heredoc
+  (`scripts/lib/project-init-lib.sh`) previously listed only two dead
+  per-file entries, so the four files the MCP server actually writes under
+  `<repo>/.repo-harness/` — including `mcp.oauth-tokens.json` holding OAuth
+  access and refresh tokens — stayed NOT-IGNORED for any user who started
+  `repo-harness mcp serve --transport http` without first running
+  `mcp setup chatgpt` with repo scope. Nothing under `.repo-harness/` is
+  intentionally tracked and `.repo-harness-owner.json` is not caught by the
+  new rule. Retiring the repo config scope and the setup-time per-file
+  compensation stays a separate slice.
+
+## [0.13.1] - 2026-08-07
+
+### Changed
+
+- Ships the `repo-harness-hook` bin as a prepack-built single-file bundle
+  `dist/hook-entry.js` instead of the live multi-file TypeScript tree. A
+  registry reinstall now replaces one file atomically, so a hook firing inside
+  the reinstall window can no longer resolve a half-replaced import graph and
+  hang until the host's 30s adapter timeout. Two bounded source changes keep
+  the bundle behavior-preserving: `src/cli/hook-entry.ts` gains an explicit
+  `--detached-tooling-populate` dispatch branch, because `bun build` folds
+  `session-context.ts`'s own `import.meta.main` bootstrap to `false` while
+  `import.meta.url` retargets the respawn at the bundle, and both surfaces call
+  the same exported `runDetachedToolingPopulate`; and
+  `src/effects/evidence/post-bash-importer.ts` reads a build-time version
+  literal injected by `bun build --define`, so the bundled provider id never
+  emits the invented `0.0.0` that its `import.meta.url` path walk would produce
+  once bundled. Managed adapter command strings, `timeout: 30`, and the
+  `repo-harness` main bin mapping are byte-identical. Local symlink installs
+  (`bun link`, `bun install -g <dir>`) bypass the packed bundle and need
+  `bun run build:hook-bundle` once in the checkout; registry installs are the
+  covered path.
+
+### Fixed
+
+- Keeps dynamic MCP OAuth clients alive past the absolute 30-day TTL while
+  they still hold an unexpired access or refresh token (#161, #162). The
+  cleanup predicate previously used registration time alone, so an actively
+  refreshing ChatGPT connector was deleted at day 30 and its next refresh
+  failed with `invalid_client`, forcing periodic re-authorization even under
+  continuous use. Liveness is derived from existing token state — no new
+  persisted field — so spam registrations that never completed authorization
+  are still cleaned at 30 days, and a connector idle past 30 days still
+  expires end to end.
+- Raises the whole-round verification budget in `scripts/verify-contract.sh`
+  from 600s to 1200s. The repo's own required `bun test` had outgrown the
+  budget, so any contract listing it under `commands_succeed` deadlocked at the
+  gate. The constant stays a fixed policy line; no environment override was
+  added.
+- Raises `VERIFIER_HELPER_TIMEOUT_MS` in `src/cli/runtime/helper-runner.ts`
+  from 720s to 1260s so the outer process wrapper sits strictly above the inner
+  whole-round budget plus a 60s margin. Previously a 720-1200s round died as a
+  mute process kill with no run snapshot and no `budget_ms`, which made the
+  evidence-emitting inner gate unreachable for long rounds.
+- Retains a failing criterion's runner log at
+  `.ai/harness/runs/<run-id>-<criterion-slug>.log` instead of destroying it
+  with the round's temp directory. Run reports previously recorded only
+  `exit_code`, so a failing `bun test` criterion could not be attributed to a
+  test at all. Passing criteria retain nothing, and a retention failure warns
+  without changing the round's verdict.
+- Makes five load-sensitive tests robust under machine load. Three
+  subprocess-heavy `tests/continuation-attempt.test.ts` cases now carry
+  explicit 30s timeouts instead of dying at bun's default 5000ms; the bounded
+  spawn-error ceiling in `tests/unit/closeout-runner-guardrails.test.ts` widens
+  to 5s with its `timedOut === false` fence unchanged; and a `Bun.sleep(100)`
+  race there becomes an event race on the production drain-then-release
+  ordering, which also gains a vacuity guard the sleep version lacked.
+
+
+## [0.13.0] - 2026-08-04
+
+### Added
+
+- Adds the long-run continuation protocol, which moves "what runs next" out of
+  chat context and into durable repository state. `repo-harness state next
+  --json` emits a `ContinuationEnvelopeV1` carrying one of six routes —
+  `continue_active_plan`, `advance_sprint`, `verify_or_finish`, `halt`,
+  `complete`, `idle` — plus the command the host should run and a
+  `progress_token`. The command is read-only and deterministic: identical
+  repository bytes and identical receipt-ledger bytes yield byte-identical
+  JSON, and it never creates a plan, contract, or worktree, never advances the
+  sprint, and never authorizes more than one bounded unit or one halt per call.
+  Row selection stays with `sprint-backlog`; the envelope only names the
+  command. `halt` reuses the existing Effective State and sprint vocabularies
+  rather than inventing its own, and there is no `ask` or `wait` route — a
+  needs-user state is a halt whose reason points at the blocker.
+- Adds `repo-harness state attempt`, which records one `AttemptReceiptV1` per
+  bounded turn — `unit_ref`, outcome, and the before/after envelope
+  `progress_token` pair — to the ignored ledger at
+  `.ai/harness/runs/continuation/attempts.jsonl`. Receipts are liveness
+  evidence, never authority: they answer only "did this turn move anything".
+  Two consecutive `completed` receipts on the same `unit_ref` with an unchanged
+  token trip a no-progress circuit breaker, so the next envelope returns
+  `halt:no_progress`; a token change clears it, and `--outcome resumed` is the
+  operator's only explicit override. An unreadable ledger fails closed as
+  `halt:attempt_ledger_unreadable` instead of being treated as an empty
+  history. Two independent mechanisms — the gitignore rule and
+  `isOperationalReviewPath`'s `.ai/harness/runs/` prefix — keep the ledger out
+  of `progress_token`, and either alone suffices, so writing a receipt can
+  never look like the progress that would clear the breaker.
+- Makes contract closeout crash-durable. `contract-worktree finish` and
+  `ship-worktrees` now run as an exclusively owned, journalled transaction:
+  before any journal, lifecycle write, commit, push, or PR, the caller
+  atomically creates a worktree-scoped claim directory under
+  `<git-common-dir>/repo-harness/transactions/claims/`, so simultaneous callers
+  contend on `mkdir` and every loser fails closed before the first side effect.
+  The owner then writes a `CloseoutJournalV1` with one fsync'd record per phase
+  (`prepared` through `complete`) via temp file plus atomic rename, and
+  releases its claim only on a terminal status. Claims and journals live under
+  the git common dir, outside every working tree, so they survive worktree
+  removal. An interrupted closeout fails closed — a plain rerun refuses while
+  an `in_progress` journal or a claim exists — and recovery is explicit:
+  `recover inspect` reports the claim, owner PID liveness, and recorded phases;
+  `recover abort` restores the pre-closeout snapshot and is the only way to
+  clear a dead pre-journal orphan claim; `recover reconcile` completes the
+  missing steps after an external effect landed, never re-merging, re-pushing,
+  or duplicating a PR. A mutating recovery first proves the recorded owner PID
+  is dead, then takes the claim's nested `recovery.lock` lane; it never steals
+  from a live owner, and nothing reclaims a stale claim automatically.
+  Per-phase `SIGKILL` fault injection and concurrent double-start race tests
+  cover the transaction.
+- Publishes the host conformance contract at
+  `docs/reference-configs/long-run-continuation.md`: the seven-step tick, the
+  per-route host action table, the halt vocabulary, the crash-recovery
+  semantics, and the operator remedy for each halt reason. A conformance suite
+  runs the whole tick — opening envelope, one bounded unit, closing envelope,
+  attempt receipt, post-receipt envelope — inside a disposable repository,
+  selecting routes and commands only from the envelope it just read, and binds
+  both arms of the receipt-invisibility invariant.
+- Adds a sprint-backlog grammar drift check that binds the TypeScript backlog
+  reader to `sprint-backlog.sh` over shared fixtures covering statuses, row
+  shapes, section bounds, and CRLF input, so the two readers cannot diverge on
+  the grammar they both parse.
+
+## [0.12.3] - 2026-08-03
+
+### Added
+
+- Adds `MainLoopDispatchGuard`, an opt-in Claude-host edit boundary that
+  separates orchestrator edits from subagent edits. Armed only by
+  `REPO_HARNESS_MAIN_LOOP_EDIT_GUARD=1|true` together with
+  `HOOK_HOST=claude`, it denies main-loop `Edit`/`Write` on code-extension
+  files and returns a dispatch-to-subagent instruction; Claude Code stamps
+  `agent_id`/`agent_type` onto the payload only inside a subagent, so an
+  absent pair identifies the orchestrator thread. Subagent edits and
+  non-code paths such as plans, docs, and config pass through unchanged.
+  The check is a strong boundary, evaluated per path and independent of
+  plan state, spec presence, and workflow-profile resolution, so the
+  dispatch instruction lands before any plan advisory. The product default
+  is off; unsetting the variable is the operator off-switch.
+
+### Fixed
+
+- Hook fixtures that pin `HOOK_HOST=claude` now strip or neutralize
+  `REPO_HARNESS_MAIN_LOOP_EDIT_GUARD` at the fixture boundary, so an armed
+  operator shell can no longer arm the new guard inside frozen
+  characterization runs and flip their recorded goldens.
+
+## [0.12.2] - 2026-08-02
+
+### Changed
+
+- Makes Codex App Threads the preferred delegation runner. The orchestrator
+  reads each role's exact model and reasoning effort from the installed
+  `~/.codex/agents/<role>.toml`; native `spawn_agent` is now a fail-closed
+  fallback only when its live schema can carry the same tuple. The canonical
+  policy, hook advice, standing authorization, downstream initializer seeds,
+  and helper mirror all carry the same routing contract.
+- Converges packaged fleet authorship on `agents/fleet/`: tracked repo-level
+  Claude agent copies are removed, Codex TOMLs remain generated installer
+  fixtures, and gatekeeper maps to the Terra/xhigh Codex profile through the
+  existing role mapping authority.
+- Records the live App Thread canary and its version-bound readiness limit:
+  Codex CLI `0.146.0-alpha.9.2` honored the requested fast-worker tuple, while
+  the public materialized-thread readback still omits model and effort. That
+  result remains unverified at the portable orchestrator contract and selects
+  the declared fallback instead of inferring readiness from private host data.
+
+### Fixed
+
+- Agent-fleet health checks now honor hash-bound user-managed receipts, so an
+  accepted local role override reports as user-managed instead of permanent
+  drift; absent, malformed, or stale receipts still fail closed.
+- Receipt update-check tests now stub their upstream fetches, removing eight
+  real network calls per affected path and the resulting deterministic timeout
+  on slower networks.
+- Bounded verifier children now remove every inherited
+  `REPO_HARNESS_*` variable at the spawn boundary, preventing helper routing
+  metadata from overriding fixture isolation inside nested test commands.
+- Acceptance finalization strips materializer-owned `provenance` before
+  re-emitting its run trace, so the published checks projection's recorded
+  content hash is self-consistent with its own bytes.
+
+## [0.12.1] - 2026-08-01
+
+### Changed
+
+- Restructures the five-language README suite into a get-started-first
+  layout (centered header, TOC, Get Started section, key-features table),
+  cutting the English `README.md` from 872 to 451 lines; deep-dive content
+  (install profiles, General Repo MCP, harness overview, hook operations)
+  moves into `docs/reference-configs` before deletion so nothing is lost,
+  and the four translations (zh-CN, ja, fr, es) are rewritten against the
+  new section structure.
+- Bumps the `@colbymchenry/codegraph` dev dependency from `1.4.1` to
+  `1.5.0`.
+
+### Fixed
+
+- `hook-events.jsonl`'s `run_id` was always empty and each evidence writer
+  minted its own `run-${Date.now()}` on demand, so hook telemetry never
+  joined evidence `correlation_run_id`. A new `run-identity.ts` module is
+  now the single SessionStart-only mint and resolution authority (payload
+  -> `HOOK_RUN_ID` -> `CODEX_RUN_ID` -> `CLAUDE_RUN_ID` -> session-state
+  lookup -> null), storing one bounded `session-run-identity.json` slot;
+  `event-telemetry.ts` and `command-observed.ts` now wire to this unified
+  resolver instead of independent chains or self-minted fallbacks.
 
 ## [0.12.0] - 2026-07-31
 

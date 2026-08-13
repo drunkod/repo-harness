@@ -77,11 +77,34 @@ export interface CrossReviewFailure {
   readonly recoveredTranscript?: string;
 }
 
-export type CrossReviewResult = CrossReviewSuccess | CrossReviewFailure;
+/**
+ * Provider-side unavailability after the bounded attempt budget is spent.
+ *
+ * The external opinion is advisory: when the provider itself could not be
+ * made to produce a usable transcript within its fixed attempt budget, the
+ * run resolves here (non-blocking) instead of failing the caller. This is
+ * NOT a pass and NOT a synthesized review -- it carries the last attempt's
+ * closed error code so the reason stays explicit. `degraded_scope` never
+ * lands here: an unobservable review scope is the harness's own failure and
+ * stays a blocking CrossReviewFailure.
+ */
+export interface CrossReviewSkipped {
+  readonly status: "skipped";
+  readonly provider: CrossReviewProviderMode;
+  readonly scope: CrossReviewScope;
+  /** Provider attempts actually spent before skipping (always the full budget). */
+  readonly attempts: number;
+  readonly code: CrossReviewErrorCode;
+  readonly message: string;
+  /** Informational only; recovered text never promotes a skipped run to a pass. */
+  readonly recoveredTranscript?: string;
+}
+
+export type CrossReviewResult = CrossReviewSuccess | CrossReviewFailure | CrossReviewSkipped;
 
 // --- Finding / recommendation parsing (pure text processing) ---------------
 
-const FINDING_LINE_PATTERN = /^\s*[-*]?\s*\[(P1|P2)\]\s*(.+)$/;
+const FINDING_LINE_PATTERN = /^\s*(?:(?:[-*]\s*)|(?:#{1,6}\s+))?\[(P1|P2)\]\s*(.+)$/;
 
 export function parseFindings(transcript: string): readonly CrossReviewFinding[] {
   const findings: CrossReviewFinding[] = [];
@@ -111,11 +134,13 @@ export function buildRecommendation(findings: readonly CrossReviewFinding[]): st
 // code; anything else with a nonzero exit stays `provider_nonzero`.
 const AUTH_FAILURE_SIGNAL_PATTERNS: readonly RegExp[] = [
   /not\s+authenticated/i,
+  /not\s+logged\s+in/i,
   /unauthorized/i,
   /\b401\b/,
   /please\s+(?:log|sign)\s+in/i,
   /run\s+[`'"]?claude\s+login/i,
   /run\s+[`'"]?codex\s+login/i,
+  /run\s+\/login/i,
   /invalid\s+api\s+key/i,
   /authentication\s+failed/i,
   /no\s+credentials\s+found/i,
@@ -123,6 +148,14 @@ const AUTH_FAILURE_SIGNAL_PATTERNS: readonly RegExp[] = [
 
 export function matchesAuthFailureSignal(text: string): boolean {
   return AUTH_FAILURE_SIGNAL_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+const CLAUDE_CAPACITY_FAILURE_PATTERNS: readonly RegExp[] = [
+  /(?:^|\n)\s*You(?:['’]ve| have) reached your Fable(?:\s+\d+)?\s+limit\.[\s\S]{0,500}?\/usage-credits(?:\s|$)/i,
+];
+
+export function matchesClaudeCapacityFailureSignal(text: string): boolean {
+  return CLAUDE_CAPACITY_FAILURE_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 // --- Outcome classification (pure decision table) ---------------------------
@@ -182,14 +215,15 @@ export function classifyCrossReviewOutcome(
   }
 
   if (!invocation.ok) {
-    const signalText = `${invocation.stdout}\n${invocation.stderr}\n${invocation.error}`;
-    const code: CrossReviewErrorCode = matchesAuthFailureSignal(signalText)
+    const signalText = `${invocation.stderr}\n${invocation.error}`;
+    const stdoutAuth = invocation.stdout.split(/\r?\n/).some((line) => /^\s*Not logged in\s*[·-]\s*Please run \/login\s*$/i.test(line));
+    const code: CrossReviewErrorCode = matchesAuthFailureSignal(signalText) || stdoutAuth
       ? "auth_failure"
       : "provider_nonzero";
     return {
       kind: "failed",
       code,
-      message: invocation.error || invocation.stderr || `provider exited with status ${invocation.status}`,
+      message: invocation.error || invocation.stderr || invocation.stdout || `provider exited with status ${invocation.status}`,
       recoveredTranscript,
     };
   }

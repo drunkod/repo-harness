@@ -1,4 +1,4 @@
-import { buildSessionStartSections } from './session-context';
+import { buildSessionStartSections, ensureSessionRunIdentity } from './session-context';
 import { pendingPostEditJournalSection, runMutationObserved } from './mutation-observed';
 import { runMutationGuard } from './mutation-guard';
 import { runStopHandler } from './stop-handler';
@@ -8,6 +8,7 @@ import { runCommandObserved } from './command-observed';
 import { runTraceObserver } from './trace-observer';
 import { getRoute, ROUTES, type HookEvent, type HookHandlerId, type Route, type RouteId } from './route-registry';
 import type { HookHandlerContext, HookHandlerResult, TypedHookHandler } from './handler-contract';
+import { architectureProjectionQueueState } from '../../effects/architecture/projection-jobs';
 
 function result(value: { readonly exitCode: number; readonly stdout: string; readonly stderr: string; readonly reason?: string }): HookHandlerResult {
   return value;
@@ -17,11 +18,37 @@ const handlers: Readonly<Record<HookHandlerId, TypedHookHandler>> = Object.freez
   'session-context': {
     id: 'session-context',
     run(context: HookHandlerContext): HookHandlerResult {
+      ensureSessionRunIdentity(context.repoRoot, context.input, context.env, context.now);
       const sections = [];
       const stateSection = context.collector.getSessionEffectiveState();
       if (stateSection) sections.push(stateSection);
       const pending = pendingPostEditJournalSection(context.repoRoot);
       if (pending) sections.push(pending);
+      try {
+        const projectionQueue = architectureProjectionQueueState(context.repoRoot);
+        if (projectionQueue.pending > 0 || projectionQueue.running > 0 || projectionQueue.deadLetters > 0) {
+          sections.push({
+            id: 'architecture-projection-queue',
+            priority: 4 as const,
+            content: `[ArchitectureProjection] pending=${projectionQueue.pending} running=${projectionQueue.running} dead-letter=${projectionQueue.deadLetters}${projectionQueue.oldestPendingJobId ? ` oldest-pending=${projectionQueue.oldestPendingJobId}` : ''}${projectionQueue.oldestDeadLetterJobId ? ` oldest-dead-letter=${projectionQueue.oldestDeadLetterJobId}` : ''}.`,
+            mandatory: false,
+            actionable: true,
+            reference: projectionQueue.oldestDeadLetterJobId
+              ? `repo-harness architecture-projection retry-dead-letter --job-id ${projectionQueue.oldestDeadLetterJobId} --json`
+              : 'repo-harness architecture-projection drain --json',
+          });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        sections.push({
+          id: 'architecture-projection-queue-error',
+          priority: 1 as const,
+          content: `[ArchitectureProjection] queue state unavailable: ${message.slice(0, 300)}.`,
+          mandatory: true,
+          actionable: true,
+          reference: 'repo-harness architecture-projection drain --json',
+        });
+      }
       sections.push(...buildSessionStartSections(
         context.collector,
         context.env,

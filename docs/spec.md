@@ -54,12 +54,18 @@ repos.
   unrelated changes from the target tree.
 - Direct coding MCP is default-off, user-scoped, OAuth profile/revision-bound,
   worktree-first, and explicit that local-user Bash is not a filesystem sandbox.
+- Continuation surfaces are non-authoritative: the continuation envelope is a
+  read-only projection of effective state plus the sprint marker, the closeout
+  journal records operation progress for explicit recovery only (never workflow
+  state, never read by state resolution), and attempt receipts are liveness
+  evidence that never enter effective state or `progress_token`.
 
 ## Workflow Surfaces
 
 | Surface | Owner | Purpose |
 |---|---|---|
 | `repo-harness run <helper>` | Package runtime | Canonical workflow helper execution |
+| `repo-harness state next --json` | Package runtime | Canonical pull-based continuation entry: a read-only projection returning one unit or one halt per tick, byte-identical for identical repo bytes and identical attempt-ledger bytes |
 | `docs/spec.md` | Maintainers | Stable product intent and safety boundary |
 | `plans/prds/`, `plans/sprints/`, `plans/plan-*.md` | Planner | Decision-complete work packages |
 | `tasks/contracts/*.contract.md` | Implementer | Allowed paths, delegation, and exit criteria |
@@ -103,6 +109,10 @@ providers, adoption, substantive installation, or benchmark production.
   exact next step.
 - A maintainer can reject or accept an agent change from the Human Review Card
   plus machine evidence.
+- A host loop can drive an approved sprint to completion using only
+  `repo-harness state next` output; an interrupted closeout is recoverable
+  explicitly without duplicating push or merge; two consecutive no-progress
+  turns halt the loop instead of spinning.
 
 ## Canonical Terms
 
@@ -117,9 +127,10 @@ providers, adoption, substantive installation, or benchmark production.
 - **Workstream**: A durable, capability-scoped progress record under
   `tasks/workstreams/<domain>/<capability>/` that carries status across
   sessions and plans instead of living only in chat memory.
-- **Capability**: A functional block registered in
-  `.ai/context/capabilities.json` and resolved by longest-prefix path match,
-  owning local agent context and ownership boundaries for the files under it.
+- **Capability**: A functional block registered in the capability authority
+  selected by `.ai/harness/policy.json#context.capability_source` and resolved
+  by longest-prefix path match, owning local agent context and ownership
+  boundaries for the files under it.
 - **Task profile**: The declared execution shape of a contract (for example
   `code-change`) that determines which verification and delegation rules
   apply to that task.

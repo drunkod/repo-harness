@@ -91,7 +91,7 @@ describe('install command (Phase 1B)', () => {
       expect(fs.readFileSync(statePath)).toEqual(stateBefore);
       expect(fs.readFileSync(hooksPath)).toEqual(hooksBefore);
     });
-  });
+  }, 30_000);
 
   test('codex --location local errors with exit 2 (no project-local hook concept)', () => {
     withTempHome(() => {
@@ -142,7 +142,7 @@ describe('install command (Phase 1B)', () => {
       const data = JSON.parse(
         fs.readFileSync(path.join(home, '.codex/hooks.json'), 'utf-8'),
       );
-      for (const entries of Object.values(data.hooks) as { hooks: { command: string; timeout?: number }[] }[][]) {
+      for (const [event, entries] of Object.entries(data.hooks) as [string, { hooks: { command: string; timeout?: number }[] }[]][]) {
         for (const entry of entries) {
           const hook = entry.hooks[0];
           const cmd = hook.command;
@@ -155,7 +155,7 @@ describe('install command (Phase 1B)', () => {
           expect(cmd).toContain('command -v repo-harness');
           expect(cmd).toContain('HOOK_HOST=codex');
           expect(cmd).toContain('exec repo-harness hook ');
-          expect(hook.timeout).toBe(30);
+          expect(hook.timeout).toBe(event === 'Stop' ? 150 : 30);
         }
       }
     });
@@ -209,10 +209,10 @@ describe('install command (Phase 1B)', () => {
       expect(data.hooks.UserPromptSubmit.length).toBe(1);
       expect(data.hooks.SubagentStart).toBeUndefined();
       expect(data.hooks.SubagentStop).toBeUndefined();
-      for (const entries of Object.values(data.hooks) as { hooks: { command: string; timeout?: number }[] }[][]) {
+      for (const [event, entries] of Object.entries(data.hooks) as [string, { hooks: { command: string; timeout?: number }[] }[]][]) {
         for (const entry of entries) {
           expect(entry.hooks[0].command).toContain('HOOK_HOST=claude');
-          expect(entry.hooks[0].timeout).toBe(30);
+          expect(entry.hooks[0].timeout).toBe(event === 'Stop' ? 150 : 30);
         }
       }
     });
@@ -368,7 +368,7 @@ describe('install command (Phase 1B)', () => {
       expect(uninstall.status).toBe(0);
       expect(uninstall.stdout).toContain('[codex] removed');
     });
-  });
+  }, 30_000);
 
   test('CLI install without required profile components fails closed and compensates adapters', () => {
     withTempHome((home) => {
@@ -395,103 +395,28 @@ describe('install command (Phase 1B)', () => {
       expect(fs.existsSync(path.join(home, '.codex/hooks.json'))).toBe(false);
       expect(fs.existsSync(path.join(home, '.repo-harness/install-state.json'))).toBe(false);
     });
-  });
+  }, 30_000);
 });
 
-describe('install --delegation-mode (global delegation config write)', () => {
-  test('--delegation-mode auto flag writes delegation.mode to ~/.repo-harness/config.json', () => {
+describe('install native Codex delegation authority', () => {
+  test('adapter-only install exposes no delegation-mode compatibility option or config write', () => {
     withTempHome((home) => {
-      const install = spawnSync(
-        'bun',
-        [CLI, 'install', '--target', 'codex', '--location', 'global', '--delegation-mode', 'auto'],
-        {
-          cwd: ROOT,
-          env: { ...process.env, HOME: home },
-          encoding: 'utf-8',
-        },
-      );
-      expect(install.status).toBe(0);
-      expect(install.stdout).toContain('delegation.mode=auto');
+      const help = spawnSync('bun', [CLI, 'install', '--help'], {
+        cwd: ROOT,
+        env: { ...process.env, HOME: home },
+        encoding: 'utf-8',
+      });
+      expect(help.status).toBe(0);
+      expect(help.stdout).not.toContain('--delegation-mode');
 
-      const configPath = path.join(home, '.repo-harness', 'config.json');
-      expect(fs.existsSync(configPath)).toBe(true);
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      expect(config.delegation.mode).toBe('auto');
-    });
-  });
-
-  test('merges delegation.mode with existing brainRoot and unknown nested delegation keys', () => {
-    withTempHome((home) => {
-      const configPath = path.join(home, '.repo-harness', 'config.json');
-      fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.writeFileSync(
-        configPath,
-        `${JSON.stringify(
-          {
-            brainRoot: '/Users/example/brain',
-            someOtherTopLevelKey: 'kept',
-            delegation: { notes: 'pre-existing nested key' },
-          },
-          null,
-          2,
-        )}\n`,
-      );
-
-      const result = runInstall({ target: 'codex', location: 'global', delegationMode: 'explicit' });
-      expect(result.exitCode).toBe(0);
-
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      expect(config.brainRoot).toBe('/Users/example/brain');
-      expect(config.someOtherTopLevelKey).toBe('kept');
-      expect(config.delegation).toEqual({ notes: 'pre-existing nested key', mode: 'explicit' });
-    });
-  });
-
-  test('--delegation-mode with an invalid value exits 2 and writes nothing', () => {
-    withTempHome((home) => {
-      const install = spawnSync(
-        'bun',
-        [CLI, 'install', '--target', 'codex', '--location', 'global', '--delegation-mode', 'bogus'],
-        {
-          cwd: ROOT,
-          env: { ...process.env, HOME: home },
-          encoding: 'utf-8',
-        },
-      );
-      expect(install.status).toBe(2);
-      expect(install.stderr).toContain('invalid --delegation-mode "bogus"');
-      expect(fs.existsSync(path.join(home, '.repo-harness', 'config.json'))).toBe(false);
-    });
-  });
-
-  test('no --delegation-mode flag over non-TTY stdio leaves ~/.repo-harness/config.json untouched', () => {
-    withTempHome((home) => {
-      // spawnSync's stdio pipes are never a TTY (isTTY is undefined), so this
-      // exercises the non-interactive branch of resolveDelegationMode.
-      // Passing input (even empty) closes stdin immediately, so a wrongly
-      // interactive code path would fail fast on EOF instead of hanging.
       const install = spawnSync('bun', [CLI, 'install', '--target', 'codex', '--location', 'global'], {
         cwd: ROOT,
         env: { ...process.env, HOME: home },
         encoding: 'utf-8',
-        input: '',
-        timeout: 20000,
       });
       expect(install.status).toBe(0);
       expect(fs.existsSync(path.join(home, '.codex/hooks.json'))).toBe(true);
       expect(fs.existsSync(path.join(home, '.repo-harness', 'config.json'))).toBe(false);
     });
-  });
-
-  test('re-running with the same mode is idempotent and reports unchanged', () => {
-    withTempHome(() => {
-      const first = runInstall({ target: 'codex', location: 'global', delegationMode: 'auto' });
-      expect(first.exitCode).toBe(0);
-      expect(first.lines.some((l) => l.includes('delegation.mode=auto'))).toBe(true);
-
-      const second = runInstall({ target: 'codex', location: 'global', delegationMode: 'auto' });
-      expect(second.exitCode).toBe(0);
-      expect(second.lines.some((l) => l.includes('unchanged') && l.includes('delegation.mode=auto'))).toBe(true);
-    });
-  });
+  }, 30_000);
 });

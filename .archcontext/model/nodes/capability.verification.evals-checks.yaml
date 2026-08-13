@@ -1,0 +1,41 @@
+schemaVersion: archcontext.node/v2
+id: capability.verification.evals-checks
+kind: capability
+name: Evals And Checks
+status: active
+summary: Runs repository verification, contract gates, benchmarks, and evaluation suites.
+responsibilities:
+  - Own machine-verifiable checks, bounded verifier execution, and evaluation evidence.
+source:
+  include:
+    - "tests/**"
+    - "evals/**"
+    - "scripts/run-skill-evals.ts"
+    - "scripts/run-harness-profile-benchmark.ts"
+    - "scripts/validate-harness-profile-benchmark.ts"
+    - "scripts/run-bounded-verifier-command.ts"
+    - "scripts/verify-contract.sh"
+    - "scripts/verify-sprint.sh"
+    - "scripts/check-task-workflow.sh"
+    - "scripts/check-task-sync.sh"
+    - "scripts/check-agent-tooling.sh"
+    - "scripts/check-brain-manifest.sh"
+    - "scripts/sync-brain-docs.sh"
+  entrypoints:
+    - id: entrypoint.evals-checks.primary
+      path: "src/cli/commands/cross-review.ts"
+      symbols:
+        - name: "runCrossReviewCommand"
+          sinks:
+            - id: sink.evals-checks.primary
+              path: "src/effects/review/cross-review-runner.ts"
+              symbol: "runCrossReview"
+extensions:
+  contractFiles:
+    agents: "AGENTS.md"
+    claude: "CLAUDE.md"
+  lspProfile: "typescript-lsp"
+  verification:
+    - "bun test"
+    - "bash scripts/check-task-sync.sh"
+    - "bash scripts/check-task-workflow.sh --strict"

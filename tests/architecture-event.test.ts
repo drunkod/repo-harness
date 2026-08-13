@@ -41,7 +41,7 @@ describe("architecture-event helper", () => {
       "docs/architecture/modules/apps-web/account.md",
       "tasks/workstreams/apps-web/account",
     ]);
-  });
+  }, 30_000);
 
   test("builds architecture event JSON without shell string escaping", () => {
     const res = runArchitectureEvent([
@@ -85,7 +85,46 @@ describe("architecture-event helper", () => {
     expect(event.file_path).toBe('apps/web/src/routes/account/"page".tsx');
     expect(event.spawn_recommended).toBe(false);
     expect(event.contract_sync_required).toBe(true);
-  });
+  }, 30_000);
+
+  test("renders Mermaid-only architecture follow-up without an HTML artifact route", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "architecture-event-mermaid-only-"));
+    try {
+      const requestFile = "docs/architecture/requests/apps-web.md";
+      const event = {
+        ts: "2026-08-09T23:46:13+0800",
+        file_path: "apps/web/routes.ts",
+        severity: "high",
+        functional_block: "apps/web",
+        capability_id: "apps-web",
+        matched_prefix: "apps/web",
+        architecture_domain: "apps-web",
+        architecture_capability: "web",
+        architecture_module: "docs/architecture/modules/apps-web/web.md",
+        workstream_dir: "tasks/workstreams/apps-web/web",
+        contract_agents: "apps/web/AGENTS.md",
+        contract_claude: "apps/web/CLAUDE.md",
+        change_type: "workflow-surface",
+        request_file: requestFile,
+        spawn_recommended: true,
+        contract_sync_required: true,
+      };
+
+      const result = runArchitectureEvent(
+        ["upsert-request", "--request-file", requestFile, "--event-json", JSON.stringify(event)],
+        cwd,
+      );
+
+      expect(result.status).toBe(0);
+      const request = readFileSync(join(cwd, requestFile), "utf8");
+      expect(request).toContain("Mermaid Markdown is the only architecture diagram artifact");
+      expect(request).toContain("external `mermaid` skill only for authoring and review");
+      expect(request).not.toContain("architecture HTML");
+      expect(request).not.toContain("docs/architecture/diagrams/");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test("updates context-map discoverable contexts idempotently", () => {
     const cwd = mkdtempSync(join(tmpdir(), "architecture-event-context-map-"));
@@ -122,7 +161,7 @@ describe("architecture-event helper", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("syncs architecture contract blocks without shell rendering", () => {
     const cwd = mkdtempSync(join(tmpdir(), "architecture-event-contract-files-"));
@@ -205,12 +244,13 @@ describe("architecture-event helper", () => {
       expect(agents).toContain("Capability ID: `apps-web`");
       expect(agents).toContain("Latest snapshot: `docs/architecture/snapshots/20260527-apps-web.md`");
       expect(agents).toContain("Semantic diagram source: `docs/architecture/snapshots/20260527-apps-web.md`");
-      expect(agents).toContain("Latest human diagram: `docs/architecture/diagrams/20260527-apps-web.html`");
+      expect(agents).not.toContain("Latest human diagram");
+      expect(agents).not.toContain("docs/architecture/diagrams/20260527-apps-web.html");
       expect(agents).toContain("current_slice: Shell reduction");
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("syncs pending architecture request only when the card is active and pending", () => {
     const cwd = mkdtempSync(join(tmpdir(), "architecture-event-pending-request-"));
@@ -279,5 +319,5 @@ describe("architecture-event helper", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

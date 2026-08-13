@@ -1,80 +1,128 @@
-# Architecture Module: workflow-engine/inspection-migration
+# workflow-engine/inspection-migration 架构文档
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-inspection-migration" sourceDigest="sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41" rendererVersion="archcontext.docs-renderer/v2" outputDigest="sha256:fb0b69b71f101f4071866e6458f1c471e66ee79ba0f4bde3d0ff2efae76b4a4b" verifiedAgainst="main@1495a1d6d3b60b8b442061a420f443432e140791@2026-08-12T21:59:27+08:00" -->
+> **狀態**:`active`
+> **Verified against**:`main@1495a1d6d3b60b8b442061a420f443432e140791`(2026-08-12)
+> **Capability ID**:`capability.workflow-engine.inspection-migration`(kind `capability`)
+> **Matched Prefixes**:`scripts/inspect-project-state.ts`、`scripts/create-project-dirs.sh`、`scripts/init-project.sh`、`scripts/lib/**`
+> **Local Contracts**:`scripts/AGENTS.md`、`scripts/CLAUDE.md`
+> **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與 Git 狀態投影生成,手改會在下次投影被覆蓋。
 
-> **Capability ID**: `workflow-engine-inspection-migration`
-> **Matched Prefixes**: `scripts/inspect-project-state.ts`, `src/core/adoption/`, `src/effects/fs-transaction.ts`, `scripts/create-project-dirs.sh`, `scripts/init-project.sh`, `scripts/lib`
-> **Local Contracts**: `scripts/AGENTS.md`, `scripts/CLAUDE.md`
-> **Workstream**: `tasks/workstreams/workflow-engine/inspection-migration/20260703-inspection-migration.md`
+Inspects repository state and executes explicit initialization or migration plans.
 
-## P1 Map
+## 1. P1:能力架構地圖
 
-The inspection and migration engine is the only layer that should decide how a
-target repo moves between workflow states.
+### 1.1 架構圖
 
-Authoritative entrypoints:
+```mermaid
+flowchart LR
+  p1_capability_workflow_engine_inspection_migration_9879a5f1["Inspection And Migration"]:::component
+  p1_component_inspection_migration_primary_98f1224c["Repository Inspector Process"]:::component
+  p1_capability_workflow_engine_inspection_migration_9879a5f1 -->|"Inspect before migration"| p1_component_inspection_migration_primary_98f1224c
+  classDef actor fill:#111827,color:#ffffff,stroke:#f9fafb,stroke-width:2px
+  classDef component fill:#075985,color:#ffffff,stroke:#bae6fd,stroke-width:2px
+  classDef datastore fill:#3f6212,color:#ffffff,stroke:#d9f99d,stroke-width:2px
+  classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
+```
 
-- `scripts/inspect-project-state.ts`: classifies initialize, migrate, audit, or repair state.
-- `src/core/adoption/standard-plan.ts`: preserves and normalizes legacy workflow documents, then plans all standard repo-local migration operations.
-- `src/effects/fs-transaction.ts`: preflights and executes the planned transaction with rollback evidence.
-- `scripts/create-project-dirs.sh` and `scripts/init-project.sh`: scaffold paths that attach the same workflow contract.
-- `scripts/lib/project-init-lib.sh`: shared install and policy generation library.
+- Proof: `proven` (`sha256:645bddf60b9049dc2f4d240dce10b9eb745f031ae765418032b109c0b7d3b7b7`).
+- Semantic nodes: `2`; declared relations: `1`.
 
-Scale signal: migration behavior must remain one ordered TypeScript plan rather
-than split across direct shell mutation routes. Helper implementations no longer
-have two authoring surfaces: `assets/workflow-contract.v1.json` owns the
-inventory, `scripts/` owns implementation bytes and modes, and
-`assets/templates/helpers/` is a checked-in deterministic projection.
+### 1.2 模組職責表
 
-## P2 Trace
+| 宣告入口 | 錨點 | 職責 |
+| --- | --- | --- |
+| `entrypoint.inspection-migration.primary` | `src/cli/commands/init.ts#runProcess` | `sink.inspection-migration.primary` → `src/effects/process-runner.ts#runProcess` |
 
-Concrete route: `repo-harness init --repo . --dry-run` starts with target
-validation and `inspect-project-state.ts` -> produces the complete ordered TS
-plan. Apply preflights every operation, then creates plans, tasks, docs,
-harness dirs, deploy dirs, ignored runtime state, templates, hook libraries,
-workflow contract, policy, context map, brain manifest, and reference stubs,
-while archiving legacy content and preserving user-owned files.
+### 1.3 規模信號
 
-When policy requests automatic fleet installation, `pi_maybe_install_agent_fleet`
-reads only `external_tooling.agent_fleet.install_mode` and invokes the selected
-repo-harness helper. The helper resolves `agents/fleet` from its package/source
-path, never from the target repository or a network source.
+- 文件數:`6`
+- 總行數:`3838`
+- 匹配前綴:`scripts/inspect-project-state.ts`、`scripts/create-project-dirs.sh`、`scripts/init-project.sh`、`scripts/lib/**`
+- 復算:`archctx docs plan --json`(掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`)
 
-The helper projection route remains
-`assets/workflow-contract.v1.json#helpers.scripts` ->
-`scripts/sync-helper-sources.ts` -> `src/core/source-projection.ts` ->
-`assets/templates/helpers/`; it is separate from repo adoption and no helper
-wrapper is installed into downstream root `scripts/` directories.
+### 1.4 依賴邊界
 
-The sync boundary is filesystem-first. Inputs are repo files and contract assets.
-Outputs are repo-local Markdown, JSON, JSONL, shell, and TypeScript files. The
-only async/external boundary is advisory external-tooling detection; it must not
-install or upgrade tools automatically.
+出向關係:
 
-Error paths:
+- `calls` → `component.inspection-migration.primary` — Inspect before migration
 
-- Missing repo path exits before mutation.
-- Missing inspector or migrator exits before a partial workflow claim.
-- Missing or malformed workflow contracts fail before helper discovery; helper
-  directories and filename extensions are never scanned or guessed.
-- A source-checkout override must be an absolute `REPO_HARNESS_SOURCE_ROOT`
-  containing the canonical contract and selected helper implementation.
-- Apply mode runs strict workflow verification and fails the migration if it does not pass.
+入向關係:
 
-## P3 Decision
+- 無。
 
-The engine preserves user content because generated workflow code is installed
-into real product repos. The invariant is: archive uncertain legacy material,
-delete only manifest-owned `known_generated` files, and preserve `_ref/`, `_ops/`,
-secrets, local env, and custom hooks.
+## 2. P2:端到端數據流
 
-At 10x target repo variety, the first failure would be hard-coded shell lists
-drifting from `assets/workflow-contract.v1.json`. The manifest-backed inventory
-and deterministic projection make that drift a failing check. New helpers must
-be added to the contract and `scripts/`; `bun run sync:helpers` produces the
-package copy and `bun run check:helpers` verifies it. No compatibility directory,
-home-directory search, legacy env alias, or extension fallback participates in
-helper resolution.
+> **Proof**: `proven` (`sha256:645bddf60b9049dc2f4d240dce10b9eb745f031ae765418032b109c0b7d3b7b7`); selectors `1/1`.
 
-## 2026-07-11 Helper Authority Closeout
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
+sequenceDiagram
+  autonumber
+  participant p2_capability_4262990f as Inspection And Migration
+  participant p2_component_7b8d80ff as Repository Inspector Process
+  p2_capability_4262990f->>p2_component_7b8d80ff: Dispatch Repository Inspector Process
+  alt Inspect before migration completes
+  p2_capability_4262990f->>p2_component_7b8d80ff: Invoke Repository Inspector Process
+    Note over p2_capability_4262990f: Return success receipt
+  else Inspect before migration is rejected or fails
+  p2_capability_4262990f->>p2_component_7b8d80ff: Propagate Repository Inspector Process failure
+    Note over p2_capability_4262990f: Return typed failure
+  end
+```
+<!-- END ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-inspection-migration" -->
+## 3. P3：设计决策与不变量
+
+### 3.1 必须保持的不变量
+
+1. **inspector 只读**。判定与变更彻底分离：`inspect-project-state.ts` 没有任何写路径，因此可以在任意脏仓库、任意 CI 阶段安全反复运行。`check-ci.sh` 正是靠这一点把它当 smoke 用。
+2. **用户内容优先保全**。安全默认写死在 `safeDefaults`（:111-116）：保留 repo-local tasks-first 工作流、归档不确定的遗留内容而非覆盖、只删除 manifest 声明为 `known_generated` 的文件。契约里 `_ref/`、`_ops/`、`.codegraph/` 的动作是 `preserve` 且 `risk: high` / `ownership: user_local`——本仓库当前的 upgrade plan 里唯一一条就是它。
+3. **根 `CLAUDE.md` / `AGENTS.md` 永不覆盖**。检测到两者分叉时只产出 required decision 让人处理。
+4. **契约是唯一 inventory 权威**。目录清单、helper 清单、legacy 路径、upgrade 动作全部来自 `assets/workflow-contract.v1.json`，脚本里不得再维护第二份平行清单。
+5. **helper 解析 fail-closed**。不扫目录、不猜扩展名、不查 home、不认 legacy env alias；不合法条目直接抛错而不是跳过。
+6. **下游不装 helper wrapper**。`pi_install_helpers` 只在"目标目录就是源仓库自己"时才把 helper 拷进 `scripts/`；下游仓库统一走全局 repo-harness helper runtime。
+7. **dry-run 不碰用户级目录**。agent fleet 安装在非 apply 模式下只打印。
+
+### 3.2 有意接受的约束
+
+- **shell 与 TS 双语言实现**是能力边界的直接结果：判定与事务在 TS（inspector + adoption），脚手架与安装在 shell（`pi_*`）。合并成一种语言会把 adoption 能力的所有权拖进本能力，代价高于收益。
+- **`init-project.sh` 会联网装依赖**（`bun create vite`、`npx shadcn` 等）。这是脚手架命令的本分，但也意味着它不能在离线 CI 里当检查用——所以 CI 只跑 inspector。
+- **三级 JSON runtime 探测**换来的是在没有 node/bun 的机器上也能读契约。代价是 python3 分支与 node 分支是两份独立实现的 selector 解析逻辑（`project-init-lib.sh:780-810`），语义漂移只能靠测试兜。
+
+### 3.3 10x 规模下先垮的点
+
+按危险度排序：
+
+1. **`project-init-lib.sh` 单文件 2,721 行**。它同时承担契约读取、模板安装、policy 生成、context map 生成、capability registry 生成、harness 状态面、gitignore managed block、外部工具报告七类职责。目标仓库形态每多一种，新分支就往这一个文件里加。这是本能力最先垮的地方——不是因为性能，而是因为没有任何模块边界能阻止一个 `pi_*` 函数偷偷依赖另一个的副作用。
+2. **selector 解析的双实现漂移**。python3 与 node 两条分支各写一遍嵌套取值。今天语义一致，但只要有人给 node 分支加一个数组索引语法而忘了 python3 分支，行为就会随机器而变。这一处是 §3.1 第 4 条"单一权威"原则的实际缺口。
+3. **`pi_workflow_contract_query_lines` 静默降级**。没有 JSON runtime 时它返回空并只打 warn，调用方 `create_contract_directories` 会安静地一个目录都不建。这与仓库的 fail-closed 原则冲突，但目前没有调用方检查它的返回码。
+4. **drift 探测的硬编码常量**。`generatedClaudeHookPaths`（inspector :123-130）与 `ignoredReferenceOrSecretPaths`（:131-134）是 TS 里的字面量，不来自契约。契约里已有对应的 `legacy-claude-hook-shims` / `reference-and-secret-surfaces-preserve` 动作，两边同时改才不漂移。第 4 条不变量在这两处还没有真正兑现。
+5. **stack 分支的组合爆炸**。`init-project.sh` 的 5 个 stack 各自硬编码依赖列表。第 6 个 stack 的边际成本是线性的，但每个 stack 的依赖版本腐化是独立的，没有任何检查覆盖它们。
+
+### 3.4 验证面
+
+```bash
+bun test tests/migration-script.test.ts tests/create-project-dirs.runtime.test.ts tests/workflow-contract.test.ts
+bun src/cli/index.ts init --repo . --dry-run
+bun scripts/inspect-project-state.ts --repo . --format text
+```
+
+前两条是 `.ai/context/capabilities.json#verification_hints` 的原文。1,582 行测试对 3,786 行生产代码，其中 `create-project-dirs.runtime.test.ts` 一个文件 1,066 行——脚手架的真实行为几乎全靠它兜。
+
+## 4. 历史决策记录（append-only）
+
+以下段落逐字保留自本文件前一版本，不翻译、不改写。
+
+### 2026-08-11 Codex Native Agent Projection Cutover
+
+- `scripts/lib/project-init-lib.sh`, `scripts/ensure-task-workflow.sh`, and the
+  packaged helper mirror now emit one native-subagent runner authority.
+- Generated policy keeps `mode: "explicit"` as the declared state but has no
+  automatic SessionStart authorization, natural-language permission parser, or
+  alternate Codex fleet runner.
+- The cutover removes the retired authoring path in the same work-package; no
+  compatibility key reader, translation, or migration shim is installed.
+
+### 2026-07-11 Helper Authority Closeout
 
 - `src/core/source-projection.ts` is the shared filesystem projection primitive
   used by hook and helper projections; it preserves bytes and executable mode,
@@ -90,7 +138,7 @@ helper resolution.
   target-repo contract, or an explicit source checkout. It no longer searches
   home directories or legacy skill roots.
 
-## 2026-07-06 Delegation Policy Template Closeout
+### 2026-07-06 Delegation Policy Template Closeout
 
 - `scripts/lib/project-init-lib.sh` now emits the same `delegation.mode=auto`
   policy explanation as the self-host `.ai/harness/policy.json`, so generated
@@ -100,7 +148,7 @@ helper resolution.
   ownership, helper installation, idempotency rules, or protected local runtime
   state.
 
-## 2026-07-12 Agent Fleet Policy Seed Closeout
+### 2026-07-12 Agent Fleet Policy Seed Closeout
 
 - `scripts/lib/project-init-lib.sh` and `scripts/ensure-task-workflow.sh` emit
   the same `external_tooling.agent_fleet` seed with
@@ -113,7 +161,7 @@ helper resolution.
   source override, or legacy policy reader participates in inspection,
   migration, or installation.
 
-## 2026-07-12 Six-role Fleet Seed Closeout
+### 2026-07-12 Six-role Fleet Seed Closeout
 
 - `scripts/lib/project-init-lib.sh` and `scripts/ensure-task-workflow.sh` now
   seed the same six-role `external_tooling.agent_fleet.managed_agents` list as
@@ -125,6 +173,8 @@ helper resolution.
 - Downstream advisory installation and self-host automatic installation keep
   their existing behavior. Missing or malformed packaged persona sources still
   fail before any user-level agent target is mutated.
+
+复验状态（main@13686d8d）：四段 closeout 的核心断言与当前源码一致——六角色清单见 `scripts/lib/project-init-lib.sh:1973` 与 `scripts/ensure-task-workflow.sh:1288`，`install_mode: "advisory"` 下游默认见 `project-init-lib.sh:1976`，`scripts/workflow-contract.ts` 的三源解析与 fail-closed 校验见 §1.2 与 §2.3。
 
 ## Optimization Backlog
 

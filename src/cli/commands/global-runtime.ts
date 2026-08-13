@@ -1,7 +1,8 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync } from "fs";
-import { homedir } from "os";
-import { delimiter, dirname, join, resolve, sep } from "path";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "fs";
+import { homedir, tmpdir } from "os";
+import { delimiter, dirname, join, relative, resolve, sep } from "path";
 import { fileURLToPath } from "url";
+import { ARCHCONTEXT_NODE_RANGE, productVersionManifest } from "archctx-contracts";
 import { configureBrainRoot, defaultBrainRootChoice, expandHomePath } from "./brain-root";
 import {
   syncCrossReviewSkills,
@@ -11,8 +12,14 @@ import { runInstall, type InstallTargetSpec } from "./install";
 import { compareVersions, readLatestPackageVersion } from "./doctor";
 import { configureCodegraph } from "../tools/codegraph";
 import { runProcess as runBoundedProcess } from "../../effects/process-runner";
+import { commitVerifiedSkillTree, skillTreeSha256 } from "../../effects/skill-tree-integrity";
 import { PROFILE_COMPONENTS, readInstalledProfile, type InstallProfile } from "../installer/install-profile";
-import { parseSkillSurfaceCatalog, type SkillSurfaceCatalog } from "../../core/skill-surface/catalog";
+import {
+  parseSkillSurfaceCatalog,
+  requiredExplicitExternalSkillInstallGroup,
+  type SkillSurfaceCatalog,
+} from "../../core/skill-surface/catalog";
+import { archctxCapabilities } from "../../effects/architecture/archctx-provider";
 
 export interface GlobalRuntimeOptions {
   sourceRoot?: string;
@@ -24,9 +31,11 @@ export interface GlobalRuntimeOptions {
   syncSkill?: boolean;
   hostAdapters?: boolean;
   externalSkills?: boolean;
+  reverseSkill?: boolean;
   codegraph?: boolean;
   brainRoot?: string;
   profile?: InstallProfile;
+  updateMode?: boolean;
 }
 
 export interface GlobalRuntimeStep {
@@ -48,7 +57,9 @@ export interface GlobalRuntimeResult {
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const MIN_BUN_VERSION = "1.1.35";
-const CODEGRAPH_PACKAGE = "@colbymchenry/codegraph@latest";
+const CODEGRAPH_VERSION = productVersionManifest().runtime.codeGraph.requiredVersion;
+const CODEGRAPH_PACKAGE = `@colbymchenry/codegraph@${CODEGRAPH_VERSION}`;
+const ARCHCTX_PACKAGES = ["archctx", "archctx-contracts"] as const;
 const WAZA_SHARED_RULES = ["anti-patterns.md", "chinese.md", "durable-context.md", "english.md"] as const;
 
 /**
@@ -70,7 +81,7 @@ function loadSkillSurfaceCatalog(sourceRoot: string): SkillSurfaceCatalog {
   return resolution.catalog;
 }
 
-/** Groups kind:"external" catalog packages by upstream provider, preserving manifest declaration order. */
+/** Groups external catalog packages by provider for the managed Waza/Mermaid refresh path. */
 function externalSkillGroupsFromCatalog(catalog: SkillSurfaceCatalog): ReadonlyMap<string, readonly string[]> {
   const groups = new Map<string, string[]>();
   for (const pkg of catalog.packages) {
@@ -123,7 +134,7 @@ function resolveBunExecutable(env?: NodeJS.ProcessEnv): string {
 function bindBunRuntimeEnv(env: NodeJS.ProcessEnv | undefined, bunExecutable: string): NodeJS.ProcessEnv {
   const activePath = env?.PATH ?? process.env.PATH ?? "";
   return {
-    ...(env ?? {}),
+    ...(env ?? process.env),
     PATH: [dirname(bunExecutable), activePath].filter(Boolean).join(delimiter),
   };
 }
@@ -226,6 +237,18 @@ function renderStep(step: GlobalRuntimeStep): string[] {
   return lines;
 }
 
+function finalizeRuntimeResult(steps: GlobalRuntimeStep[]): GlobalRuntimeResult {
+  const lines = steps.flatMap(renderStep);
+  const failed = steps.filter((step) => step.status === "failed");
+  return {
+    exitCode: failed.length > 0 ? 1 : 0,
+    steps,
+    lines,
+    stdout: lines.join("\n"),
+    stderr: failed.map((step) => step.stderr ?? "").filter(Boolean).join("\n"),
+  };
+}
+
 function withProcessEnv<T>(env: NodeJS.ProcessEnv | undefined, fn: () => T): T {
   if (!env) return fn();
   const previous = new Map<string, string | undefined>();
@@ -256,6 +279,10 @@ function hostIds(target: InstallTargetSpec): Array<"codex" | "claude"> {
   return ["claude", "codex"];
 }
 
+function targetFromHostIds(hosts: readonly ("codex" | "claude")[]): InstallTargetSpec {
+  return hosts.length === 2 ? "both" : hosts[0]!;
+}
+
 function homeDir(env?: NodeJS.ProcessEnv): string {
   return env?.HOME ?? process.env.HOME ?? homedir();
 }
@@ -269,11 +296,9 @@ function isNpxCacheSource(sourceRoot: string): boolean {
 }
 
 function commandEnv(sourceRoot: string, env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv | undefined {
-  const next = { ...(env ?? {}) };
-  if (isNpxCacheSource(sourceRoot) && next.AGENTIC_DEV_LINK_INSTALLED_COPIES === undefined) {
-    next.AGENTIC_DEV_LINK_INSTALLED_COPIES = "0";
-  }
-  return Object.keys(next).length > 0 ? next : env;
+  if (!isNpxCacheSource(sourceRoot)) return env;
+  if (env?.AGENTIC_DEV_LINK_INSTALLED_COPIES !== undefined) return env;
+  return { ...(env ?? process.env), AGENTIC_DEV_LINK_INSTALLED_COPIES: "0" };
 }
 
 function packageVersion(sourceRoot: string): string | null {
@@ -318,6 +343,159 @@ function bunGlobalPackageRoot(env?: NodeJS.ProcessEnv): string | null {
   const home = env?.HOME ?? process.env.HOME ?? process.env.USERPROFILE;
   const bunRoot = bunInstall ? resolve(bunInstall) : home ? join(resolve(home), ".bun") : null;
   return bunRoot ? join(bunRoot, "install", "global", "node_modules", "repo-harness") : null;
+}
+
+interface PackageManifest {
+  name?: unknown;
+  version?: unknown;
+  dependencies?: unknown;
+  engines?: unknown;
+}
+
+interface ManagedRuntimeReadback {
+  status: "ready" | "package-mismatch" | "runtime-mismatch";
+  detail: string;
+}
+
+function readPackageManifest(packageRoot: string): PackageManifest {
+  return JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf-8")) as PackageManifest;
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function findInstalledPackageRoot(consumerRoot: string, packageName: string): string | null {
+  let current = resolve(consumerRoot);
+  while (true) {
+    const candidate = join(current, "node_modules", packageName);
+    if (existsSync(join(candidate, "package.json"))) return candidate;
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function readManagedRuntime(
+  globalPackageRoot: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  expectedHarnessVersion: string | null,
+): ManagedRuntimeReadback {
+  if (!existsSync(join(globalPackageRoot, "package.json"))) {
+    return { status: "package-mismatch", detail: `installed repo-harness package is missing: ${globalPackageRoot}` };
+  }
+  const harness = readPackageManifest(globalPackageRoot);
+  if (expectedHarnessVersion !== null && harness.version !== expectedHarnessVersion) {
+    return { status: "package-mismatch", detail: `repo-harness version mismatch: expected ${expectedHarnessVersion}, got ${String(harness.version)}` };
+  }
+  const dependencies = recordValue(harness.dependencies);
+  const versions: string[] = [`repo-harness@${String(harness.version)}`];
+  for (const packageName of ARCHCTX_PACKAGES) {
+    const expected = dependencies[packageName];
+    if (typeof expected !== "string") {
+      return { status: "package-mismatch", detail: `installed repo-harness does not declare mandatory dependency ${packageName}` };
+    }
+    const packageRoot = findInstalledPackageRoot(globalPackageRoot, packageName);
+    if (packageRoot === null) {
+      return { status: "package-mismatch", detail: `mandatory dependency is missing: ${packageName}@${expected}` };
+    }
+    const actual = readPackageManifest(packageRoot).version;
+    if (actual !== expected) {
+      return { status: "package-mismatch", detail: `mandatory dependency mismatch: expected ${packageName}@${expected}, got ${String(actual)}` };
+    }
+    versions.push(`${packageName}@${actual}`);
+  }
+
+  const archctxRoot = findInstalledPackageRoot(globalPackageRoot, "archctx")!;
+  const archctx = readPackageManifest(archctxRoot);
+  const nodeRange = recordValue(archctx.engines).node;
+  if (nodeRange !== ARCHCONTEXT_NODE_RANGE) {
+    return { status: "package-mismatch", detail: `archctx Node runtime contract mismatch: expected ${ARCHCONTEXT_NODE_RANGE}, got ${String(nodeRange)}` };
+  }
+  const codegraphVersion = recordValue(archctx.dependencies)["@colbymchenry/codegraph"];
+  if (typeof codegraphVersion !== "string") {
+    return { status: "package-mismatch", detail: "archctx does not declare mandatory package-local CodeGraph" };
+  }
+  const codegraphRoot = findInstalledPackageRoot(archctxRoot, "@colbymchenry/codegraph");
+  const actualCodegraph = codegraphRoot === null ? null : readPackageManifest(codegraphRoot).version;
+  if (actualCodegraph !== codegraphVersion) {
+    return { status: "package-mismatch", detail: `archctx package-local CodeGraph mismatch: expected ${codegraphVersion}, got ${String(actualCodegraph)}` };
+  }
+
+  try {
+    archctxCapabilities(cwd, {
+      consumerRoot: globalPackageRoot,
+      env,
+      policy: {
+        provider: "archctx",
+        applyMode: "manual",
+        failureGate: "advisory",
+        requiredVersion: String(dependencies.archctx),
+        timeoutMs: 10_000,
+      },
+    });
+  } catch (error) {
+    return { status: "runtime-mismatch", detail: error instanceof Error ? error.message : String(error) };
+  }
+  versions.push(`@colbymchenry/codegraph@${actualCodegraph}`, `node=${ARCHCONTEXT_NODE_RANGE}`);
+  return { status: "ready", detail: versions.join("; ") };
+}
+
+function safeReadManagedRuntime(
+  globalPackageRoot: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  expectedHarnessVersion: string | null,
+): ManagedRuntimeReadback {
+  try {
+    return readManagedRuntime(globalPackageRoot, cwd, env, expectedHarnessVersion);
+  } catch (error) {
+    return { status: "package-mismatch", detail: `managed dependency readback failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+function reconcileManagedRuntime(
+  cwd: string,
+  bunExecutable: string,
+  env: NodeJS.ProcessEnv,
+  installSpec: string,
+): GlobalRuntimeStep {
+  const globalPackageRoot = bunGlobalPackageRoot(env);
+  if (globalPackageRoot === null) {
+    return { step: "verify managed runtime dependencies", status: "failed", detail: "unable to resolve Bun global package root" };
+  }
+  const requested = installSpec.startsWith("repo-harness@") ? installSpec.slice("repo-harness@".length) : null;
+  const expectedHarnessVersion = requested && requested !== "latest" && requested !== "next" ? requested : null;
+  const initial = safeReadManagedRuntime(globalPackageRoot, cwd, env, expectedHarnessVersion);
+  if (initial.status === "ready") {
+    return { step: "verify managed runtime dependencies", status: "ok", detail: initial.detail };
+  }
+  if (initial.status === "runtime-mismatch") {
+    return { step: "verify managed runtime dependencies", status: "failed", detail: initial.detail };
+  }
+  return {
+    step: "verify managed runtime dependencies",
+    status: "failed",
+    detail: `managed runtime mismatch: ${initial.detail}`,
+    stderr: `Automatic remove/reinstall is disabled because a failed reinstall could remove the working CLI. Run \`${bunExecutable} remove -g repo-harness\`, then \`${bunExecutable} add -g ${installSpec}\`, and rerun repo-harness update.`,
+  };
+}
+
+export function verifyInstalledManagedRuntime(
+  opts: Pick<GlobalRuntimeOptions, 'sourceRoot' | 'cwd' | 'env'> = {},
+): GlobalRuntimeStep {
+  const sourceRoot = opts.sourceRoot ?? defaultSourceRoot();
+  const version = packageVersion(sourceRoot);
+  if (!version) {
+    return { step: 'verify managed runtime dependencies', status: 'failed', detail: `package version is unavailable from ${sourceRoot}` };
+  }
+  const cwd = opts.cwd ?? process.cwd();
+  const bunExecutable = resolveBunExecutable(opts.env);
+  const env = bindBunRuntimeEnv(commandEnv(sourceRoot, opts.env), bunExecutable);
+  return reconcileManagedRuntime(cwd, bunExecutable, env, `repo-harness@${version}`);
 }
 
 function isBunGlobalPackageSource(sourceRoot: string, env?: NodeJS.ProcessEnv): boolean {
@@ -458,12 +636,186 @@ function installAgentFleet(sourceRoot: string, env?: NodeJS.ProcessEnv): GlobalR
   return withStepName(runProcess('bash', [script], sourceRoot, env), 'install agent fleet');
 }
 
-function installWazaSkills(sourceRoot: string, target: InstallTargetSpec, env?: NodeJS.ProcessEnv): GlobalRuntimeStep {
+function externalSkillStepName(provider: string): string {
+  if (provider === "tw93/Waza") return "configure Waza skills";
+  if (provider === "BfdCampos/dotfiles") return "configure Mermaid skill";
+  if (provider.startsWith("zhaoxuya520/reverse-skill@")) return "configure Reverse Skill";
+  return `configure external skills ${provider}`;
+}
+
+function installExternalSkillGroup(
+  sourceRoot: string,
+  target: InstallTargetSpec,
+  provider: string,
+  skills: readonly string[],
+  integrityBySkill: Readonly<Record<string, string | null>>,
+  env?: NodeJS.ProcessEnv,
+): GlobalRuntimeStep {
+  const stepName = externalSkillStepName(provider);
+  const home = homeDir(env);
+  const skillsRoot = join(home, '.agents', 'skills');
+  const canonicalSkillsRoot = join(realpathSync(home), '.agents', 'skills');
+  const committedIntegritySkills = new Set<string>();
+  const preflight = preflightStagedSkillProjection(skills, target, env, stepName);
+  if (preflight) return preflight;
+  const missing = skills.filter((skill) => !existsSync(join(skillsRoot, skill, 'SKILL.md')));
+  const ordinaryMissing = missing.filter((skill) => integrityBySkill[skill] == null);
+  if (ordinaryMissing.length > 0) {
+    const agents = hostAgents(target);
+    const step = runProcess(
+      "bunx",
+      [
+        "skills",
+        "add",
+        provider,
+        "-g",
+        "-a",
+        ...agents,
+        "-s",
+        ...ordinaryMissing,
+        "-y",
+      ],
+      sourceRoot,
+      env,
+    );
+    if (step.status === 'failed') {
+      return withStepName(step, stepName, `target=${target}; missing=${ordinaryMissing.join(',')}`);
+    }
+  }
+
+  const integrityMissing = missing.filter((skill) => integrityBySkill[skill] != null);
+  if (integrityMissing.length > 0) {
+    const isolatedHome = mkdtempSync(join(tmpdir(), "repo-harness-skill-stage-"));
+    const isolatedEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...(env ?? {}),
+      HOME: isolatedHome,
+      USERPROFILE: isolatedHome,
+      XDG_CONFIG_HOME: join(isolatedHome, ".config"),
+      XDG_CACHE_HOME: join(isolatedHome, ".cache"),
+      BUN_INSTALL: join(isolatedHome, ".bun"),
+      BUN_INSTALL_CACHE_DIR: join(isolatedHome, ".bun", "install", "cache"),
+      NPM_CONFIG_CACHE: join(isolatedHome, ".npm"),
+      npm_config_cache: join(isolatedHome, ".npm"),
+    };
+    // Custom host roots would defeat isolation even with HOME redirected.
+    for (const key of ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "AGENTS_HOME", "SKILLS_HOME"]) {
+      delete isolatedEnv[key];
+    }
+    try {
+      const step = runProcess(
+        "bunx",
+        [
+          "skills",
+          "add",
+          provider,
+          "-g",
+          "-a",
+          ...hostAgents(target),
+          "-s",
+          ...integrityMissing,
+          "-y",
+        ],
+        sourceRoot,
+        isolatedEnv,
+      );
+      if (step.status === "failed") {
+        return withStepName(step, stepName, `isolated target=${target}; missing=${integrityMissing.join(',')}`);
+      }
+
+      for (const skill of integrityMissing) {
+        const expected = integrityBySkill[skill]!;
+        const isolatedSkill = join(isolatedHome, ".agents", "skills", skill);
+        let actual: string;
+        try {
+          actual = skillTreeSha256(isolatedSkill);
+        } catch (error) {
+          return {
+            step: stepName,
+            status: "failed",
+            detail: `cannot verify isolated staging integrity for ${skill}: ${(error as Error).message}`,
+          };
+        }
+        if (actual !== expected) {
+          return {
+            step: stepName,
+            status: "failed",
+            detail: `isolated staging integrity mismatch for ${skill}: expected=${expected}; actual=${actual}`,
+          };
+        }
+      }
+
+      for (const skill of integrityMissing) {
+        const committed = commitVerifiedSkillTree(
+          join(isolatedHome, ".agents", "skills", skill),
+          join(skillsRoot, skill),
+          integrityBySkill[skill]!,
+          { expectedCanonicalParent: canonicalSkillsRoot },
+        );
+        if (committed.status === "failed") {
+          return { step: stepName, status: "failed", detail: committed.detail };
+        }
+        committedIntegritySkills.add(skill);
+      }
+    } finally {
+      rmSync(isolatedHome, { recursive: true, force: true });
+    }
+  }
+  for (const skill of skills) {
+    const expected = integrityBySkill[skill];
+    if (expected === null || expected === undefined) continue;
+    const installed = join(skillsRoot, skill);
+    try {
+      const stat = lstatSync(installed);
+      const canonicalRoot = realpathSync(skillsRoot);
+      if (
+        canonicalRoot !== canonicalSkillsRoot
+        || !stat.isDirectory()
+        || stat.isSymbolicLink()
+        || realpathSync(installed) !== join(canonicalRoot, skill)
+      ) {
+        if (committedIntegritySkills.has(skill)) rmSync(installed, { recursive: true, force: true });
+        return {
+          step: stepName,
+          status: "failed",
+          detail: `refusing non-canonical integrity staging root for ${skill}: ${installed}`,
+        };
+      }
+      const actual = skillTreeSha256(installed);
+      if (actual !== expected) {
+        if (committedIntegritySkills.has(skill)) rmSync(installed, { recursive: true, force: true });
+        return {
+          step: stepName,
+          status: "failed",
+          detail: `staging integrity mismatch for ${skill}: expected=${expected}; actual=${actual}`,
+        };
+      }
+    } catch (error) {
+      if (committedIntegritySkills.has(skill)) rmSync(installed, { recursive: true, force: true });
+      return {
+        step: stepName,
+        status: "failed",
+        detail: `cannot verify staging integrity for ${skill}: ${(error as Error).message}`,
+      };
+    }
+  }
+  const projection = projectStagedSkills(skills, target, env, stepName);
+  if (projection.status === "failed") {
+    for (const skill of committedIntegritySkills) {
+      rmSync(join(skillsRoot, skill), { recursive: true, force: true });
+    }
+  }
+  return projection;
+}
+
+function installWazaSkills(sourceRoot: string, target: InstallTargetSpec, env?: NodeJS.ProcessEnv, refresh = false): GlobalRuntimeStep {
   const agents = hostAgents(target);
   const wazaSkills = externalSkillGroupsFromCatalog(loadSkillSurfaceCatalog(sourceRoot)).get("tw93/Waza") ?? [];
   const skillsRoot = join(homeDir(env), '.agents', 'skills');
-  const missing = wazaSkills.filter((skill) => !existsSync(join(skillsRoot, skill, 'SKILL.md')));
-  if (missing.length > 0) {
+  const selected = refresh ? wazaSkills : wazaSkills.filter((skill) => !existsSync(join(skillsRoot, skill, 'SKILL.md')));
+  const preflight = preflightStagedSkillProjection(wazaSkills, target, env, 'configure Waza skills');
+  if (preflight) return preflight;
+  if (selected.length > 0) {
     const step = runProcess(
       "bunx",
       [
@@ -474,17 +826,50 @@ function installWazaSkills(sourceRoot: string, target: InstallTargetSpec, env?: 
         "-a",
         ...agents,
         "-s",
-        ...missing,
+        ...selected,
         "-y",
       ],
       sourceRoot,
       env,
     );
     if (step.status === 'failed') {
-      return withStepName(step, "configure Waza skills", `target=${target}; missing=${missing.join(',')}`);
+      return withStepName(step, "configure Waza skills", `target=${target}; selected=${selected.join(',')}`);
     }
   }
   return projectStagedSkills(wazaSkills, target, env, 'configure Waza skills');
+}
+
+function preflightStagedSkillProjection(
+  skills: readonly string[],
+  target: InstallTargetSpec,
+  env: NodeJS.ProcessEnv | undefined,
+  step: string,
+): GlobalRuntimeStep | null {
+  const home = homeDir(env);
+  const canonicalHome = realpathSync(home);
+  const roots = hostIds(target).map((host) => {
+    const hostRoot = host === 'codex' ? '.codex' : '.claude';
+    return {
+      path: join(home, hostRoot, 'skills'),
+      expected: join(canonicalHome, hostRoot, 'skills'),
+    };
+  });
+  for (const root of roots) {
+    const invalid = invalidProjectionRoot(root.path, root.expected);
+    if (invalid) return { step, status: 'failed', detail: invalid };
+  }
+  for (const skill of skills) {
+    const source = join(home, '.agents', 'skills', skill);
+    for (const root of roots) {
+      const destination = join(root.path, skill);
+      if (!pathEntryExists(destination)) continue;
+      try {
+        if (existsSync(join(source, 'SKILL.md')) && realpathSync(destination) === realpathSync(source)) continue;
+      } catch { /* the fail-closed result below owns unreadable projections */ }
+      return { step, status: 'failed', detail: `refusing to refresh unowned host skill ${destination}` };
+    }
+  }
+  return null;
 }
 
 function projectStagedSkills(
@@ -494,33 +879,103 @@ function projectStagedSkills(
   step: string,
 ): GlobalRuntimeStep {
   const home = homeDir(env);
-  const roots = hostIds(target).map((host) => join(home, host === 'codex' ? '.codex' : '.claude', 'skills'));
+  const canonicalHome = realpathSync(home);
+  const roots = hostIds(target).map((host) => {
+    const hostRoot = host === 'codex' ? '.codex' : '.claude';
+    return {
+      path: join(home, hostRoot, 'skills'),
+      expected: join(canonicalHome, hostRoot, 'skills'),
+    };
+  });
   const projected: string[] = [];
+  const created: string[] = [];
+  const fail = (detail: string): GlobalRuntimeStep => {
+    for (const destination of created.reverse()) rmSync(destination, { recursive: true, force: true });
+    return { step, status: 'failed', detail };
+  };
   for (const skill of skills) {
     const source = join(home, '.agents', 'skills', skill);
     if (!existsSync(join(source, 'SKILL.md'))) {
-      return { step, status: 'failed', detail: `staging skill missing after install: ${source}` };
+      return fail(`staging skill missing after install: ${source}`);
     }
     for (const root of roots) {
-      const destination = join(root, skill);
-      mkdirSync(root, { recursive: true });
-      if (existsSync(destination)) {
-        try {
+      const destination = join(root.path, skill);
+      try {
+        const invalidBefore = invalidProjectionRoot(root.path, root.expected);
+        if (invalidBefore) return fail(invalidBefore);
+        mkdirSync(root.path, { recursive: true });
+        const invalidAfter = invalidProjectionRoot(root.path, root.expected);
+        if (invalidAfter) return fail(invalidAfter);
+        if (pathEntryExists(destination)) {
           if (realpathSync(destination) === realpathSync(source)) {
             projected.push(destination);
             continue;
           }
-        } catch { /* the fail-closed error below owns unreadable projections */ }
-        return { step, status: 'failed', detail: `refusing to overwrite unowned host skill ${destination}` };
+          return fail(`refusing to overwrite unowned host skill ${destination}`);
+        }
+        symlinkSync(source, destination, 'dir');
+      } catch (error) {
+        return fail(`cannot project staged skill ${destination}: ${(error as Error).message}`);
       }
-      symlinkSync(source, destination, 'dir');
+      created.push(destination);
       projected.push(destination);
     }
   }
   return { step, status: 'ok', detail: `projected ${projected.length} host skills` };
 }
 
-function syncWazaSharedRules(target: InstallTargetSpec, env?: NodeJS.ProcessEnv): GlobalRuntimeStep {
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function prospectiveCanonicalPath(path: string): string {
+  let ancestor = path;
+  while (!pathEntryExists(ancestor)) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor) throw new Error(`cannot resolve an existing ancestor for ${path}`);
+    ancestor = parent;
+  }
+  return resolve(realpathSync(ancestor), relative(ancestor, path));
+}
+
+function invalidProjectionRoot(root: string, expected: string): string | null {
+  let actual: string;
+  try {
+    actual = prospectiveCanonicalPath(root);
+  } catch (error) {
+    return `cannot resolve host skill root ${root}: ${(error as Error).message}`;
+  }
+  if (actual !== expected) {
+    return `refusing non-canonical host skill root: expected=${expected}; actual=${actual}`;
+  }
+  if (!pathEntryExists(root)) return null;
+  const stat = lstatSync(root);
+  return stat.isDirectory() && !stat.isSymbolicLink()
+    ? null
+    : `refusing non-directory host skill root ${root}`;
+}
+
+function captureWazaSharedRules(env?: NodeJS.ProcessEnv): ReadonlyMap<string, string> {
+  const sourceDir = join(homeDir(env), ".agents", "rules");
+  const captured = new Map<string, string>();
+  for (const rule of WAZA_SHARED_RULES) {
+    const source = join(sourceDir, rule);
+    if (existsSync(source)) captured.set(rule, readFileSync(source, "utf-8"));
+  }
+  return captured;
+}
+
+function syncWazaSharedRules(
+  target: InstallTargetSpec,
+  env?: NodeJS.ProcessEnv,
+  previousRules: ReadonlyMap<string, string> = new Map(),
+): GlobalRuntimeStep {
   const sourceDir = join(homeDir(env), ".agents", "rules");
   if (!existsSync(sourceDir)) {
     return {
@@ -534,7 +989,6 @@ function syncWazaSharedRules(target: InstallTargetSpec, env?: NodeJS.ProcessEnv)
   const missing: string[] = [];
   for (const host of hostIds(target)) {
     const destDir = hostRulesDir(host, env);
-    mkdirSync(destDir, { recursive: true });
     for (const rule of WAZA_SHARED_RULES) {
       const source = join(sourceDir, rule);
       if (!existsSync(source)) {
@@ -542,13 +996,30 @@ function syncWazaSharedRules(target: InstallTargetSpec, env?: NodeJS.ProcessEnv)
         continue;
       }
       const destination = join(destDir, rule);
-      if (existsSync(destination) && readFileSync(destination, 'utf-8') !== readFileSync(source, 'utf-8')) {
+      if (!existsSync(destination)) continue;
+      const destinationValue = readFileSync(destination, "utf-8");
+      const sourceValue = readFileSync(source, "utf-8");
+      const previousValue = previousRules.get(rule);
+      if (destinationValue !== sourceValue && destinationValue !== previousValue) {
         return {
           step: 'sync Waza shared rules',
           status: 'failed',
           detail: `refusing to overwrite unowned rule ${destination}`,
         };
       }
+    }
+  }
+  if (missing.length > 0) {
+    return { step: "sync Waza shared rules", status: "failed", detail: `missing ${[...new Set(missing)].join(", ")}` };
+  }
+
+  for (const host of hostIds(target)) {
+    const destDir = hostRulesDir(host, env);
+    mkdirSync(destDir, { recursive: true });
+    for (const rule of WAZA_SHARED_RULES) {
+      const source = join(sourceDir, rule);
+      if (!existsSync(source)) continue;
+      const destination = join(destDir, rule);
       copyFileSync(source, destination);
       synced.push(`${host}:${rule}`);
     }
@@ -556,15 +1027,17 @@ function syncWazaSharedRules(target: InstallTargetSpec, env?: NodeJS.ProcessEnv)
 
   return {
     step: "sync Waza shared rules",
-    status: missing.length > 0 ? "failed" : "ok",
-    detail: missing.length > 0 ? `missing ${missing.join(", ")}` : `synced ${synced.length} files`,
+    status: "ok",
+    detail: `synced ${synced.length} files`,
   };
 }
 
-function installMermaidSkill(sourceRoot: string, target: InstallTargetSpec, env?: NodeJS.ProcessEnv): GlobalRuntimeStep {
+function installMermaidSkill(sourceRoot: string, target: InstallTargetSpec, env?: NodeJS.ProcessEnv, refresh = false): GlobalRuntimeStep {
   const mermaidSkills = externalSkillGroupsFromCatalog(loadSkillSurfaceCatalog(sourceRoot)).get("BfdCampos/dotfiles") ?? [];
   const installed = join(homeDir(env), '.agents', 'skills', 'mermaid', 'SKILL.md');
-  if (!existsSync(installed)) {
+  const preflight = preflightStagedSkillProjection(mermaidSkills, target, env, 'configure Mermaid skill');
+  if (preflight) return preflight;
+  if (refresh || !existsSync(installed)) {
     const agents = hostAgents(target);
     const step = runProcess(
       "bunx",
@@ -586,7 +1059,6 @@ function installMermaidSkill(sourceRoot: string, target: InstallTargetSpec, env?
   }
   return projectStagedSkills(mermaidSkills, target, env, 'configure Mermaid skill');
 }
-
 function configureBrain(root: string | undefined, env?: NodeJS.ProcessEnv): GlobalRuntimeStep {
   try {
     const selected = root
@@ -607,13 +1079,40 @@ function configureBrain(root: string | undefined, env?: NodeJS.ProcessEnv): Glob
   }
 }
 
-function ensureCodegraphCli(cwd: string, bunExecutable: string, env?: NodeJS.ProcessEnv): GlobalRuntimeStep {
+function ensureCodegraphCli(cwd: string, bunExecutable: string, env?: NodeJS.ProcessEnv, refresh = false): GlobalRuntimeStep {
   const check = runProcess("codegraph", ["--version"], cwd, env);
-  if (check.status === "ok") return withStepName(check, "ensure CodeGraph CLI", "present");
+  if (!refresh && check.status === "ok") return withStepName(check, "ensure CodeGraph CLI", "present");
   const install = runProcess(bunExecutable, ["add", "-g", CODEGRAPH_PACKAGE], cwd, env);
   if (install.status !== "ok") return withStepName(install, "ensure CodeGraph CLI", CODEGRAPH_PACKAGE);
   const recheck = runProcess("codegraph", ["--version"], cwd, env);
-  if (recheck.status === "ok") return withStepName(recheck, "ensure CodeGraph CLI", "installed");
+  if (recheck.status === "ok") {
+    if (refresh) {
+      let installedVersion: unknown = null;
+      try {
+        const globalPackageRoot = bunGlobalPackageRoot(env);
+        const codegraphRoot = globalPackageRoot === null
+          ? null
+          : findInstalledPackageRoot(globalPackageRoot, "@colbymchenry/codegraph");
+        installedVersion = codegraphRoot === null ? null : readPackageManifest(codegraphRoot).version;
+      } catch (error) {
+        return {
+          ...recheck,
+          step: "ensure CodeGraph CLI",
+          status: "failed",
+          detail: `CodeGraph package readback failed: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      if (installedVersion !== CODEGRAPH_VERSION) {
+        return {
+          ...recheck,
+          step: "ensure CodeGraph CLI",
+          status: "failed",
+          detail: `CodeGraph readback mismatch: expected ${CODEGRAPH_VERSION}, got ${String(installedVersion)}`,
+        };
+      }
+    }
+    return withStepName(recheck, "ensure CodeGraph CLI", refresh ? `updated=${CODEGRAPH_VERSION}` : "installed");
+  }
   return {
     ...recheck,
     step: "ensure CodeGraph CLI",
@@ -649,23 +1148,28 @@ export function runGlobalRuntimeSetup(
   const bunExecutable = resolveBunExecutable(opts.env);
   const env = bindBunRuntimeEnv(commandEnv(sourceRoot, opts.env), bunExecutable);
   const profile = opts.profile ?? readInstalledProfile(env)?.profile ?? "full";
+  const updateMode = opts.updateMode === true;
   const steps: GlobalRuntimeStep[] = [];
 
   const bunRuntime = ensureSupportedBunRuntime(cwd, env, bunExecutable);
   steps.push(bunRuntime);
   if (bunRuntime.status === "failed") {
-    const lines = steps.flatMap(renderStep);
-    return {
-      exitCode: 1,
-      steps,
-      lines,
-      stdout: lines.join("\n"),
-      stderr: bunRuntime.stderr ?? "",
-    };
+    return finalizeRuntimeResult(steps);
   }
 
-  if (opts.installCli !== false) steps.push(installCli(sourceRoot, cwd, bunExecutable, env, opts.installSpec));
-  else steps.push({ step: "install repo-harness CLI", status: "skipped", detail: "disabled" });
+  if (opts.installCli !== false) {
+    const install = installCli(sourceRoot, cwd, bunExecutable, env, opts.installSpec);
+    steps.push(install);
+    if (updateMode && install.status === "ok" && opts.installSpec) {
+      steps.push(reconcileManagedRuntime(cwd, bunExecutable, env, opts.installSpec));
+    }
+    if (updateMode && steps.some((step) => step.status === "failed")) return finalizeRuntimeResult(steps);
+  }
+  else {
+    steps.push({ step: "install repo-harness CLI", status: "skipped", detail: "disabled" });
+    if (updateMode && opts.installSpec) steps.push(reconcileManagedRuntime(cwd, bunExecutable, env, opts.installSpec));
+    if (updateMode && steps.some((step) => step.status === "failed")) return finalizeRuntimeResult(steps);
+  }
 
   if (opts.syncSkill !== false) steps.push(syncRuntimeSkill(sourceRoot, profile, env));
   else steps.push({ step: "sync repo-harness skill runtime", status: "skipped", detail: "disabled" });
@@ -676,16 +1180,58 @@ export function runGlobalRuntimeSetup(
   if (profile === 'full') steps.push(installAgentFleet(sourceRoot, env));
   else steps.push({ step: 'install agent fleet', status: 'skipped', detail: 'disabled by install profile' });
 
-  if (opts.externalSkills === true) {
-    const waza = installWazaSkills(sourceRoot, target, env);
+  const refreshExternalSkills = opts.externalSkills === true;
+  if (refreshExternalSkills) {
+    const previousWazaRules = captureWazaSharedRules(env);
+    const waza = installWazaSkills(sourceRoot, target, env, updateMode);
     steps.push(waza);
+    if (waza.status === "failed") return finalizeRuntimeResult(steps);
     steps.push(waza.status === "ok"
-      ? syncWazaSharedRules(target, env)
+      ? syncWazaSharedRules(target, env, previousWazaRules)
       : { step: "sync Waza shared rules", status: "skipped", detail: "Waza install failed" });
-    steps.push(installMermaidSkill(sourceRoot, target, env));
+    if (steps.at(-1)?.status === "failed") return finalizeRuntimeResult(steps);
+    const mermaid = installMermaidSkill(sourceRoot, target, env, updateMode);
+    steps.push(mermaid);
+    if (mermaid.status === "failed") return finalizeRuntimeResult(steps);
   } else {
     steps.push({ step: "configure Waza skills", status: "skipped", detail: "disabled" });
     steps.push({ step: "configure Mermaid skill", status: "skipped", detail: "disabled" });
+  }
+
+  if (opts.reverseSkill === true) {
+    const catalog = loadSkillSurfaceCatalog(sourceRoot);
+    const selection = requiredExplicitExternalSkillInstallGroup(
+      catalog,
+      "reverse-skill-router",
+      hostIds(target),
+    );
+    if (selection.status !== "selected") {
+      steps.push({
+        step: "configure Reverse Skill",
+        status: "failed",
+        detail: selection.status === "missing"
+          ? "required explicit catalog package reverse-skill-router is missing for the selected host target"
+          : selection.status === "not_explicit_only"
+            ? "catalog package reverse-skill-router must remain explicit-only"
+            : "catalog package reverse-skill-router requires a pinned tree integrity digest",
+      });
+    } else {
+      const { provider, hosts, skills, integrityBySkill } = selection.group;
+      steps.push(installExternalSkillGroup(
+        sourceRoot,
+        targetFromHostIds(hosts),
+        provider,
+        skills,
+        integrityBySkill,
+        env,
+      ));
+    }
+  } else {
+    steps.push({
+      step: "configure Reverse Skill",
+      status: "skipped",
+      detail: "requires explicit --with-reverse-skill opt-in",
+    });
   }
 
   if (profile === 'full') {
@@ -697,8 +1243,9 @@ export function runGlobalRuntimeSetup(
   if (opts.brainRoot || profile === 'full') steps.push(configureBrain(opts.brainRoot, env));
   else steps.push({ step: "configure brain root", status: "skipped", detail: "disabled by install profile" });
 
-  if (opts.codegraph === true) {
-    const ensure = ensureCodegraphCli(cwd, bunExecutable, env);
+  const refreshCodegraph = opts.codegraph ?? updateMode;
+  if (refreshCodegraph) {
+    const ensure = ensureCodegraphCli(cwd, bunExecutable, env, updateMode);
     steps.push(ensure);
     if (ensure.status === "ok") steps.push(configureCodegraphMcp(cwd, target, env));
     else steps.push({ step: "configure CodeGraph MCP", status: "skipped", detail: "CodeGraph CLI install failed" });
@@ -707,13 +1254,5 @@ export function runGlobalRuntimeSetup(
     steps.push({ step: "configure CodeGraph MCP", status: "skipped", detail: "disabled" });
   }
 
-  const lines = steps.flatMap(renderStep);
-  const failed = steps.some((step) => step.status === "failed");
-  return {
-    exitCode: failed ? 1 : 0,
-    steps,
-    lines,
-    stdout: lines.join("\n"),
-    stderr: steps.filter((step) => step.status === "failed").map((step) => step.stderr ?? "").filter(Boolean).join("\n"),
-  };
+  return finalizeRuntimeResult(steps);
 }

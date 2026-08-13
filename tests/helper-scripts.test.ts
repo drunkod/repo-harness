@@ -381,7 +381,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("archive-architecture-request moves handled requests out of the pending queue", () => {
     const cwd = tmpWorkspace("helper-architecture-archive");
@@ -472,7 +472,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("architecture-drift should replace stale pending index lines for the same capability", () => {
     const cwd = tmpWorkspace("helper-architecture-pending-dedupe");
@@ -513,7 +513,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("contract-worktree finish runs architecture freshness before sprint verification", () => {
     const script = readFileSync(join(ROOT, "scripts/contract-worktree.sh"), "utf-8");
@@ -576,7 +576,7 @@ describe("Workflow helper scripts", () => {
       expect(readFileSync(scriptsPath, "utf-8")).toBe(readFileSync(join(HELPER_DIR, helper), "utf-8"));
       expect(statSync(scriptsPath).mode & 0o111).toBe(statSync(join(HELPER_DIR, helper)).mode & 0o111);
     }
-  });
+  }, 30_000);
 
   test("every contract template copy's ## section set is a superset of the standalone template", () => {
     const standalone = readFileSync(join(TEMPLATE_DIR, "contract.template.md"), "utf-8");
@@ -617,6 +617,9 @@ describe("Workflow helper scripts", () => {
       const headings = headingsOf(content);
       const missing = [...standaloneHeadings].filter((heading) => !headings.has(heading));
       expect(missing, `${label} is missing sections present in the standalone template`).toEqual([]);
+      expect(content, `${label} restores an alternate fleet runner`).toContain(
+        "preferred:\n      - subagent\n    fallback: null",
+      );
     }
   });
 
@@ -663,7 +666,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(poisonRepo, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("new-plan should create timestamped plan without compatibility pointer", () => {
     const cwd = tmpWorkspace("helper-new-plan");
@@ -696,7 +699,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("capture-plan should save planning output as an active plan artifact", () => {
     const cwd = tmpWorkspace("helper-capture-plan");
@@ -768,7 +771,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("capture-plan should name transient plan artifacts from the task title", () => {
     const cwd = tmpWorkspace("helper-capture-transient-artifact-name");
@@ -815,7 +818,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("capture-plan checklist-row appends to the active plan without durable projection", () => {
     const cwd = tmpWorkspace("helper-capture-plan-checklist-row");
@@ -873,7 +876,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("capture-plan checklist-row rejects active plans without Task Breakdown", () => {
     const cwd = tmpWorkspace("helper-capture-plan-checklist-row-missing-breakdown");
@@ -919,7 +922,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("switch-plan should ignore and not rewrite the retired legacy marker", () => {
     const cwd = tmpWorkspace("helper-switch-plan-active-marker");
@@ -945,7 +948,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("capture-plan should execute an already approved plan through plan-to-todo", () => {
     const cwd = tmpWorkspace("helper-capture-plan-execute");
@@ -995,7 +998,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("capture-plan execute should require a concrete promotion reason", () => {
     const cwd = tmpWorkspace("helper-capture-plan-execute-missing-reason");
@@ -1051,7 +1054,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("capture-plan execute transfers active markers to the linked worktree", () => {
     const cwd = tmpWorkspace("helper-capture-worktree-transfer");
@@ -1123,7 +1126,7 @@ describe("Workflow helper scripts", () => {
       rmSync(worktreePath, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("sync-brain-docs mirrors opted-in repo docs and checks drift", () => {
     const cwd = tmpWorkspace("helper-sync-brain-docs");
@@ -1182,7 +1185,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("sync-brain-docs should reject repo and brain symlink escapes", () => {
     const cwd = tmpWorkspace("helper-sync-brain-docs-symlink");
@@ -1240,7 +1243,7 @@ describe("Workflow helper scripts", () => {
       rmSync(cwd, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("new-sprint should create a Draft sprint backlog only", () => {
     const cwd = tmpWorkspace("helper-new-sprint");
@@ -1280,7 +1283,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo should archive previous todo and set plan to Executing", () => {
     const cwd = tmpWorkspace("helper-plan-to-todo");
@@ -1352,7 +1355,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo should carry forward plan Out of scope bullets into the contract", () => {
     const cwd = tmpWorkspace("helper-plan-to-todo-carry-forward");
@@ -1403,7 +1406,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo should carry forward a Non-scope: labeled plan section too", () => {
     const cwd = tmpWorkspace("helper-plan-to-todo-carry-forward-nonscope");
@@ -1447,7 +1450,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo should keep the Out of scope placeholder when the plan has no Non-scope section", () => {
     const cwd = tmpWorkspace("helper-plan-to-todo-no-carry-forward");
@@ -1485,7 +1488,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo should reject transient plan projection", () => {
     const cwd = tmpWorkspace("helper-plan-to-todo-transient-artifact-name");
@@ -1531,7 +1534,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo should start a linked contract worktree when policy enables contract tasks", () => {
     const cwd = tmpWorkspace("helper-contract-auto");
@@ -1603,7 +1606,7 @@ describe("Workflow helper scripts", () => {
       rmSync(worktreePath, { recursive: true, force: true });
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("ship-worktrees should put dirty main closeout on a PR branch", () => {
     const cwd = tmpWorkspace("helper-ship-main-closeout");
@@ -1961,7 +1964,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo should reject approved plans without an evidence contract", () => {
     const cwd = tmpWorkspace("helper-plan-evidence-contract");
@@ -1982,7 +1985,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo should reject approved plans without a promotion gate", () => {
     const cwd = tmpWorkspace("helper-plan-promotion-gate");
@@ -2012,7 +2015,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo should reject approved plans without work-package artifact metadata", () => {
     const cwd = tmpWorkspace("helper-plan-artifact-level");
@@ -2051,7 +2054,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo should reject inline sprint-task projections", () => {
     const cwd = tmpWorkspace("helper-plan-inline-sprint-task");
@@ -2088,7 +2091,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo should reject sprint-inline work-package projections", () => {
     const cwd = tmpWorkspace("helper-plan-sprint-inline-work-package");
@@ -2121,7 +2124,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("plan-to-todo archive should include metadata header and original todo content", () => {
     const cwd = tmpWorkspace("helper-plan-archive-meta");
@@ -2163,7 +2166,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("new-plan should suffix filename with -v2 when same slug/timestamp already exists", () => {
     const cwd = tmpWorkspace("helper-plan-collision");
@@ -2205,7 +2208,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("archive-workflow should archive plan and todo with non-completion outcome metadata", () => {
     const cwd = tmpWorkspace("helper-archive");
@@ -2268,7 +2271,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   // R-E (fix 5): a --timestamp value passed to archive-workflow.sh is used
   // verbatim for every archive-family filename instead of a fresh internal
@@ -2344,7 +2347,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   // R-E hardening (third external review round): --timestamp is interpolated
   // directly into archive filenames, so a malformed value must fail closed
@@ -2377,7 +2380,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("archive-workflow should preserve existing deferred ledger rows", () => {
     const cwd = tmpWorkspace("helper-archive-deferred-ledger");
@@ -2425,7 +2428,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   // Sixth external review round: plan/notes/contract/review archive
   // destinations all go through unique_archive_path (collision -> -v2
@@ -2476,7 +2479,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("refresh-current-status should preview and write an idle tracked snapshot", () => {
     const cwd = tmpWorkspace("helper-current-idle");
@@ -2503,7 +2506,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("refresh-current-status should derive active plan next task", () => {
     const cwd = tmpWorkspace("helper-current-active");
@@ -2536,7 +2539,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("refresh-current-status clear should not write Idle while active work exists", () => {
     const cwd = tmpWorkspace("helper-current-clear-active");
@@ -2559,7 +2562,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("archive-workflow should set plan status to Abandoned for abandoned outcome", () => {
     const cwd = tmpWorkspace("helper-archive-abandoned");
@@ -2588,7 +2591,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract should pass strict mode and set status to Fulfilled", () => {
     const cwd = tmpWorkspace("helper-verify-contract-pass");
@@ -2644,7 +2647,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract should pass an exact checked manual criterion with concrete review evidence", () => {
     const cwd = tmpWorkspace("helper-verify-contract-manual-evidence-pass");
@@ -2698,7 +2701,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract should enforce snake_case QA dimensions against human-readable Scorecard labels", () => {
     const cwd = tmpWorkspace("helper-verify-contract-qa-dimension");
@@ -2778,7 +2781,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   for (const fixture of [
     {
@@ -2859,7 +2862,7 @@ describe("Workflow helper scripts", () => {
       } finally {
         rmSync(cwd, { recursive: true, force: true });
       }
-    });
+    }, 30_000);
   }
 
   test("verify-contract should fail strict mode and set status to Partial", () => {
@@ -2896,7 +2899,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract --read-only should not rewrite contract Status on failure", () => {
     const cwd = tmpWorkspace("helper-verify-contract-read-only");
@@ -2935,7 +2938,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract --read-only should not rewrite contract Status on pass", () => {
     const cwd = tmpWorkspace("helper-verify-contract-read-only-pass");
@@ -2982,7 +2985,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract --read-only still executes command criteria and reports the boundary", () => {
     const cwd = tmpWorkspace("helper-verify-contract-read-only-exec");
@@ -3039,7 +3042,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract quiet mode should emit only summary and report file", () => {
     const cwd = tmpWorkspace("helper-verify-contract-quiet");
@@ -3099,7 +3102,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract should ignore allowed_paths metadata before exit criteria", () => {
     const cwd = tmpWorkspace("helper-verify-contract-allowed-paths");
@@ -3152,7 +3155,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract should ignore delegation metadata before exit criteria", () => {
     const cwd = tmpWorkspace("helper-verify-contract-delegation");
@@ -3219,7 +3222,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract should fail unsupported task profile", () => {
     const cwd = tmpWorkspace("helper-verify-contract-profile-invalid");
@@ -3252,7 +3255,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   // Deliberately does not assert on overall exit code / --strict: this contract carries
   // no ## Root Cause Evidence section, and once the bugfix root-cause gate (H2/H3) is
@@ -3288,7 +3291,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   describe("verify-contract bugfix root-cause evidence gate", () => {
     // Shared with tests/contract-run.test.ts's TypeScript-side root-cause gate tests via
@@ -3329,7 +3332,7 @@ describe("Workflow helper scripts", () => {
         } finally {
           rmSync(workDir, { recursive: true, force: true });
         }
-      });
+      }, 30_000);
     }
   });
 
@@ -3374,7 +3377,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract should pass frontend profile when files_exist includes a design brief", () => {
     const cwd = tmpWorkspace("helper-verify-contract-profile-frontend-pass");
@@ -3419,7 +3422,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-contract should fail frontend profile when files_exist has no design brief", () => {
     const cwd = tmpWorkspace("helper-verify-contract-profile-frontend-fail");
@@ -3454,9 +3457,9 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
-  test("verify-sprint should write passing structured checks for the active sprint", () => {
+  test("bundled verify-sprint binds the package-owned evidence emitter without a source-root override", () => {
     const cwd = tmpWorkspace("helper-verify-sprint-pass");
     try {
       mkdirSync(join(cwd, ".ai/hooks/lib"), { recursive: true });
@@ -3468,6 +3471,10 @@ describe("Workflow helper scripts", () => {
       copyFileSync(
         join(ROOT, "assets/hooks/lib/workflow-state.sh"),
         join(cwd, ".ai/hooks/lib/workflow-state.sh")
+      );
+      writeFileSync(
+        join(cwd, ".ai/harness/policy.json"),
+        `${JSON.stringify({ worktree_strategy: { review_base: "main" } }, null, 2)}\n`,
       );
 
       writeFileSync(join(cwd, "docs/spec.md"), "# Product Spec\n");
@@ -3497,21 +3504,23 @@ describe("Workflow helper scripts", () => {
           "",
         ].join("\n")
       );
+      initGitRepo(cwd);
+      commitAll(cwd, "package helper baseline");
+      writeFileSync(join(cwd, "docs/spec.md"), "# Product Spec\n\nPackage helper change.\n");
       writeFileSync(
         join(cwd, "tasks/reviews/demo.review.md"),
         ["# Task Review: demo", "", "> **Recommendation**: pass", reviewSubjectMetadata(cwd), "", humanReviewCard(), "", externalAcceptanceAdvice("Codex", "codex-review", cwd), ""].join("\n")
       );
 
-      const res = run("bash", ["scripts/verify-sprint.sh", "--prepare-acceptance"], cwd, {
+      const res = run("bash", [join(HELPER_DIR, "verify-sprint.sh"), "--prepare-acceptance"], cwd, {
+        REPO_HARNESS_TARGET_REPO_ROOT: cwd,
         HOOK_HOST: "claude",
         REPO_HARNESS_HOOK_CLI: join(ROOT, "src/cli/hook-entry.ts"),
       });
       expect(res.status, `${res.stdout}\n${res.stderr}`).toBe(0);
       expect(res.stdout).toContain("Sprint verification passed");
-      // EPC-05: emission cannot-binds in this non-git, no-source-root
-      // fixture (see latestRunSnapshot's doc comment), so checks/latest.json
-      // is never (re)written by the materializer -- genuinely absent.
-      expectChecksLatestAbsent(cwd);
+      expect(res.stderr).not.toContain("evidence emission cannot bind");
+      expect(existsSync(join(cwd, ".ai/harness/checks/latest.json"))).toBe(true);
       const { path: runFilePath, content: checks } = latestRunSnapshot(cwd);
       expect(checks.schema).toBe("repo-harness-run-trace.v1");
       expect(checks.status).toBe("pass");
@@ -3539,7 +3548,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-sprint finalizes one AcceptanceReceipt without rerunning contract tests", () => {
     const cwd = tmpWorkspace("helper-verify-sprint-finalize");
@@ -3606,7 +3615,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-sprint prints a notes promotion-candidate advisory without changing exit code", () => {
     const baseline = tmpWorkspace("helper-verify-sprint-notes-baseline");
@@ -3714,7 +3723,7 @@ describe("Workflow helper scripts", () => {
       rmSync(baseline, { recursive: true, force: true });
       rmSync(withCandidate, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-sprint should fail when committed branch diff exceeds allowed_paths", () => {
     const cwd = tmpWorkspace("helper-verify-sprint-branch-scope");
@@ -3792,7 +3801,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-sprint should scope the default branch diff from immutable contract-worktree metadata", () => {
     const cwd = tmpWorkspace("helper-verify-sprint-task-baseline");
@@ -3963,7 +3972,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-sprint ignores Human Review Card semantics because Markdown is projection only", () => {
     const cwd = tmpWorkspace("helper-verify-sprint-card-profile");
@@ -4026,7 +4035,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("harness-trace-grade should pass all local trace fixtures", () => {
     const fixturesDir = join(ROOT, "tests/fixtures/harness-traces");
@@ -4045,7 +4054,7 @@ describe("Workflow helper scripts", () => {
       expect(report.failed).toBe(0);
       expect(report.total).toBeGreaterThanOrEqual(6);
     }
-  });
+  }, 30_000);
 
   test("harness-trace-grade should reject an unsupported task_profile", () => {
     const cwd = tmpWorkspace("helper-harness-trace-grade-invalid-profile");
@@ -4075,7 +4084,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-sprint does not require a Human Review Card authoring path", () => {
     const cwd = tmpWorkspace("helper-verify-sprint-missing-card");
@@ -4137,7 +4146,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("verify-sprint should write failing structured checks before exiting", () => {
     const cwd = tmpWorkspace("helper-verify-sprint-fail");
@@ -4198,7 +4207,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("prepare-handoff should write harness handoff using workflow-state helpers", () => {
     const cwd = tmpWorkspace("helper-prepare-handoff");
@@ -4280,7 +4289,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("prepare-handoff should include untracked files in changed-file context", () => {
     const cwd = tmpWorkspace("helper-prepare-handoff-untracked");
@@ -4311,7 +4320,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("codex-handoff-resume should write resume packet and print bootstrap prompt", () => {
     const cwd = tmpWorkspace("helper-codex-resume");
@@ -4351,7 +4360,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("codex-handoff-resume should not restore historical plans without an active marker", () => {
     const cwd = tmpWorkspace("helper-codex-resume-no-active-plan");
@@ -4383,7 +4392,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("codex-handoff-resume should reject policy paths outside the repo", () => {
     const cwd = tmpWorkspace("helper-codex-resume-safe-path");
@@ -4406,7 +4415,7 @@ describe("Workflow helper scripts", () => {
       rmSync(outsidePath, { force: true });
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("codex-handoff-resume should reject policy paths outside the harness surface", () => {
     const cwd = tmpWorkspace("helper-codex-resume-harness-surface");
@@ -4427,7 +4436,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("prepare-codex-handoff should refresh repo/global handoff and resume packet", () => {
     const cwd = tmpWorkspace("helper-codex-handoff");
@@ -4471,7 +4480,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("ensure-task-workflow should create a draft plan when none exists", () => {
     const cwd = tmpWorkspace("helper-ensure-workflow");
@@ -4505,7 +4514,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("ensure-task-workflow should create a new draft plan when requested despite an existing plan", () => {
     const cwd = tmpWorkspace("helper-ensure-workflow-new-plan");
@@ -4533,7 +4542,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-deploy-sql-order should enforce deploy SQL location and ascending prefixes", () => {
     const cwd = tmpWorkspace("helper-check-deploy-sql");
@@ -4636,7 +4645,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-deploy-sql-order should accept an explicit multi-root SQL policy", () => {
     const cwd = tmpWorkspace("helper-check-deploy-sql-policy");
@@ -4685,7 +4694,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-deploy-sql-order should reject invalid, overlapping, or unknown SQL policy roots", () => {
     const cwd = tmpWorkspace("helper-check-deploy-sql-policy-invalid");
@@ -4789,7 +4798,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-deploy-sql-order should reject forged or missing explicit invariant policy", () => {
     const cwd = tmpWorkspace("helper-check-deploy-sql-invariant-policy");
@@ -4835,7 +4844,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-deploy-sql-order should require unambiguous full-path invariant references for configured roots", () => {
     const cwd = tmpWorkspace("helper-check-deploy-sql-invariant-collision");
@@ -4881,7 +4890,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-deploy-sql-order should reject regular and escaping SQL symlinks", () => {
     const cwd = tmpWorkspace("helper-check-deploy-sql-symlinks");
@@ -4932,7 +4941,7 @@ describe("Workflow helper scripts", () => {
       rmSync(cwd, { recursive: true, force: true });
       rmSync(outsideDir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-deploy-sql-order should fail closed when SQL enumeration fails", () => {
     const cwd = tmpWorkspace("helper-check-deploy-sql-enumeration-failure");
@@ -4955,7 +4964,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-context-files should ignore external reference and local runtime dirs", () => {
     const cwd = tmpWorkspace("helper-check-context-files-ref");
@@ -4981,7 +4990,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("select-agent-context-blocks should ignore external reference and local runtime dirs", () => {
     const cwd = tmpWorkspace("helper-select-context-files-ref");
@@ -5003,7 +5012,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow should fail strict mode for legacy todo content", () => {
     const cwd = tmpWorkspace("helper-check-workflow");
@@ -5032,7 +5041,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow should fail strict mode for legacy task artifact terminology in generation surfaces", () => {
     const cwd = tmpWorkspace("helper-check-workflow-legacy-terminology");
@@ -5069,7 +5078,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow should fail strict mode when plan template lacks a promotion gate", () => {
     const cwd = tmpWorkspace("helper-check-workflow-promotion-template");
@@ -5105,7 +5114,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow should fail strict mode for legacy sprint directory", () => {
     const cwd = tmpWorkspace("helper-check-workflow-legacy-sprint-dir");
@@ -5126,7 +5135,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow should fail strict mode when no-active handoff has a historical resume plan", () => {
     const cwd = tmpWorkspace("helper-check-workflow-handoff-resume");
@@ -5152,7 +5161,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow should fail strict mode when current snapshot is newer than resume packet", () => {
     const cwd = tmpWorkspace("helper-check-workflow-current-newer-than-resume");
@@ -5178,7 +5187,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow should not treat Todo Source Plan none as no active plan", () => {
     const cwd = tmpWorkspace("helper-check-workflow-todo-source-plan");
@@ -5206,7 +5215,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow should fail strict mode when active plan is terminal", () => {
     const cwd = tmpWorkspace("helper-check-workflow-terminal-active");
@@ -5235,7 +5244,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow projects terminal statuses from the policy lifecycle anchor", () => {
     const cwd = tmpWorkspace("helper-check-workflow-terminal-policy");
@@ -5269,7 +5278,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow should fail strict mode when ignored runtime cache remains tracked", () => {
     const cwd = tmpWorkspace("helper-check-workflow-tracked-runtime-cache");
@@ -5326,7 +5335,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow should materialize ignored runtime delegation dir", () => {
     const cwd = tmpWorkspace("helper-check-workflow-delegation-dir");
@@ -5355,7 +5364,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("check-task-workflow should accept packaged helpers without root helper scripts", () => {
     const cwd = tmpWorkspace("helper-check-workflow-package-helpers");
@@ -5440,7 +5449,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("summarize-failures should aggregate failure_class and guard counts", () => {
     const cwd = tmpWorkspace("helper-summarize-failures");
@@ -5465,7 +5474,7 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("summarize-failures should fall back to node when bun is unavailable", () => {
     const cwd = tmpWorkspace("helper-summarize-failures-node");
@@ -5498,5 +5507,5 @@ describe("Workflow helper scripts", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

@@ -1,16 +1,16 @@
 # Current Status Snapshot
 
 <!-- generated-by: repo-harness refresh-current-status v1 -->
-<!-- updated_at: 2026-08-13T15:03:35+0500 -->
+<!-- updated_at: 2026-08-12T23:29:59+0800 -->
 <!-- stale_after: 24h -->
 
 > **Status**: Idle
-> **Updated At**: 2026-08-13T15:03:35+0500
-> **Source Branch**: agent/chatgpt-github-create-mvp
-> **Source Commit**: 1789a751
+> **Updated At**: 2026-08-12T23:29:59+0800
+> **Source Branch**: main
+> **Source Commit**: c30f08fc
 > **Target Branch**: main
 > **Stale After**: 24h
-> **Reason**: chatgpt-create-full-branch-review
+> **Reason**: release-closeout
 > **Derived From**: active-plan, active-sprint, workstreams, handoff, checks, git status
 
 This file is a tracked mainline snapshot derived from repo artifacts. It is not a live lock, not a kanban board, and not an implementation gate. If it is stale, read the source artifacts below.
@@ -37,38 +37,32 @@ This file is a tracked mainline snapshot derived from repo artifacts. It is not 
 - Sprint: (none)
 ## Workstreams
 
+- `tasks/workstreams/runtime-harness/hook-adapters/github-issues-158-159.md`: status=completed, current_slice=completed-20260805-contract-scoped-check-repair, source_plan=plans/plan-20260805-0001-github-issues-158-159.md
+- `tasks/workstreams/verification/evals-checks/github-issues-158-159.md`: status=completed, current_slice=completed-20260805-deployed-emitter-binding, source_plan=plans/plan-20260805-0001-github-issues-158-159.md
 - `tasks/workstreams/workflow-engine/contract-assets/20260712-contract-assets.md`: status=completed, current_slice=completed-20260712-repo-owned-agent-fleet, source_plan=`plans/archive/plan-20260712-2053-repo-owned-agent-fleet.md`
 - `tasks/workstreams/workflow-engine/contract-assets/20260714-merge-gate-enforcement.md`: status=completed, current_slice=completed-20260715-merge-gate-enforcement, source_plan=`plans/archive/plan-20260714-1713-merge-gate-enforcement.md`
 - `tasks/workstreams/workflow-engine/contract-assets/agent-fleet-specialists.md`: status=completed, current_slice=completed-20260713-specialist-roles, source_plan=`plans/archive/plan-20260712-2215-agent-fleet-specialists.md`
 - `tasks/workstreams/workflow-engine/contract-assets/cleanup-script-policy.md`: status=completed, current_slice=completed-20260529-cleanup-script-policy, source_plan=(none)
+- `tasks/workstreams/workflow-engine/contract-assets/github-issues-158-159.md`: status=completed, current_slice=completed-20260805-packaged-helper-projection, source_plan=plans/plan-20260805-0001-github-issues-158-159.md
 - `tasks/workstreams/workflow-engine/inspection-migration/20260703-inspection-migration.md`: status=completed, current_slice=completed-20260703-architecture-closeout, source_plan=(none)
-- `tasks/workstreams/workflow-engine/inspection-migration/20260712-inspection-migration.md`: status=completed, current_slice=completed-20260712-repo-owned-agent-fleet, source_plan=`plans/archive/plan-20260712-2053-repo-owned-agent-fleet.md`
-- `tasks/workstreams/workflow-engine/inspection-migration/agent-fleet-specialists.md`: status=completed, current_slice=completed-20260713-policy-seed, source_plan=`plans/archive/plan-20260712-2215-agent-fleet-specialists.md`
 ## Handoff
 
 - Exact Next Step: (none)
 
 ## Checks
 
-- status=(none), source=(none), file=.ai/harness/checks/latest.json
+- status=(none), source=(none), exit_code=(none), file=.ai/harness/checks/latest.json
 
 ## Git Status
 
-- Summary: 12 changed/untracked path(s)
+- Summary: 5 changed/untracked path(s)
 
 ```
- M assets/skills/repo-harness-chatgpt/references/create.md
- M docs/chatgpt-repo-harness-oauth-origin-workaround.md
- M docs/repo-harness-chatgpt-github-create.md
- M docs/repo-harness-coding-mcp-cloudflare-quick-tunnel.md
- M src/cli/chatgpt-browser/create-mode.ts
- M src/cli/chatgpt-browser/session-store.ts
- M src/cli/chatgpt-browser/types.ts
- M src/cli/commands/chatgpt.ts
- M tasks/notes/20260802-chatgpt-github-create-hardening.notes.md
- M tests/cli/chatgpt-browser-create-readback.test.ts
- M tests/cli/chatgpt-browser-create.test.ts
- M tests/cli/chatgpt-browser.test.ts
+ M deploy/release-checklists/260812-repo-harness-0.15.0.md
+ M docs/architecture/.projection-manifest.json
+ M docs/architecture/modules/runtime-harness/global-runtime-reconciliation.md
+ M docs/architecture/modules/verification/evals-checks.md
+ M docs/architecture/modules/workflow-engine/contract-assets.md
 ```
 
 ## Source Artifacts

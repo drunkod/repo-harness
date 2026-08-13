@@ -17,6 +17,11 @@
  * the condition-by-condition dirty-bit derivation table and the falsifier
  * record.
  *
+ * The architecture cascade is no longer one of those dirty bits: a journal
+ * event only exists for a Claude Edit/Write tool call, which made the cascade
+ * blind to shell and apply_patch writes. `architecture-drift.ts` owns that
+ * changed set now; this journal owns edit-time trigger payloads only.
+ *
  * Host-visible advisory stdout (DocDrift/DeployAsset echoes, and the
  * former first-principles advisory) is ported in-process — those never wrote
  * anything durable, so they stay on the hot path without a second route
@@ -34,12 +39,13 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'fs';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { basename, dirname, join } from 'path';
 import type { SessionContextSection } from './session-context-budget';
 import { loadMinimalChangePolicy } from './minimal-change-policy';
 import { collectMinimalChangeSignals } from './minimal-change-signals';
-import { fileExists, readText } from '../../effects/state/collect-state-inputs';
+import { canonicalRepoRelativePath, fileExists, readText } from '../../effects/state/collect-state-inputs';
+import { withExclusiveDirectoryLock } from '../../effects/locking/exclusive-directory-lock';
 import type { WorktreeOwnership } from '../../effects/loop/state-input-collector';
 import {
   artifactStemFromPlan,
@@ -82,9 +88,13 @@ export function runMutationObserved(opts: MutationObservedInput): MutationObserv
   const payload = parsePayload(opts.input);
 
   const filePath = getFilePath(repoRoot, payload, env);
-  if (!filePath) {
-    // Mirrors `[[ -z "$FILE_PATH" ]] && exit 0` -- the non-qualifying case:
-    // no event, no advisories, no journal write.
+  if (!filePath || canonicalRepoRelativePath(repoRoot, filePath) === null) {
+    // Mirrors `[[ -z "$FILE_PATH" ]] && exit 0` -- the non-qualifying case --
+    // extended fail-closed to targets that do not canonicalize inside this
+    // repository (host-side plan/memory files under ~/.claude, traversal or
+    // symlink escapes): no event, no advisories, no journal write. An
+    // out-of-repo event would otherwise become a projection job that archctx
+    // rejects with non-retryable AC_SCHEMA_INVALID and block the Stop gate.
     return { exitCode: 0, stdout: '', stderr: '' };
   }
 
@@ -102,7 +112,6 @@ export function runMutationObserved(opts: MutationObservedInput): MutationObserv
 
   const dirty: PostEditJournalDirtyBits = {
     'contract-verification': contractTarget !== null,
-    architecture: true,
     context: true,
     capability: true,
     'minimal-change': minimalChangeEnabled,
@@ -527,7 +536,6 @@ function currentGitRevision(repoRoot: string): string | null {
 
 export interface PostEditJournalDirtyBits {
   readonly 'contract-verification': boolean;
-  readonly architecture: boolean;
   readonly context: boolean;
   readonly capability: boolean;
   readonly 'minimal-change': boolean;
@@ -536,7 +544,10 @@ export interface PostEditJournalDirtyBits {
 
 export interface PostEditJournalEvent {
   readonly schema: 'change_observed';
-  readonly schema_version: 1;
+  readonly schema_version: 2;
+  /** Stable identity of this pending journal slot. Delivery event ids rotate
+   * on every coalesced edit, but this key survives until the slot is acked. */
+  readonly source_key: string;
   readonly event_id: string;
   readonly session_id: string;
   readonly created_at: string;
@@ -564,7 +575,12 @@ function readJournalEventFile(absPath: string): PostEditJournalEvent | null {
   try {
     const raw = readFileSync(absPath, 'utf-8');
     const parsed = JSON.parse(raw) as PostEditJournalEvent;
-    return parsed && parsed.schema === 'change_observed' ? parsed : null;
+    return parsed
+      && parsed.schema === 'change_observed'
+      && parsed.schema_version === 2
+      && /^[a-f0-9]{20}$/.test(parsed.source_key)
+      ? parsed
+      : null;
   } catch {
     return null;
   }
@@ -588,15 +604,26 @@ interface WriteJournalEventInput {
 
 function writeOrCoalesceJournalEvent(repoRoot: string, input: WriteJournalEventInput): string | null {
   const key = journalEventKey(input.sessionId, [input.filePath]);
+  try {
+    const root = realpathSync(repoRoot);
+    return withExclusiveDirectoryLock(root, `${JOURNAL_ROOT}/locks/${key}`, () => writeOrCoalesceJournalEventLocked(root, input, key));
+  } catch {
+    // Best-effort: a journal write/lock failure must never fail the hot path.
+    return null;
+  }
+}
+
+function writeOrCoalesceJournalEventLocked(repoRoot: string, input: WriteJournalEventInput, key: string): string | null {
   const relativePath = `${JOURNAL_PENDING_DIR}/${key}.json`;
   const absPath = join(repoRoot, relativePath);
   const nowIso = new Date().toISOString();
-  const existing = readJournalEventFile(absPath);
+  const current = readJournalEventFile(absPath);
+  const legacy = current ? null : readLegacyJournalEventFile(absPath);
+  const existing: PostEditJournalEvent | null = current ?? (legacy ? { ...legacy, schema_version: 2, source_key: key } : null);
 
   const dirty: PostEditJournalDirtyBits = existing
     ? {
         'contract-verification': existing.dirty['contract-verification'] || input.dirty['contract-verification'],
-        architecture: existing.dirty.architecture || input.dirty.architecture,
         context: existing.dirty.context || input.dirty.context,
         capability: existing.dirty.capability || input.dirty.capability,
         'minimal-change': existing.dirty['minimal-change'] || input.dirty['minimal-change'],
@@ -610,8 +637,9 @@ function writeOrCoalesceJournalEvent(repoRoot: string, input: WriteJournalEventI
 
   const event: PostEditJournalEvent = {
     schema: 'change_observed',
-    schema_version: 1,
-    event_id: key,
+    schema_version: 2,
+    source_key: key,
+    event_id: `change-${randomUUID()}`,
     session_id: input.sessionId,
     created_at: existing?.created_at ?? nowIso,
     updated_at: nowIso,
@@ -628,13 +656,8 @@ function writeOrCoalesceJournalEvent(repoRoot: string, input: WriteJournalEventI
     },
   };
 
-  try {
-    writeJournalEventAtomic(absPath, event);
-    return relativePath;
-  } catch {
-    // Best-effort: a journal write failure must never fail the hot path.
-    return null;
-  }
+  writeJournalEventAtomic(absPath, event);
+  return relativePath;
 }
 
 interface PendingScanResult {
@@ -645,6 +668,7 @@ interface PendingScanResult {
    * consumer cleans up, never a state the SessionStart display needs to
    * know about. */
   readonly corruptNames: readonly string[];
+  readonly legacyNames: readonly string[];
 }
 
 function scanPendingPostEditEventFiles(repoRoot: string): PendingScanResult {
@@ -653,16 +677,53 @@ function scanPendingPostEditEventFiles(repoRoot: string): PendingScanResult {
   try {
     names = readdirSync(dir).filter((name) => name.endsWith('.json'));
   } catch {
-    return { valid: [], corruptNames: [] };
+    return { valid: [], corruptNames: [], legacyNames: [] };
   }
   const valid: Array<{ name: string; event: PostEditJournalEvent }> = [];
   const corruptNames: string[] = [];
+  const legacyNames: string[] = [];
   for (const name of names.sort()) {
     const event = readJournalEventFile(join(dir, name));
     if (event) valid.push({ name, event });
+    else if (readLegacyJournalEventFile(join(dir, name))) legacyNames.push(name);
     else corruptNames.push(name);
   }
-  return { valid, corruptNames };
+  return { valid, corruptNames, legacyNames };
+}
+
+type LegacyPostEditJournalEventV1 = Omit<PostEditJournalEvent, 'schema_version' | 'source_key'> & { readonly schema_version: 1 };
+
+function readLegacyJournalEventFile(path: string): LegacyPostEditJournalEventV1 | null {
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8')) as LegacyPostEditJournalEventV1;
+    return value?.schema === 'change_observed' && value.schema_version === 1 ? value : null;
+  } catch { return null; }
+}
+
+/** Explicit one-way queue migration. The runtime consumer remains v2-only. */
+export function migratePendingPostEditJournalV1(repoRoot: string, limit = 100): { migrated: number; remaining: number } {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error('post-edit journal migration limit must be 1..1000');
+  const root = realpathSync(repoRoot);
+  const dir = join(root, JOURNAL_PENDING_DIR);
+  let names: string[];
+  try { names = readdirSync(dir).filter((name) => name.endsWith('.json')).sort(); }
+  catch { return { migrated: 0, remaining: 0 }; }
+  let migrated = 0;
+  let remaining = 0;
+  for (const name of names) {
+    const key = name.replace(/\.json$/, '');
+    if (!/^[a-f0-9]{20}$/.test(key)) continue;
+    const path = join(dir, name);
+    if (!readLegacyJournalEventFile(path)) continue;
+    if (migrated >= limit) { remaining += 1; continue; }
+    withExclusiveDirectoryLock(root, `${JOURNAL_ROOT}/locks/${key}`, () => {
+      const legacy = readLegacyJournalEventFile(path);
+      if (!legacy) return;
+      writeJournalEventAtomic(path, { ...legacy, schema_version: 2, source_key: key });
+      migrated += 1;
+    });
+  }
+  return { migrated, remaining };
 }
 
 /** Pending (unconsumed) events, oldest-key-first. Used both by the
@@ -722,9 +783,9 @@ export function pendingPostEditJournalSection(repoRoot: string): SessionContextS
 // consumed atomically. Invoked by runtime.ts's Stop.default dispatch.
 // ---------------------------------------------------------------------------
 
-function commandAvailable(cmd: string): boolean {
+function commandAvailable(cmd: string, env: NodeJS.ProcessEnv): boolean {
   try {
-    return spawnSync('sh', ['-c', `command -v ${cmd}`], { stdio: 'ignore' }).status === 0;
+    return spawnSync('sh', ['-c', `command -v ${cmd}`], { env, stdio: 'ignore' }).status === 0;
   } catch {
     return false;
   }
@@ -733,8 +794,8 @@ function commandAvailable(cmd: string): boolean {
 /** `repo_harness_runner_available()` port (assets/hooks/post-edit-guard.sh:14-19). */
 function repoHarnessRunnerAvailable(env: NodeJS.ProcessEnv): boolean {
   const cli = env.REPO_HARNESS_CLI;
-  if (cli && existsSync(cli) && commandAvailable('bun')) return true;
-  return commandAvailable('repo-harness');
+  if (cli && existsSync(cli) && commandAvailable('bun', env)) return true;
+  return commandAvailable('repo-harness', env);
 }
 
 /** `run_repo_harness_helper()` port (assets/hooks/post-edit-guard.sh:21-29). */
@@ -745,7 +806,7 @@ function runRepoHarnessHelper(
   args: readonly string[],
 ): { status: number; stdout: string } {
   const cli = env.REPO_HARNESS_CLI;
-  if (cli && existsSync(cli) && commandAvailable('bun')) {
+  if (cli && existsSync(cli) && commandAvailable('bun', env)) {
     const res = spawnSync('bun', [cli, 'run', helper, ...args], { cwd: repoRoot, encoding: 'utf-8', env });
     return { status: res.status ?? 1, stdout: res.stdout ?? '' };
   }
@@ -755,38 +816,58 @@ function runRepoHarnessHelper(
 
 /** capability-context's own 3-tier fallback (post-edit-guard.sh:73-93) --
  * NOT `run <helper>` shaped, ported as its own function. */
-function runCapabilityContextRequest(repoRoot: string, env: NodeJS.ProcessEnv): void {
+function runCapabilityContextRequest(repoRoot: string, env: NodeJS.ProcessEnv): { status: number } {
   const args = ['capability-context', 'request', '--from-latest-architecture-event'];
   const cli = env.REPO_HARNESS_CLI;
-  if (cli && existsSync(cli) && commandAvailable('bun')) {
-    spawnSync('bun', [cli, ...args], { cwd: repoRoot, encoding: 'utf-8', env });
-    return;
+  if (cli && existsSync(cli) && commandAvailable('bun', env)) {
+    const result = spawnSync('bun', [cli, ...args], { cwd: repoRoot, encoding: 'utf-8', env });
+    return { status: result.status ?? 1 };
   }
-  if (commandAvailable('repo-harness')) {
-    spawnSync('repo-harness', args, { cwd: repoRoot, encoding: 'utf-8', env });
-    return;
+  if (commandAvailable('repo-harness', env)) {
+    const result = spawnSync('repo-harness', args, { cwd: repoRoot, encoding: 'utf-8', env });
+    return { status: result.status ?? 1 };
   }
   const localCli = join(repoRoot, 'src/cli/index.ts');
-  if (commandAvailable('bun') && existsSync(localCli)) {
-    spawnSync('bun', [localCli, ...args], { cwd: repoRoot, encoding: 'utf-8', env });
+  if (commandAvailable('bun', env) && existsSync(localCli)) {
+    const result = spawnSync('bun', [localCli, ...args], { cwd: repoRoot, encoding: 'utf-8', env });
+    return { status: result.status ?? 1 };
   }
+  return { status: 1 };
 }
 
 /**
- * `run_architecture_queue_sync()` port (post-edit-guard.sh:49-96). The
+ * `run_architecture_queue_sync()` port (post-edit-guard.sh:49-96), now
+ * invoked per path of the Stop-time drift changed set (see
+ * `architecture-drift.ts`) instead of per journal event. The
  * context-contract-sync + capability-context cascade is gated on
  * architecture-queue's OWN real-time output matching
  * `/^\[ArchitectureDrift\] Request:/m` -- replicated here exactly, against
  * the (still same, unmodified) `architecture-queue.sh record` command's real
  * output, not a second capability-resolver implementation.
  */
-function processArchitectureCascade(repoRoot: string, env: NodeJS.ProcessEnv, filePath: string): void {
-  if (!repoHarnessRunnerAvailable(env)) return;
-  const result = runRepoHarnessHelper(repoRoot, env, 'architecture-queue', ['record', '--file', filePath]);
-  if (/^\[ArchitectureDrift\] Request:/m.test(result.stdout)) {
-    runRepoHarnessHelper(repoRoot, env, 'context-contract-sync', ['sync-latest']);
-    runCapabilityContextRequest(repoRoot, env);
+export type ArchitectureCascadeResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string };
+
+export function processArchitectureCascade(repoRoot: string, env: NodeJS.ProcessEnv, filePath: string): ArchitectureCascadeResult {
+  if (!repoHarnessRunnerAvailable(env)) {
+    return { ok: false, error: `legacy architecture cascade runner is unavailable for ${filePath}` };
   }
+  const result = runRepoHarnessHelper(repoRoot, env, 'architecture-queue', ['record', '--file', filePath]);
+  if (result.status !== 0) {
+    return { ok: false, error: `legacy architecture cascade failed for ${filePath}: architecture-queue exited ${result.status}` };
+  }
+  if (/^\[ArchitectureDrift\] Request:/m.test(result.stdout)) {
+    const contextSync = runRepoHarnessHelper(repoRoot, env, 'context-contract-sync', ['sync-latest']);
+    if (contextSync.status !== 0) {
+      return { ok: false, error: `legacy architecture cascade failed for ${filePath}: context-contract-sync exited ${contextSync.status}` };
+    }
+    const capabilityContext = runCapabilityContextRequest(repoRoot, env);
+    if (capabilityContext.status !== 0) {
+      return { ok: false, error: `legacy architecture cascade failed for ${filePath}: capability-context exited ${capabilityContext.status}` };
+    }
+  }
+  return { ok: true };
 }
 
 /** `run_continuous_contract_verification()`'s durable action (post-edit-guard.sh:31-47). */
@@ -840,13 +921,11 @@ function warnStderr(line: string): void {
 }
 
 /**
- * Processes every pending journal event's dirty bits (architecture cascade,
- * contract verification, deferred minimal-change signals) and DELETES the
- * event file on success (retention: transit queue, not an evidence ledger --
- * see `deletePendingPostEditEventFile`'s doc comment). Best-effort per
- * event: one event's failure leaves its file in `pending/` for the next
- * Stop to retry rather than losing the others or throwing out of Stop.
- * Corrupt pending files (unparseable JSON, wrong schema) are removed
+ * Processes every pending journal event's dirty bits (contract verification,
+ * deferred minimal-change signals) and deletes the event on success.
+ * Best-effort per event: one event's failure leaves its file in `pending/`
+ * for the next Stop to retry rather than losing the others or throwing out of
+ * Stop. Corrupt pending files (unparseable JSON, wrong schema) are removed
  * outright with a stderr warning -- they can never be "retried" into
  * validity.
  */
@@ -854,6 +933,7 @@ export function consumePendingPostEditEvents(
   repoRoot: string,
   env: NodeJS.ProcessEnv = process.env,
 ): PostEditConsumeSummary {
+  migratePendingPostEditJournalV1(repoRoot, 100);
   const { valid, corruptNames } = scanPendingPostEditEventFiles(repoRoot);
   let consumed = 0;
   let errors = 0;
@@ -872,11 +952,6 @@ export function consumePendingPostEditEvents(
 
   for (const { name, event } of valid) {
     try {
-      if (event.dirty.architecture) {
-        for (const filePath of event.changed_paths) {
-          processArchitectureCascade(repoRoot, env, filePath);
-        }
-      }
       if (event.dirty['contract-verification'] && event.payload.contract_verification) {
         processContractVerification(
           repoRoot,
@@ -892,8 +967,16 @@ export function consumePendingPostEditEvents(
           event.payload.minimal_change.base_ref,
         );
       }
-      deletePendingPostEditEventFile(repoRoot, name);
-      consumed += 1;
+      const root = realpathSync(repoRoot);
+      const key = name.replace(/\.json$/, '');
+      let deleted = false;
+      withExclusiveDirectoryLock(root, `${JOURNAL_ROOT}/locks/${key}`, () => {
+        const current = readJournalEventFile(join(root, JOURNAL_PENDING_DIR, name));
+        if (!current || current.updated_at !== event.updated_at) return;
+        deletePendingPostEditEventFile(root, name);
+        deleted = true;
+      });
+      if (deleted) consumed += 1;
     } catch {
       errors += 1;
     }

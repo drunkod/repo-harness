@@ -105,6 +105,7 @@ const AGENT_FLEET_SOURCE_DIR = process.env.REPO_HARNESS_AGENT_FLEET_SOURCE_DIR;
 const AGENT_FLEET_SOURCE_LABEL = "package:agents/fleet";
 const AGENT_FLEET_DEFAULT_MANAGED = ["explorer", "deep-reasoner", "fast-worker", "deep-worker", "gatekeeper", "root-cause-prover", "harness-evaluator"];
 const AGENT_FLEET_INSTALL_COMMAND = "repo-harness run install-agent-fleet";
+const AGENT_FLEET_USER_MANAGED_RECEIPT_PATH = path.join(HOME, ".repo-harness", "agent-fleet-user-managed.json");
 const CODEGRAPH_PACKAGE = "@colbymchenry/codegraph";
 const CODEGRAPH_GLOBAL_INSTALL_COMMAND = `bun add -g ${CODEGRAPH_PACKAGE} && repo-harness tools configure codegraph --target codex --location global`;
 const CODEGRAPH_MCP_CONFIGURE_COMMAND = "repo-harness tools configure codegraph --target <codex|claude|both> --location global";
@@ -115,6 +116,11 @@ const CODEGRAPH_ENSURE_COMMAND = [
 const CODEGRAPH_ENSURE_BASH_COMMAND = CODEGRAPH_ENSURE_COMMAND
   ? `bash ${CODEGRAPH_ENSURE_COMMAND}`
   : null;
+const ARCHCTX_CLI_PACKAGE = "archctx";
+const ARCHCTX_CONTRACTS_PACKAGE = "archctx-contracts";
+const ARCHCTX_MODEL_DIR = ".archcontext/model";
+const ARCHCTX_NODES_DIR = ".archcontext/model/nodes";
+const ARCHCTX_CAPABILITY_SOURCE_KEY = ".ai/harness/policy.json#context.capability_source";
 const WAZA_STAGING_ROOT = path.join(HOME, ".agents");
 const WAZA_STAGING_DIR = path.join(WAZA_STAGING_ROOT, "skills");
 const WAZA_STAGING_RULES_DIR = path.join(WAZA_STAGING_ROOT, "rules");
@@ -246,6 +252,10 @@ function sha1(text) {
 
 function sha1Buffer(buffer) {
   return crypto.createHash("sha1").update(buffer).digest("hex");
+}
+
+function sha256Buffer(buffer) {
+  return `sha256:${crypto.createHash("sha256").update(buffer).digest("hex")}`;
 }
 
 function parseSkillVersion(text) {
@@ -872,6 +882,37 @@ function readAgentFleetSource(agent) {
   return { status: "read", path: sourcePath, hash: source.hash };
 }
 
+// Read-only mirror of install-agent-fleet.sh's loadUserManagedReceipt(): this
+// checker never writes ~/.repo-harness/agent-fleet-user-managed.json, it only
+// consults it so an operator-accepted customized file is not misreported as
+// drift. Any malformation invalidates the whole receipt (fail-closed) rather
+// than exempting individual entries.
+function loadAgentFleetUserManagedReceipt() {
+  if (!fs.existsSync(AGENT_FLEET_USER_MANAGED_RECEIPT_PATH)) return { ok: true, hashes: new Map() };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(AGENT_FLEET_USER_MANAGED_RECEIPT_PATH, "utf8"));
+    if (
+      parsed?.protocol !== 1
+      || parsed?.authority !== "user-managed-agent-fleet"
+      || !Array.isArray(parsed.files)
+    ) return { ok: false, hashes: new Map() };
+    const hashes = new Map();
+    for (const entry of parsed.files) {
+      if (
+        !entry
+        || typeof entry.path !== "string"
+        || typeof entry.sha256 !== "string"
+        || !/^sha256:[a-f0-9]{64}$/.test(entry.sha256)
+        || hashes.has(entry.path)
+      ) return { ok: false, hashes: new Map() };
+      hashes.set(entry.path, entry.sha256);
+    }
+    return { ok: true, hashes };
+  } catch (_error) {
+    return { ok: false, hashes: new Map() };
+  }
+}
+
 function detectAgentFleetHost(host, managedAgents) {
   const meta = HOSTS[host];
   const files = managedAgents.map((agent) => inspectAgentFleetFile(host, agent));
@@ -884,9 +925,11 @@ function detectAgentFleetHost(host, managedAgents) {
   const driftAgents = [];
   const syncedAgents = [];
   const sourceMissingAgents = [];
+  const userManagedAgents = [];
 
   if (checkUpdates) {
     if (host === "claude") {
+      const receipt = loadAgentFleetUserManagedReceipt();
       for (const entry of files) {
         if (!entry.present) continue;
         const source = readAgentFleetSource(entry.name);
@@ -896,9 +939,25 @@ function detectAgentFleetHost(host, managedAgents) {
         }
         if (source.hash === entry.hash) {
           syncedAgents.push(entry.name);
-        } else {
-          driftAgents.push(entry.name);
+          continue;
         }
+        // Differs from the packaged source: only a valid receipt entry whose
+        // sha256 matches the file's *current* installed content exempts it.
+        // A missing/invalid receipt, a path with no entry, or a hash mismatch
+        // (edited again after acceptance) all fall through to drift.
+        if (receipt.ok && receipt.hashes.get(entry.path) !== undefined) {
+          let installedHash = null;
+          try {
+            installedHash = sha256Buffer(fs.readFileSync(entry.path));
+          } catch (_error) {
+            installedHash = null;
+          }
+          if (installedHash === receipt.hashes.get(entry.path)) {
+            userManagedAgents.push(entry.name);
+            continue;
+          }
+        }
+        driftAgents.push(entry.name);
       }
 
       if (driftAgents.length > 0) {
@@ -907,9 +966,11 @@ function detectAgentFleetHost(host, managedAgents) {
       } else if (sourceMissingAgents.length > 0) {
         updateStatus = "unknown";
         updateReason = `Packaged repo-harness fleet source is missing files for: ${sourceMissingAgents.join(", ")}.`;
-      } else if (syncedAgents.length > 0) {
-        updateStatus = "synced";
-        updateReason = "Installed Claude agent definitions match the packaged repo-harness fleet source.";
+      } else if (syncedAgents.length > 0 || userManagedAgents.length > 0) {
+        updateStatus = "up-to-date";
+        updateReason = userManagedAgents.length > 0
+          ? `Installed Claude agent definitions match the packaged repo-harness fleet source, with user-managed exemptions accepted via receipt for: ${userManagedAgents.join(", ")}.`
+          : "Installed Claude agent definitions match the packaged repo-harness fleet source.";
       } else {
         updateStatus = "not-checked";
         updateReason = "No installed Claude agent definitions to compare.";
@@ -931,6 +992,7 @@ function detectAgentFleetHost(host, managedAgents) {
     drift_agents: driftAgents,
     synced_agents: syncedAgents,
     source_missing_agents: sourceMissingAgents,
+    user_managed_agents: userManagedAgents,
   };
 }
 
@@ -944,7 +1006,7 @@ function detectCodexNativeRoleRouting() {
   }
 
   const stateRoot = path.join(REPO_ROOT, ".ai", "harness", "delegation");
-  const statePath = path.join(stateRoot, "latest.json");
+  const statePath = path.join(stateRoot, "native-role-routing.json");
   if (!fs.existsSync(statePath)) {
     return {
       status: "unverified",
@@ -964,16 +1026,10 @@ function detectCodexNativeRoleRouting() {
     };
   }
 
-  const routingState = state.native_role_routing;
-  if (routingState === undefined) {
-    return {
-      status: "unverified",
-      reason: "The latest delegation state predates native role/model evidence capture.",
-      evidence_path: statePath,
-      observations: [],
-    };
-  }
-  if (!routingState || typeof routingState !== "object") {
+  const routingState = state;
+  if (routingState.schema_version !== 1
+    || routingState.required !== true
+    || routingState.reasoning_effort_status !== "configured_unverified") {
     return {
       status: "invalid",
       reason: "The native role/model evidence state is malformed.",
@@ -1010,6 +1066,14 @@ function detectCodexNativeRoleRouting() {
       observations: [],
     };
   }
+  if (!currentEvidence.exists) {
+    return {
+      status: "invalid",
+      reason: "The native role/model evidence pointer targets a missing directory.",
+      evidence_path: currentEvidence.path,
+      observations: [],
+    };
+  }
 
   function observationFiles(directory) {
     if (!fs.existsSync(directory)) return [];
@@ -1025,33 +1089,8 @@ function detectCodexNativeRoleRouting() {
     }
   }
 
-  function latestRecordedDirectory() {
-    const resolvedRoot = resolveEvidenceDirectory("role-routing");
-    if (!resolvedRoot || !resolvedRoot.exists) return null;
-    const routingRoot = resolvedRoot.path;
-    try {
-      const entries = fs.readdirSync(routingRoot, { withFileTypes: true });
-      if (entries.some((entry) => !entry.isDirectory())) return { invalid: true };
-      const candidates = entries
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => path.join(routingRoot, entry.name))
-        .map((directory) => ({ directory, files: observationFiles(directory) }))
-        .filter((entry) => entry.files === null || entry.files.length > 0);
-      if (candidates.some((entry) => entry.files === null)) return { invalid: true };
-      const ranked = candidates
-        .map((entry) => ({
-          ...entry,
-          latestMtime: Math.max(...entry.files.map((file) => fs.statSync(file).mtimeMs)),
-        }))
-        .sort((left, right) => right.latestMtime - left.latestMtime || left.directory.localeCompare(right.directory));
-      return ranked[0] || null;
-    } catch {
-      return { invalid: true };
-    }
-  }
-
-  let evidenceDir = currentEvidence.path;
-  let files = observationFiles(evidenceDir);
+  const evidenceDir = currentEvidence.path;
+  const files = observationFiles(evidenceDir);
   if (files === null) {
     return {
       status: "invalid",
@@ -1059,21 +1098,6 @@ function detectCodexNativeRoleRouting() {
       evidence_path: evidenceDir,
       observations: [],
     };
-  }
-  if (files.length === 0) {
-    const previous = latestRecordedDirectory();
-    if (previous?.invalid) {
-      return {
-        status: "invalid",
-        reason: "Stored native role/model evidence contains an unsafe entry.",
-        evidence_path: path.join(stateRoot, "role-routing"),
-        observations: [],
-      };
-    }
-    if (previous) {
-      evidenceDir = previous.directory;
-      files = previous.files;
-    }
   }
   if (files.length === 0) {
     return {
@@ -1125,12 +1149,13 @@ function detectCodexNativeRoleRouting() {
       && observation.reason.trim().length > 0
       && observation.reason.length <= 512
       && !/[\u0000-\u001f\u007f]/.test(observation.reason)
-      && bounded(observation.agent_id, /^[A-Za-z0-9._:-]+$/)
-      && bounded(observation.turn_id, /^[A-Za-z0-9._:-]+$/)
+      && observation.reasoning_effort_status === "configured_unverified"
       && validDate(observation.checked_at);
     let semanticValid = commonValid;
     if (semanticValid && ["verified", "mismatch"].includes(observation.status)) {
-      semanticValid = bounded(observation.agent_type, /^[A-Za-z0-9_-]+$/)
+      semanticValid = bounded(observation.agent_id, /^[A-Za-z0-9._:-]+$/)
+        && bounded(observation.turn_id, /^[A-Za-z0-9._:-]+$/)
+        && bounded(observation.agent_type, /^[A-Za-z0-9_-]+$/)
         && observation.agent_type !== "default"
         && bounded(observation.observed_model, /^[A-Za-z0-9._-]+$/)
         && bounded(observation.configured_model, /^[A-Za-z0-9._-]+$/)
@@ -1141,19 +1166,30 @@ function detectCodexNativeRoleRouting() {
           ? observation.observed_model === observation.configured_model
           : observation.observed_model !== observation.configured_model);
     } else if (semanticValid && observation.status === "unavailable") {
-      semanticValid = observation.agent_type === "default"
+      semanticValid = bounded(observation.agent_id, /^[A-Za-z0-9._:-]+$/)
+        && bounded(observation.turn_id, /^[A-Za-z0-9._:-]+$/)
+        && observation.agent_type === "default"
         && bounded(observation.observed_model, /^[A-Za-z0-9._-]+$/)
         && observation.configured_model === null
         && observation.config_path === null
         && observation.config_sha256 === null;
     } else if (semanticValid && observation.status === "unverified") {
+      const agentIdValid = observation.agent_id === null
+        || bounded(observation.agent_id, /^[A-Za-z0-9._:-]+$/);
+      const turnIdValid = observation.turn_id === null
+        || bounded(observation.turn_id, /^[A-Za-z0-9._:-]+$/);
       const agentTypeValid = observation.agent_type === null
         || bounded(observation.agent_type, /^[A-Za-z0-9_-]+$/);
       const observedModelValid = observation.observed_model === null
         || bounded(observation.observed_model, /^[A-Za-z0-9._-]+$/);
-      semanticValid = agentTypeValid
+      semanticValid = agentIdValid
+        && turnIdValid
+        && agentTypeValid
         && observedModelValid
-        && (observation.agent_type === null || observation.observed_model === null)
+        && (observation.agent_id === null
+          || observation.turn_id === null
+          || observation.agent_type === null
+          || observation.observed_model === null)
         && observation.configured_model === null
         && observation.config_path === null
         && observation.config_sha256 === null;
@@ -1520,6 +1556,93 @@ function detectCodeGraph() {
   };
 }
 
+function archctxContractsVersion() {
+  const pkg = readJson(path.join(REPO_ROOT, "package.json"));
+  if (!pkg || typeof pkg !== "object") return null;
+  return (
+    pkg.devDependencies?.[ARCHCTX_CONTRACTS_PACKAGE] ||
+    pkg.dependencies?.[ARCHCTX_CONTRACTS_PACKAGE] ||
+    pkg.optionalDependencies?.[ARCHCTX_CONTRACTS_PACKAGE] ||
+    null
+  );
+}
+
+/**
+ * Reads the capability authority switch this repo runs on. Advisory only: a
+ * missing or malformed policy never fails the probe, it just reports what could
+ * be read so the operator sees which source the resolver would use.
+ */
+function archctxCapabilitySource() {
+  const policy = readJson(path.join(REPO_ROOT, ".ai/harness/policy.json"));
+  if (!policy || typeof policy !== "object") return "unknown";
+  const context = policy.context;
+  if (!context || typeof context !== "object") return "registry";
+  const value = context.capability_source;
+  if (value === undefined) return "registry";
+  return typeof value === "string" ? value : "unknown";
+}
+
+function archctxNodeCount(nodesDir) {
+  try {
+    return fs.readdirSync(nodesDir).filter((name) => /\.ya?ml$/.test(name)).length;
+  } catch (_error) {
+    return 0;
+  }
+}
+
+/**
+ * Advisory global ArchContext probe. This is deliberately orthogonal to the
+ * package-local architecture projection provider: a PATH installation can help
+ * an operator, but never satisfies provider readiness or blocks hooks.
+ */
+function detectArchctx() {
+  const binPath = resolvePathCommand(ARCHCTX_CLI_PACKAGE);
+  const cliPresent = Boolean(binPath);
+  const versionResult = cliPresent ? run(binPath, ["--version"], { timeoutMs: 1500 }) : null;
+  // Some archctx builds have no --version flag and answer with a multi-line help
+  // envelope at exit 0. Report an unknown version instead of storing that blob.
+  const versionOutput = versionResult?.ok ? versionResult.stdout.trim() : "";
+  const version = versionOutput && !versionOutput.includes("\n") ? versionOutput : null;
+  const contractsPackageVersion = archctxContractsVersion();
+  const capabilitySource = archctxCapabilitySource();
+  const nodesDir = path.join(REPO_ROOT, ARCHCTX_NODES_DIR);
+  const nodesDirPresent = fs.existsSync(nodesDir);
+  const nodeCount = nodesDirPresent ? archctxNodeCount(nodesDir) : 0;
+  const nodesReady = nodesDirPresent && nodeCount > 0;
+  const status = capabilitySource === "archcontext" && !nodesReady ? "partial" : "present";
+
+  return {
+    name: "archctx",
+    status,
+    reason: capabilitySource === "archcontext"
+      ? nodesReady
+        ? `Capability source is archcontext and ${ARCHCTX_NODES_DIR} holds ${nodeCount} node file(s).`
+        : `Capability source is archcontext, but ${ARCHCTX_NODES_DIR} is missing or empty.`
+      : `Capability source is ${capabilitySource}; archctx nodes are not read by the resolver.`,
+    cli_package: ARCHCTX_CLI_PACKAGE,
+    contracts_package: ARCHCTX_CONTRACTS_PACKAGE,
+    contracts_scope: "release-gated-packed-schema-authority",
+    install_mode: "release-gated-runtime-dependency-when-projection-enabled",
+    cli_present: cliPresent,
+    bin_path: binPath,
+    version,
+    contracts_package_version: contractsPackageVersion,
+    capability_source: capabilitySource,
+    capability_source_key: ARCHCTX_CAPABILITY_SOURCE_KEY,
+    model_dir: path.join(REPO_ROOT, ARCHCTX_MODEL_DIR),
+    nodes_dir: path.join(REPO_ROOT, ARCHCTX_NODES_DIR),
+    nodes_dir_present: nodesDirPresent,
+    node_count: nodeCount,
+    readiness: "advisory",
+    hook_policy: "do-not-block-hooks",
+    vendoring_policy: "do-not-vendor",
+    impact: {
+      capability_resolution: status === "present" ? "unaffected" : "archcontext-nodes-missing",
+      hook_correctness: "unaffected",
+    },
+  };
+}
+
 const wazaReport = detectWaza();
 const report = {
   generated_at: new Date().toISOString(),
@@ -1532,6 +1655,7 @@ const report = {
     codex_automation_profile: detectCodexAutomationProfile(),
     agent_fleet: detectAgentFleet(),
     codegraph: detectCodeGraph(),
+    archctx: detectArchctx(),
   },
 };
 
@@ -1544,7 +1668,7 @@ if (strictReadiness && ["missing", "partial"].includes(report.tools.agent_fleet.
 }
 if (
   strictReadiness
-  && ["unavailable", "mismatch", "invalid"].includes(report.tools.agent_fleet.native_role_routing.status)
+  && ["unverified", "unavailable", "mismatch", "invalid"].includes(report.tools.agent_fleet.native_role_routing.status)
 ) {
   const routing = report.tools.agent_fleet.native_role_routing;
   strictFailures.push(`Codex native role routing is ${routing.status}: ${routing.reason}`);
@@ -1631,6 +1755,9 @@ function printText(result) {
     if (entry.update_status !== "not-checked") {
       console.log(`    updates: ${entry.update_status} (${entry.update_reason})`);
     }
+    if (entry.user_managed_agents.length) {
+      console.log(`    user-managed (receipt): ${entry.user_managed_agents.join(", ")}`);
+    }
   }
   console.log(`  - Install: ${agentFleet.install_command}`);
   if (SELECTED_HOSTS.includes("codex")) {
@@ -1658,6 +1785,16 @@ function printText(result) {
   }
   console.log(`  - Init index: ${codegraph.init_command}`);
   console.log(`  - Sync index: ${codegraph.sync_command}`);
+  console.log("");
+
+  const archctx = result.tools.archctx;
+  console.log(`ArchContext [${archctx.status}] (advisory)`);
+  console.log(`  - CLI: ${archctx.cli_present ? `present${archctx.version ? ` (v${archctx.version})` : ""} at ${archctx.bin_path}` : "missing"}`);
+  console.log(`  - Contracts package: ${archctx.contracts_package}${archctx.contracts_package_version ? `@${archctx.contracts_package_version}` : " (not declared)"} (${archctx.contracts_scope})`);
+  console.log(`  - Capability source: ${archctx.capability_source} via ${archctx.capability_source_key}`);
+  console.log(`  - Nodes: ${archctx.nodes_dir_present ? `${archctx.node_count} file(s) in ${archctx.nodes_dir}` : `missing ${archctx.nodes_dir}`}`);
+  console.log(`  - Impact: capability-resolution=${archctx.impact.capability_resolution}, hooks=${archctx.impact.hook_correctness}`);
+  console.log(`  - Readiness: ${archctx.readiness} (${archctx.reason})`);
 }
 
 if (jsonOutput) {

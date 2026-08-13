@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
@@ -81,7 +81,7 @@ describe("capability-config helper", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("refuses to create missing capability prefixes unless explicitly requested", () => {
     const cwd = tmpWorkspace("capability-config-missing-prefix");
@@ -94,7 +94,7 @@ describe("capability-config helper", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("reuses existing registry entries instead of re-deriving custom fields", () => {
     const cwd = tmpWorkspace("capability-config-existing");
@@ -127,5 +127,32 @@ describe("capability-config helper", () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
+
+  test("refuses to write the JSON registry when archcontext owns the capability source", () => {
+    const cwd = tmpWorkspace("capability-config-archcontext");
+    try {
+      mkdirSync(join(cwd, "apps/agent"), { recursive: true });
+      const first = runCapabilityConfig(cwd, ["add", "--prefix", "apps/agent"]);
+      expect(first.status).toBe(0);
+
+      const registryPath = join(cwd, ".ai/context/capabilities.json");
+      const before = readFileSync(registryPath);
+
+      mkdirSync(join(cwd, ".ai/harness"), { recursive: true });
+      writeFileSync(
+        join(cwd, ".ai/harness/policy.json"),
+        `${JSON.stringify({ version: 1, context: { capability_source: "archcontext" } }, null, 2)}\n`,
+      );
+
+      const second = runCapabilityConfig(cwd, ["add", "--prefix", "apps/other", "--create-prefix"]);
+      expect(second.status).toBe(2);
+      expect(second.stderr).toContain('capability source is "archcontext"');
+      expect(second.stderr).toContain(".archcontext/model/nodes");
+      expect(readFileSync(registryPath)).toEqual(before);
+      expect(existsSync(join(cwd, "apps/other"))).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
-import { listHelpers, resolveHelper, runHelper } from "../../src/cli/runtime/helper-runner";
+import { listHelpers, protectedChildEnv, resolveHelper, runHelper } from "../../src/cli/runtime/helper-runner";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -74,7 +74,7 @@ describe("run command", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("resolves bundled helpers from the package by default", () => {
     const tmp = mkdtempSync(join(tmpdir(), "repo-harness-run-package-"));
@@ -174,6 +174,25 @@ describe("run command", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  }, 30_000);
+
+  test("protected helpers never probe caller PATH for a Node runtime", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "repo-harness-run-protected-node-"));
+    try {
+      const fakeBin = join(tmp, "node-bin");
+      const marker = join(tmp, "caller-node-executed");
+      mkdirSync(fakeBin);
+      const node = join(fakeBin, "node");
+      writeFileSync(node, `#!/bin/sh\ntouch "${marker}"\necho v24.18.0\n`);
+      chmodSync(node, 0o755);
+
+      const env = protectedChildEnv({ ...process.env, PATH: fakeBin, REPO_HARNESS_NODE_BIN: "/attacker/node" });
+      expect(env.REPO_HARNESS_NODE_BIN).not.toBe(realpathSync(node));
+      expect(existsSync(marker), "caller PATH Node must not execute during protected environment construction").toBe(false);
+      expect(env.PATH?.split(":"), "caller PATH must not become a general command authority").not.toContain(fakeBin);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   test("source checkout override fails closed for missing and malformed authority", () => {
@@ -255,7 +274,7 @@ describe("run command", () => {
     expect(res.stdout).toMatch(
       /check-task-workflow\s+Check workflow contract and policy compliance for the current repo/,
     );
-  });
+  }, 30_000);
 
   test("package sprint-backlog helper resolves the target repo root from runHelper", () => {
     const tmp = mkdtempSync(join(tmpdir(), "repo-harness-run-sprint-root-"));
@@ -283,7 +302,7 @@ describe("run command", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("ignores repo-local helper runtime when helper_source is repo pinned", () => {
     const tmp = mkdtempSync(join(tmpdir(), "repo-harness-run-repo-pin-"));

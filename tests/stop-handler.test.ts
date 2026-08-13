@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from 'fs';
+import { spawnSync } from 'child_process';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 import type { EffectiveState } from '../src/core/state/types';
 import { runStopHandler, type StopProjectionTarget } from '../src/cli/hook/stop-handler';
+import { readPendingPostEditEvents } from '../src/cli/hook/mutation-observed';
+import { advanceArchitectureDriftCursor, computeArchitectureDriftChangedSet, readArchitectureDriftCursor } from '../src/cli/hook/architecture-drift';
 
 const fixtures: string[] = [];
 
@@ -17,6 +20,25 @@ function fixture(): string {
   mkdirSync(join(cwd, '.ai/harness'), { recursive: true });
   writeFileSync(join(cwd, '.ai/harness/policy.json'), '{}\n');
   return cwd;
+}
+
+function git(cwd: string, args: readonly string[]): string {
+  const result = spawnSync('git', [...args], { cwd, encoding: 'utf-8' });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return result.stdout.trim();
+}
+
+/** A repository the drift cursor can actually anchor to. */
+function gitFixture(): { cwd: string; head: string } {
+  const cwd = realpathSync(fixture());
+  git(cwd, ['init', '-b', 'main']);
+  git(cwd, ['config', 'user.email', 'stop-handler@example.com']);
+  git(cwd, ['config', 'user.name', 'Stop Handler Test']);
+  writeFileSync(join(cwd, '.gitignore'), '.ai/harness/\n');
+  writeFileSync(join(cwd, 'README.md'), '# fixture\n');
+  git(cwd, ['add', '-A']);
+  git(cwd, ['commit', '-m', 'seed']);
+  return { cwd, head: git(cwd, ['rev-parse', 'HEAD']) };
 }
 
 function canonicalState(options: {
@@ -73,8 +95,6 @@ function seedDelegation(cwd: string, scope = 'turn-ordered'): string {
     eligible: true,
     explicit: true,
     spawned: false,
-    fallback_used: false,
-    stop_fallback: true,
     created_at_epoch: Math.floor(Date.now() / 1000),
   };
   writeFileSync(join(dir, 'latest.json'), `${JSON.stringify(state, null, 2)}\n`);
@@ -84,6 +104,229 @@ function seedDelegation(cwd: string, scope = 'turn-ordered'): string {
 }
 
 describe('runStopHandler', () => {
+  test('surfaces projection retry advisory and blocks only under the independent projection failure gate', () => {
+    const failedDrain = () => ({
+      schemaVersion: 'repo-harness.architecture-projection-drain/v1' as const,
+      status: 'retry-pending' as const,
+      jobId: 'job-test', sourceEventIds: ['event-test'], resultStatus: null,
+      error: 'archctx projection failed: exit 1', acknowledgeSourceEvents: false,
+      queue: { schemaVersion: 'repo-harness.architecture-projection-queue-state/v1' as const, pending: 1, running: 0, receipts: 0, deadLetters: 0, oldestPendingJobId: 'job-test', oldestDeadLetterJobId: null },
+    });
+    const advisoryRoot = fixture();
+    writeFileSync(join(advisoryRoot, '.ai/harness/policy.json'), '{"architecture":{"projection_failure_gate":"advisory"}}\n');
+    const advisory = runStopHandler({ collector: collector(advisoryRoot, () => canonicalState()), dependencies: { drainArchitectureProjection: failedDrain } });
+    expect(advisory.exitCode).toBe(0);
+    expect(advisory.stderr).toContain('[ArchitectureProjection] retry-pending');
+
+    const freshnessRoot = fixture();
+    writeFileSync(join(freshnessRoot, '.ai/harness/policy.json'), '{"architecture":{"freshness_gate":"strict"}}\n');
+    const freshnessOnly = runStopHandler({ collector: collector(freshnessRoot, () => canonicalState()), dependencies: { drainArchitectureProjection: failedDrain } });
+    expect(freshnessOnly.stdout).not.toContain('Strict projection failure gate blocked Stop');
+
+    const strictRoot = fixture();
+    writeFileSync(join(strictRoot, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"archctx","projection_apply":"automatic","projection_version":"0.4.2","projection_failure_gate":"strict"}}\n');
+    const strict = runStopHandler({ collector: collector(strictRoot, () => canonicalState()), dependencies: { drainArchitectureProjection: failedDrain } });
+    expect(strict.exitCode).toBe(0);
+    expect(JSON.parse(strict.stdout).decision).toBe('block');
+    expect(strict.stdout).toContain('Strict projection failure gate blocked Stop');
+
+    const deadLetter = runStopHandler({
+      collector: collector(strictRoot, () => canonicalState()),
+      dependencies: { drainArchitectureProjection: () => ({ ...failedDrain(), status: 'dead-letter' as const }) },
+    });
+    expect(deadLetter.stdout).toContain('retry-dead-letter --job-id job-test --json');
+
+    const invalidGateRoot = fixture();
+    writeFileSync(join(invalidGateRoot, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"archctx","projection_apply":"automatic","projection_version":"0.4.2","projection_failure_gate":"block"}}\n');
+    const invalidGate = runStopHandler({ collector: collector(invalidGateRoot, () => canonicalState()), dependencies: { drainArchitectureProjection: failedDrain } });
+    expect(invalidGate.stdout).toContain('Strict projection failure gate blocked Stop');
+    expect(invalidGate.stdout).toContain('projection policy invalid');
+
+    const disabledRoot = fixture();
+    writeFileSync(join(disabledRoot, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"disabled","projection_apply":"disabled","projection_failure_gate":"strict"}}\n');
+    const disabled = runStopHandler({ collector: collector(disabledRoot, () => canonicalState()), dependencies: { drainArchitectureProjection: failedDrain } });
+    expect(disabled.exitCode).toBe(0);
+    expect(disabled.stdout).not.toContain('Strict projection failure gate blocked Stop');
+
+    const malformedInactiveRoot = fixture();
+    writeFileSync(join(malformedInactiveRoot, '.ai/harness/policy.json'), '{not-json\n');
+    const malformedInactive = runStopHandler({ collector: collector(malformedInactiveRoot, () => canonicalState()) });
+    expect(malformedInactive.exitCode).toBe(0);
+    expect(malformedInactive.stdout).not.toContain('Strict projection failure gate blocked Stop');
+    expect(malformedInactive.stderr).toContain('JSON Parse error');
+  });
+
+  test('consumes journal trigger effects independently of the projection drain outcome', () => {
+    const cwd = fixture();
+    const pending = join(cwd, '.ai/harness/journal/post-edit/pending');
+    mkdirSync(pending, { recursive: true });
+    const eventId = 'event-consumed';
+    writeFileSync(join(pending, '0123456789abcdefabcd.json'), `${JSON.stringify({
+      schema: 'change_observed',
+      schema_version: 2,
+      source_key: '0123456789abcdefabcd',
+      event_id: eventId,
+      session_id: 'session-consumed',
+      created_at: '2026-08-09T00:00:00.000Z',
+      updated_at: '2026-08-09T00:00:00.000Z',
+      changed_paths: ['src/example.ts'],
+      subject_revision: null,
+      dirty: { 'contract-verification': true, context: true, capability: true, 'minimal-change': true, checkpoint: false },
+      payload: {
+        contract_verification: { contract_file: 'tasks/contracts/example.contract.md', checks_file: '.ai/harness/checks/latest.json' },
+        minimal_change: { path: 'src/example.ts', base_ref: 'HEAD' },
+      },
+    }, null, 2)}\n`);
+    const failedDrain = () => ({
+      schemaVersion: 'repo-harness.architecture-projection-drain/v1' as const,
+      status: 'retry-pending' as const,
+      jobId: 'job-retained', sourceEventIds: ['drift-unrelated'], resultStatus: null,
+      error: 'projection failed', acknowledgeSourceEvents: false,
+      queue: { schemaVersion: 'repo-harness.architecture-projection-queue-state/v1' as const, pending: 1, running: 0, receipts: 0, deadLetters: 0, oldestPendingJobId: 'job-retained', oldestDeadLetterJobId: null },
+    });
+
+    runStopHandler({
+      collector: collector(cwd, () => canonicalState()),
+      env: { ...process.env, PATH: '' },
+      dependencies: { drainArchitectureProjection: failedDrain },
+    });
+
+    // The journal no longer carries any architecture datum, so its trigger
+    // effects are never held back by the architecture lane's outcome.
+    expect(readPendingPostEditEvents(cwd)).toEqual([]);
+  });
+
+  test('advances the drift cursor only for an acknowledged architecture delivery', () => {
+    const held = gitFixture();
+    writeFileSync(join(held.cwd, 'src-shell-write.ts'), 'export const written = 1;\n');
+    const drainResult = (acknowledgeSourceEvents: boolean) => () => ({
+      schemaVersion: 'repo-harness.architecture-projection-drain/v1' as const,
+      status: acknowledgeSourceEvents ? 'succeeded' as const : 'retry-pending' as const,
+      jobId: 'job-cursor', sourceEventIds: [], resultStatus: null,
+      error: acknowledgeSourceEvents ? null : 'projection failed',
+      acknowledgeSourceEvents,
+      queue: { schemaVersion: 'repo-harness.architecture-projection-queue-state/v1' as const, pending: 0, running: 0, receipts: 0, deadLetters: 0, oldestPendingJobId: null, oldestDeadLetterJobId: null },
+    });
+
+    const heldResult = runStopHandler({
+      collector: collector(held.cwd, () => canonicalState()),
+      env: { ...process.env, PATH: '', HOOK_RUN_ID: 'cursor-held' },
+      dependencies: { drainArchitectureProjection: drainResult(false) },
+    });
+    expect(readArchitectureDriftCursor(held.cwd)).toBeNull();
+    expect(heldResult.stderr).toContain('drift cursor (missing) is unresolvable');
+
+    const advanced = gitFixture();
+    runStopHandler({
+      collector: collector(advanced.cwd, () => canonicalState()),
+      env: { ...process.env, PATH: '', HOOK_RUN_ID: 'cursor-advanced' },
+      dependencies: { drainArchitectureProjection: drainResult(true) },
+    });
+    expect(readArchitectureDriftCursor(advanced.cwd)?.head_sha).toBe(advanced.head);
+  });
+
+  test('retains a committed drift range when the disabled-provider cascade runner is unavailable', () => {
+    const { cwd, head: anchor } = gitFixture();
+    writeFileSync(join(cwd, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"disabled","projection_apply":"disabled"}}\n');
+    advanceArchitectureDriftCursor(cwd, anchor);
+    writeFileSync(join(cwd, 'committed-only.ts'), 'export const committed = true;\n');
+    git(cwd, ['add', 'committed-only.ts']);
+    git(cwd, ['commit', '-m', 'committed drift']);
+
+    const result = runStopHandler({
+      collector: collector(cwd, () => canonicalState()),
+      env: { PATH: '', HOOK_RUN_ID: 'cascade-runner-unavailable' },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain('[ArchitectureProjection] orchestration failed:');
+    expect(result.stderr).toContain('legacy architecture cascade runner is unavailable');
+    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(anchor);
+    expect(computeArchitectureDriftChangedSet(cwd).paths).toContain('committed-only.ts');
+  });
+
+  test('retains a committed drift range when a request-triggered cascade follow-up fails', () => {
+    const { cwd, head: anchor } = gitFixture();
+    writeFileSync(join(cwd, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"disabled","projection_apply":"disabled"}}\n');
+    advanceArchitectureDriftCursor(cwd, anchor);
+    writeFileSync(join(cwd, 'follow-up-failure.ts'), 'export const followUp = true;\n');
+    git(cwd, ['add', 'follow-up-failure.ts']);
+    git(cwd, ['commit', '-m', 'follow-up drift']);
+
+    const stubRoot = mkdtempSync(join(tmpdir(), 'repo-harness-stop-follow-up-'));
+    fixtures.push(stubRoot);
+    const stubCli = join(stubRoot, 'stub-cli.ts');
+    writeFileSync(stubCli, [
+      "const args = process.argv.slice(2);",
+      "if (args[0] === 'run' && args[1] === 'architecture-queue') {",
+      "  process.stdout.write('[ArchitectureDrift] Request: docs/architecture/requests/root.md\\n');",
+      "  process.exit(0);",
+      "}",
+      "if (args[0] === 'run' && args[1] === 'context-contract-sync') process.exit(9);",
+      "process.exit(0);",
+      '',
+    ].join('\n'));
+
+    const result = runStopHandler({
+      collector: collector(cwd, () => canonicalState()),
+      env: { ...process.env, HOOK_RUN_ID: 'cascade-follow-up-failure', REPO_HARNESS_CLI: stubCli },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain('context-contract-sync exited 9');
+    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(anchor);
+    expect(computeArchitectureDriftChangedSet(cwd).paths).toContain('follow-up-failure.ts');
+  });
+
+  test('feeds every shell-written path of a codex fleet session to the architecture cascade', () => {
+    // The reported failure: a Codex worktree session writes exclusively
+    // through shell, so no post-edit journal event exists and drift recording
+    // saw nothing. Every mutation below is a plain fs/git write -- no hook
+    // payload is ever handed to the journal writer.
+    const { cwd } = gitFixture();
+    writeFileSync(join(cwd, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"disabled","projection_apply":"disabled"}}\n');
+    const anchor = git(cwd, ['rev-parse', 'HEAD']);
+
+    const stubRoot = mkdtempSync(join(tmpdir(), 'repo-harness-stop-cascade-'));
+    fixtures.push(stubRoot);
+    const calls = join(stubRoot, 'calls.txt');
+    const stubCli = join(stubRoot, 'stub-cli.ts');
+    writeFileSync(stubCli, [
+      "import { appendFileSync } from 'fs';",
+      "appendFileSync(process.env.STOP_CASCADE_CALLS!, `${process.argv.slice(2).join(' ')}\\n`);",
+      '',
+    ].join('\n'));
+
+    mkdirSync(join(cwd, 'src'), { recursive: true });
+    writeFileSync(join(cwd, 'src/committed-change.ts'), 'export const committed = 1;\n');
+    git(cwd, ['add', '-A']);
+    git(cwd, ['commit', '-m', 'shell commit']);
+    const head = git(cwd, ['rev-parse', 'HEAD']);
+    writeFileSync(join(cwd, 'src/shell-write.ts'), 'export const shellWritten = 1;\n');
+    mkdirSync(join(cwd, 'packages/new-pkg/src'), { recursive: true });
+    writeFileSync(join(cwd, 'packages/new-pkg/src/index.ts'), 'export const added = 1;\n');
+    rmSync(join(cwd, 'README.md'));
+
+    // The commit above already landed, so only a cursor at the earlier anchor
+    // proves the commit range is part of the changed set.
+    advanceArchitectureDriftCursor(cwd, anchor);
+
+    const result = runStopHandler({
+      collector: collector(cwd, () => canonicalState()),
+      env: { ...process.env, HOOK_RUN_ID: 'fleet-shell-writes', REPO_HARNESS_CLI: stubCli, STOP_CASCADE_CALLS: calls },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(readPendingPostEditEvents(cwd)).toEqual([]);
+    expect(readFileSync(calls, 'utf8').trim().split('\n').sort()).toEqual([
+      'run architecture-queue record --file README.md',
+      'run architecture-queue record --file packages/new-pkg/src/index.ts',
+      'run architecture-queue record --file src/committed-change.ts',
+      'run architecture-queue record --file src/shell-write.ts',
+    ]);
+    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(head);
+  }, 30_000);
+
   test('commits the exact four-target projection once before the single state resolution', () => {
     const cwd = fixture();
     const observed: StopProjectionTarget[] = [];
@@ -240,10 +483,10 @@ describe('runStopHandler', () => {
     expect(existsSync(outside)).toBe(false);
   });
 
-  test('readiness wins over plan completeness and delegation without a minimal-change suffix', () => {
+  test('readiness wins over plan completeness without a minimal-change suffix', () => {
     const cwd = fixture();
     seedMinimalChange(cwd);
-    const delegation = seedDelegation(cwd);
+    seedDelegation(cwd);
     mkdirSync(join(cwd, '.ai/harness/planning'), { recursive: true });
     writeFileSync(join(cwd, '.ai/harness/planning/pending.json'), `${JSON.stringify({ kind: 'codex-plan', prompt_slug: 'ordered', created_at: 'now' })}\n`);
 
@@ -259,13 +502,12 @@ describe('runStopHandler', () => {
     expect(result.stdout).toContain('[ReadinessGate]');
     expect(result.stdout).not.toContain('[MinimalChange]');
     expect(existsSync(join(cwd, '.ai/harness/planning/plan-completeness.json'))).toBe(false);
-    expect(JSON.parse(readFileSync(delegation, 'utf8')).fallback_used).toBe(false);
   });
 
-  test('plan completeness wins over delegation and carries the minimal-change suffix', () => {
+  test('plan completeness carries the minimal-change suffix', () => {
     const cwd = fixture();
     seedMinimalChange(cwd);
-    const delegation = seedDelegation(cwd);
+    seedDelegation(cwd);
     mkdirSync(join(cwd, '.ai/harness/planning'), { recursive: true });
     writeFileSync(join(cwd, '.ai/harness/planning/pending.json'), `${JSON.stringify({ kind: 'codex-plan', prompt_slug: 'ordered', created_at: 'now' })}\n`);
 
@@ -280,11 +522,9 @@ describe('runStopHandler', () => {
 
     expect(result.stdout).toContain('[PlanCompletenessGate]');
     expect(result.stdout).toContain('[MinimalChange]');
-    expect(result.stdout).not.toContain('[DelegationFallback]');
-    expect(JSON.parse(readFileSync(delegation, 'utf8')).fallback_used).toBe(false);
   });
 
-  test('delegation fallback is last, carries the suffix, and lite skips it', () => {
+  test('explicit delegation state never authorizes a Stop-time alternate runner', () => {
     const cwd = fixture();
     seedMinimalChange(cwd);
     const delegation = seedDelegation(cwd);
@@ -293,9 +533,12 @@ describe('runStopHandler', () => {
       input: JSON.stringify({ turn_id: 'ordered' }),
       env: { HOOK_RUN_ID: 'stop-delegation-last' },
     });
-    expect(standard.stdout).toContain('[DelegationFallback]');
-    expect(standard.stdout).toContain('[MinimalChange]');
-    expect(JSON.parse(readFileSync(delegation, 'utf8')).fallback_used).toBe(true);
+    expect(standard.stdout).toBe('');
+    expect(JSON.parse(readFileSync(delegation, 'utf8'))).toMatchObject({
+      explicit: true,
+      spawned: false,
+    });
+    expect(readFileSync(delegation, 'utf8')).not.toContain('fallback_used');
 
     const liteCwd = fixture();
     const liteDelegation = seedDelegation(liteCwd);
@@ -305,6 +548,6 @@ describe('runStopHandler', () => {
       env: { HOOK_RUN_ID: 'stop-lite' },
     });
     expect(lite.stdout).toBe('');
-    expect(JSON.parse(readFileSync(liteDelegation, 'utf8')).fallback_used).toBe(false);
+    expect(readFileSync(liteDelegation, 'utf8')).not.toContain('fallback_used');
   });
 });

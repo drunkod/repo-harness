@@ -107,7 +107,45 @@ describe('mutation-observed: non-qualifying edits', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
+
+  test('an out-of-repository absolute path writes no journal event', () => {
+    const cwd = tmpWorkspace('mo-out-of-repo');
+    const outside = tmpWorkspace('mo-outside');
+    try {
+      initRepo(cwd);
+      mkdirSync(join(outside, 'plans'), { recursive: true });
+      writeFileSync(join(outside, 'plans', 'session-plan.md'), '# host-side plan\n');
+      const result = runMutationObserved({
+        collector: collectorFor(cwd),
+        input: editPayload(join(outside, 'plans', 'session-plan.md')),
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('');
+      expect(pendingEvents(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('a traversal-escaping relative path writes no journal event', () => {
+    const cwd = tmpWorkspace('mo-traversal-escape');
+    try {
+      initRepo(cwd);
+      const result = runMutationObserved({
+        collector: collectorFor(cwd),
+        input: editPayload('../escaped.md'),
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('');
+      expect(pendingEvents(cwd)).toEqual([]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe('mutation-observed: journal schema', () => {
@@ -126,7 +164,8 @@ describe('mutation-observed: journal schema', () => {
       expect(events.length).toBe(1);
       const event = events[0];
       expect(event.schema).toBe('change_observed');
-      expect(event.schema_version).toBe(1);
+      expect(event.schema_version).toBe(2);
+      expect(event.source_key).toMatch(/^[a-f0-9]{20}$/);
       expect(event.session_id).toBe('session-a');
       expect(event.changed_paths).toEqual(['src/example.ts']);
       expect(event.subject_revision).toMatch(/^[0-9a-f]{12}$/);
@@ -137,23 +176,67 @@ describe('mutation-observed: journal schema', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
 
 describe('mutation-observed: dirty-bit derivation', () => {
-  test('architecture, context, and capability are unconditionally true for any qualifying edit', () => {
+  test('context and capability are unconditionally true, and no architecture bit is written', () => {
     const cwd = tmpWorkspace('mo-arch-bits');
     try {
       initRepo(cwd);
       runMutationObserved({ collector: collectorFor(cwd), input: editPayload('src/unrelated.ts') });
       const [event] = pendingEvents(cwd);
-      expect(event.dirty.architecture).toBe(true);
       expect(event.dirty.context).toBe(true);
       expect(event.dirty.capability).toBe(true);
+      // The architecture changed set is git-derived at Stop
+      // (src/cli/hook/architecture-drift.ts); the journal carries no
+      // architecture datum for any consumer to read.
+      expect(Object.keys(event.dirty)).not.toContain('architecture');
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
+
+  test('a codex apply_patch PostToolUse payload stays a clean no-op', () => {
+    const cwd = tmpWorkspace('mo-apply-patch');
+    try {
+      initRepo(cwd);
+      // Codex 0.147.0 apply_patch reaches this route but carries its targets
+      // inside `tool_input.command`, which this single-path handler does not
+      // expand. That blindness is why the architecture changed set moved to
+      // git; the remaining journal bits are Claude Edit/Write-shaped, so the
+      // payload must stay a no-op rather than grow a second path extractor.
+      const result = runMutationObserved({
+        collector: collectorFor(cwd),
+        input: JSON.stringify({
+          session_id: 'codex-fleet-session',
+          hook_event_name: 'PostToolUse',
+          tool_name: 'apply_patch',
+          tool_input: {
+            command: [
+              '*** Begin Patch',
+              '*** Update File: src/broker.ts',
+              '@@',
+              '-const value = 1;',
+              '+const value = 2;',
+              '*** Add File: packages/cloud-postgres/src/index.ts',
+              '+export const added = true;',
+              '*** End Patch',
+              '',
+            ].join('\n'),
+          },
+        }),
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('');
+      expect(pendingEvents(cwd)).toEqual([]);
+      expect(existsSync(join(cwd, '.ai/harness/journal/post-edit/pending'))).toBe(false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test('contract-verification is true only when the active contract\'s exit_criteria references the edited path', () => {
     const cwd = tmpWorkspace('mo-contract-bit');
@@ -186,7 +269,7 @@ describe('mutation-observed: dirty-bit derivation', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('contract-verification is false with no active plan', () => {
     const cwd = tmpWorkspace('mo-contract-bit-no-plan');
@@ -198,7 +281,7 @@ describe('mutation-observed: dirty-bit derivation', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('minimal-change reflects policy.minimal_change.mode/post_edit_observer', () => {
     const cwd = tmpWorkspace('mo-minimal-change-bit');
@@ -228,7 +311,7 @@ describe('mutation-observed: dirty-bit derivation', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('checkpoint is true for tasks/todos.md, plans/*.md, tasks/reviews/*.review.md, and .ai/harness/checks/latest.json, false otherwise', () => {
     const cwd = tmpWorkspace('mo-checkpoint-bit');
@@ -255,11 +338,11 @@ describe('mutation-observed: dirty-bit derivation', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
 
 describe('mutation-observed: session-scoped dedupe', () => {
-  test('a same-session edit to the same path coalesces into the same pending file', () => {
+  test('a same-session edit coalesces into the same pending file and advances delivery identity', () => {
     const cwd = tmpWorkspace('mo-coalesce');
     try {
       initRepo(cwd);
@@ -268,18 +351,37 @@ describe('mutation-observed: session-scoped dedupe', () => {
       const firstEvents = pendingEvents(cwd);
       expect(firstEvents.length).toBe(1);
       const firstEventId = firstEvents[0].event_id;
+      const firstSourceKey = firstEvents[0].source_key;
       const firstCreatedAt = firstEvents[0].created_at;
+      const firstNames = readdirSync(join(cwd, '.ai/harness/journal/post-edit/pending'));
 
       runMutationObserved({ collector: collectorFor(cwd), input: editPayload('src/repeat.ts'), env });
       const secondEvents = pendingEvents(cwd);
       expect(secondEvents.length).toBe(1);
-      expect(secondEvents[0].event_id).toBe(firstEventId);
+      expect(readdirSync(join(cwd, '.ai/harness/journal/post-edit/pending'))).toEqual(firstNames);
+      expect(secondEvents[0].event_id).not.toBe(firstEventId);
+      expect(secondEvents[0].source_key).toBe(firstSourceKey);
       expect(secondEvents[0].created_at).toBe(firstCreatedAt);
       expect(secondEvents[0].changed_paths).toEqual(['src/repeat.ts']);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
+
+  test('a same-session edit after acknowledgement creates a new delivery identity', () => {
+    const cwd = tmpWorkspace('mo-new-delivery-after-ack');
+    try {
+      initRepo(cwd);
+      const env = { ...process.env, HOOK_SESSION_ID: 'session-x' };
+      runMutationObserved({ collector: collectorFor(cwd), input: editPayload('src/repeat.ts'), env });
+      const firstEventId = pendingEvents(cwd)[0].event_id;
+      consumePendingPostEditEvents(cwd, env);
+      runMutationObserved({ collector: collectorFor(cwd), input: editPayload('src/repeat.ts'), env });
+      expect(pendingEvents(cwd)[0].event_id).not.toBe(firstEventId);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test('a different session editing the same path does NOT coalesce (separate pending events)', () => {
     const cwd = tmpWorkspace('mo-no-coalesce-cross-session');
@@ -299,7 +401,7 @@ describe('mutation-observed: session-scoped dedupe', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('dirty bits are OR-combined (monotonic) across a coalesced pair, not overwritten', () => {
     const cwd = tmpWorkspace('mo-coalesce-or');
@@ -335,7 +437,7 @@ describe('mutation-observed: session-scoped dedupe', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
 
 describe('mutation-observed: crash-replay', () => {
@@ -377,7 +479,7 @@ describe('mutation-observed: crash-replay', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('consumePendingPostEditEvents is a clean no-op with nothing pending', () => {
     const cwd = tmpWorkspace('mo-consume-empty');
@@ -388,7 +490,7 @@ describe('mutation-observed: crash-replay', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('a corrupt pending file is removed at consumption with a stderr warning, without disturbing valid events', () => {
     const cwd = tmpWorkspace('mo-corrupt-pending');
@@ -431,7 +533,7 @@ describe('mutation-observed: crash-replay', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
 
 describe('mutation-observed: advisory stdout parity', () => {
@@ -446,7 +548,7 @@ describe('mutation-observed: advisory stdout parity', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('first-principles guidance is rendered in-process from the current diff', () => {
     const cwd = tmpWorkspace('mo-first-principles');
@@ -467,7 +569,7 @@ describe('mutation-observed: advisory stdout parity', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('turbo.json and metro config advisories match the base script verbatim', () => {
     const cwd = tmpWorkspace('mo-advisories-misc');
@@ -485,7 +587,7 @@ describe('mutation-observed: advisory stdout parity', () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
 
 describe('mutation-observed: gitignore coverage (gate round-1 second widening)', () => {
@@ -511,5 +613,5 @@ describe('mutation-observed: gitignore coverage (gate round-1 second widening)',
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

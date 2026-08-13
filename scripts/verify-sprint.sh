@@ -424,24 +424,24 @@ allowed_paths_check_json() {
 # the ledger yet, so skipping emission here satisfies nothing and changes no
 # verify-run semantics.
 #
-# Companion-script resolution mirrors the existing $helper_dir/acceptance-receipt.ts
-# sibling lookup (both are deployed side-by-side by the same helper-sync
-# mechanism); REPO_HARNESS_SOURCE_ROOT is the same source-authority fallback
-# workflow_source_authority_call already uses below for hook-CLI resolution,
-# reused here rather than inventing a second mechanism. A deployed-helper
-# context (e.g. an adopted repo, or these fixture-based helper tests) has no
-# src/ tree at all, so when neither resolves this is indistinguishable from
-# "cannot bind" -- treated the same way (skip, do not fail).
+# The package runner executes this helper from assets/templates/helpers while
+# the authoritative emitter ships under scripts/. Direct source-helper runs
+# already find the emitter as a sibling. REPO_HARNESS_SOURCE_ROOT remains the
+# explicit source-checkout override used by the other source-authority calls.
+# When none resolves, emission still fails closed as "cannot bind".
 emit_verify_evidence() {
   local command_line="$1"
   local run_trace_file="$2"
   local status="${3:-pass}"
   local emit_script="$helper_dir/emit-verify-evidence.ts"
+  local package_emit_script="$helper_dir/../../../scripts/emit-verify-evidence.ts"
   if [[ ! -f "$emit_script" ]]; then
-    if [[ -n "${REPO_HARNESS_SOURCE_ROOT:-}" && -f "${REPO_HARNESS_SOURCE_ROOT}/scripts/emit-verify-evidence.ts" ]]; then
+    if [[ -f "$package_emit_script" ]]; then
+      emit_script="$package_emit_script"
+    elif [[ -n "${REPO_HARNESS_SOURCE_ROOT:-}" && -f "${REPO_HARNESS_SOURCE_ROOT}/scripts/emit-verify-evidence.ts" ]]; then
       emit_script="${REPO_HARNESS_SOURCE_ROOT}/scripts/emit-verify-evidence.ts"
     else
-      echo "verify-sprint: evidence emission cannot bind: no $helper_dir/emit-verify-evidence.ts and no usable REPO_HARNESS_SOURCE_ROOT fallback in this deployed-helper context; skipping emission, verify result unchanged" >&2
+      echo "verify-sprint: evidence emission cannot bind: no $helper_dir/emit-verify-evidence.ts, no $package_emit_script, and no usable REPO_HARNESS_SOURCE_ROOT override; skipping emission, verify result unchanged" >&2
       return 3
     fi
   fi
@@ -545,13 +545,25 @@ finalize_prepared_acceptance() {
     --contract "$contract_file" --verification "$checks_file" --review "$review_file" >/dev/null
 
   finalized_checks="$(mktemp)"
+  # `$checks_file` is a materialized projection, not a run trace: the
+  # materializer (src/effects/evidence/checks-materializer.ts) appends its own
+  # `provenance` block to whatever run trace it projects. Re-emitting that
+  # block as payload would make the next materialization record
+  # `content_hash = sha256(run_trace including the previous provenance)` while
+  # publishing a file whose consumer-facing content excludes it, so the
+  # published projection could no longer be recomputed from its own bytes
+  # (tests/evidence-projection-drift.test.ts's live self-consistency check).
+  # `provenance` is materializer-owned derived metadata; strip it here so the
+  # emitted run trace is a run trace again and the next projection is
+  # self-consistent by construction -- no second hash implementation.
   jq \
     --arg reviewer "$acceptance_reviewer" \
     --arg source "$acceptance_source" \
     --arg disposition "$acceptance_disposition" \
     --arg message "$acceptance_message" \
     '
-      .acceptance_receipt = {
+      del(.provenance)
+      | .acceptance_receipt = {
         status: "pass",
         disposition: $disposition,
         reviewer: $reviewer,

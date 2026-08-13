@@ -7,12 +7,12 @@
  */
 
 import { Command } from 'commander';
-import { readFileSync } from 'fs';
+import { readFileSync, realpathSync } from 'fs';
+import { homedir } from 'os';
 import { createInterface } from 'readline/promises';
 import { askConfirm } from './tty-prompt';
 import { runInstall, runUninstall, type InstallTargetSpec } from './commands/install';
 import { writeAllSync } from './runtime/write-all-sync';
-import { configuredDelegationMode, type DelegationMode } from './commands/delegation-mode';
 import { runInit, type InitBrainMode } from './commands/init';
 import { runHook } from './commands/hook';
 import { CLI_VERSION, formatStatus, runStatus } from './commands/status';
@@ -29,6 +29,7 @@ import { buildMcpCommand } from './commands/mcp';
 import { buildChatgptCommand } from './commands/chatgpt';
 import { buildRunCommand } from './commands/run';
 import { buildStateCommand } from './commands/state';
+import { buildArchitectureProjectionCommand } from './commands/architecture-projection';
 import { formatSecurityScan, runSecurityScan } from './commands/security';
 import { runGlobalRuntimeSetup, type GlobalRuntimeOptions, type GlobalRuntimeResult } from './commands/global-runtime';
 import {
@@ -59,12 +60,12 @@ import { runReviewRubricCli } from './hook/review-rubric';
 import { runReviewSubjectCli } from './hook/review-subject';
 import { runAdoptionPlan } from './commands/adoption-plan';
 import { rollbackAdoptionTransaction } from '../effects/fs-transaction';
+import { withExclusiveDirectoryLock } from '../effects/locking/exclusive-directory-lock';
 import {
   assertTarget,
   assertLocation,
   assertAdoptionMode,
   assertBrainMode,
-  assertDelegationMode,
 } from './commands/validators';
 import type { HookEvent, RouteId } from './hook/route-registry';
 import type { Location } from './installer/types';
@@ -89,6 +90,7 @@ export const SUBCOMMANDS = [
   'mcp',
   'chatgpt',
   'state',
+  'architecture-projection',
 ] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
@@ -101,6 +103,7 @@ interface GlobalRuntimeCommandOptions {
   syncSkill?: boolean;
   hooks?: string | false;
   externalSkills?: boolean;
+  withReverseSkill?: boolean;
   codegraph?: boolean;
   brainRoot?: string;
   json?: boolean;
@@ -124,13 +127,12 @@ export interface ResolveOptionalRuntimeDepsOptions {
  * Resolve the two user-selectable optional dependencies (external skills,
  * CodeGraph) for the `init`/`install` global runtime bootstrap.
  *
- * Non-interactive (non-TTY, or `--json`): unchanged from today — default on,
- * `--no-external-skills`/`--no-codegraph` opt out.
+ * Non-interactive (non-TTY, or `--json`): mutable external skills are opt-in;
+ * CodeGraph follows the command's explicit/default option value.
  *
  * Interactive: for each item not explicitly passed on the CLI (i.e. its
- * option value source isn't `'cli'`), prompt; Enter/`y` keeps today's
- * default-on outcome, `n` skips it. An explicitly passed `--no-*` flag is
- * honored without prompting.
+ * option value source isn't `'cli'`), prompt; Enter/`y` keeps the command's
+ * configured default, `n` skips it. Explicit flags are honored without prompting.
  */
 export async function resolveOptionalRuntimeDeps(
   rawOpts: GlobalRuntimeCommandOptions,
@@ -161,64 +163,6 @@ export async function resolveOptionalRuntimeDeps(
   return { externalSkills, codegraph };
 }
 
-export interface ResolveDelegationModeOptions {
-  interactive: boolean;
-  input?: NodeJS.ReadableStream;
-  output?: NodeJS.WritableStream;
-}
-
-/**
- * Resolve the Codex delegation-mode choice for `install --location global`.
- * Only applies to the codex/both targets at the global location — every
- * other combination (notably --target claude) resolves to `undefined`
- * without prompting or touching `~/.repo-harness/config.json`.
- *
- * Non-interactive: an explicit `--delegation-mode <mode>` always wins
- * (validated; exits 2 on an unknown value). With no flag and no TTY, this
- * returns `undefined` so the caller skips the config write entirely — no
- * silent default is ever persisted.
- *
- * Interactive: reuses the shared Y/n `askConfirm` helper, framed as keeping
- * vs. switching away from the resolved default (the value already persisted
- * in `~/.repo-harness/config.json`, else "explicit").
- */
-export async function resolveDelegationMode(
-  rawOpts: { target: InstallTargetSpec; delegationMode?: string },
-  location: Location,
-  cmd: OptionSourceLookup | undefined,
-  opts: ResolveDelegationModeOptions,
-): Promise<DelegationMode | undefined> {
-  const applies = location === 'global' && rawOpts.target !== 'claude';
-
-  if (rawOpts.delegationMode !== undefined) {
-    const validated = assertDelegationMode(rawOpts.delegationMode, 'install');
-    return applies ? validated : undefined;
-  }
-  if (!applies || !opts.interactive || cmd?.getOptionValueSource('delegationMode') === 'cli') {
-    return undefined;
-  }
-
-  const input = opts.input ?? process.stdin;
-  const output = opts.output ?? process.stdout;
-  const rl = createInterface({ input, output, terminal: false });
-  try {
-    const current = configuredDelegationMode() ?? 'explicit';
-    const other: DelegationMode = current === 'auto' ? 'explicit' : 'auto';
-    const detail = (mode: DelegationMode): string =>
-      mode === 'auto'
-        ? 'hook injects bounded-delegation context on substantive prompts; policy standing authorization'
-        : 'only on /parallel, /delegate, explicit delegation wording';
-    const keepCurrent = await askConfirm(
-      rl,
-      output,
-      `Codex delegation mode: keep "${current}" (${detail(current)}) instead of "${other}" (${detail(other)})?`,
-    );
-    return keepCurrent ? current : other;
-  } finally {
-    rl.close();
-  }
-}
-
 function runTransactionalProfileProjection(
   profile: InstallProfile,
   options: GlobalRuntimeOptions,
@@ -231,32 +175,87 @@ function runTransactionalProfileProjection(
     return null;
   },
 ): { result: GlobalRuntimeResult; state: InstalledProfileState | null } {
-  const transaction = beginInstallHostTransaction(installProfileHostMutationPaths(options.env), options.env);
-  let migrationSource: LegacyInstalledProfileState | null;
-  let result: GlobalRuntimeResult;
-  try {
-    migrationSource = prepareProjection();
-    result = runGlobalRuntimeSetup(options);
-  } catch (error) {
-    rollbackInstallHostTransaction(transaction);
-    throw error;
-  }
-  if (result.exitCode !== 0) {
-    rollbackInstallHostTransaction(transaction);
-    return { result, state: null };
-  }
-  try {
-    const state = commitState(transaction, migrationSource);
-    commitInstallHostTransaction(transaction);
-    return { result, state };
-  } catch (error) {
+  const transactionEnv = runtimeHostTransactionEnv(options.env);
+  return withRuntimeHostTransactionLock(transactionEnv, () => {
+    const transaction = beginInstallHostTransaction(installProfileHostMutationPaths(transactionEnv), transactionEnv);
+    let migrationSource: LegacyInstalledProfileState | null;
+    let result: GlobalRuntimeResult;
     try {
+      migrationSource = prepareProjection();
+      result = runGlobalRuntimeSetup(options);
+    } catch (error) {
       rollbackInstallHostTransaction(transaction);
-    } catch (rollbackError) {
-      throw new AggregateError([error, rollbackError], `install profile ${profile} failed and compensation was incomplete`);
+      throw error;
     }
-    throw error;
-  }
+    if (result.exitCode !== 0) {
+      rollbackInstallHostTransaction(transaction);
+      return { result, state: null };
+    }
+    try {
+      const state = commitState(transaction, migrationSource);
+      commitInstallHostTransaction(transaction);
+      return { result, state };
+    } catch (error) {
+      try {
+        rollbackInstallHostTransaction(transaction);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], `install profile ${profile} failed and compensation was incomplete`);
+      }
+      throw error;
+    }
+  });
+}
+
+function runtimeHostTransactionEnv(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    ...env,
+    HOME: env?.HOME ?? process.env.HOME ?? homedir(),
+  };
+}
+
+function withRuntimeHostTransactionLock<T>(env: NodeJS.ProcessEnv | undefined, run: () => T): T {
+  // Resolve the protected root with the same precedence as runtime mutations.
+  // A partial injected env must not make the lock fall back to a different HOME.
+  const home = env?.HOME ?? process.env.HOME ?? homedir();
+  return withExclusiveDirectoryLock(
+    realpathSync(home),
+    '.repo-harness/transactions/global-runtime.lock',
+    run,
+    { reclaimStaleOwner: true },
+  );
+}
+
+export function runTransactionalRuntimeRefresh(
+  options: GlobalRuntimeOptions,
+  setup: (options: GlobalRuntimeOptions) => GlobalRuntimeResult = runGlobalRuntimeSetup,
+): GlobalRuntimeResult {
+  const transactionEnv = runtimeHostTransactionEnv(options.env);
+  return withRuntimeHostTransactionLock(transactionEnv, () => {
+    const transaction = beginInstallHostTransaction(installProfileHostMutationPaths(transactionEnv), transactionEnv);
+    let result: GlobalRuntimeResult;
+    try {
+      result = setup(options);
+    } catch (error) {
+      rollbackInstallHostTransaction(transaction);
+      throw error;
+    }
+    if (result.exitCode !== 0) {
+      rollbackInstallHostTransaction(transaction);
+      return result;
+    }
+    try {
+      commitInstallHostTransaction(transaction);
+      return result;
+    } catch (error) {
+      try {
+        rollbackInstallHostTransaction(transaction);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], 'runtime refresh failed and compensation was incomplete');
+      }
+      throw error;
+    }
+  });
 }
 
 async function runGlobalRuntimeBootstrap(
@@ -306,6 +305,7 @@ async function runGlobalRuntimeBootstrap(
     syncSkill: rawOpts.syncSkill !== false,
     hostAdapters: rawOpts.hooks !== false,
     externalSkills,
+    reverseSkill: rawOpts.withReverseSkill === true,
     codegraph,
     brainRoot: rawOpts.brainRoot,
     profile,
@@ -349,18 +349,15 @@ export function buildProgram(): Command {
     .option('--state', 'Print effective installed profile state without writing')
     .option('--rollback', 'Restore the previous installed profile state')
     .option('--location <location>', `Adapter-only install location: ${LOCATION_HELP}`)
-    .option(
-      '--delegation-mode <mode>',
-      'Codex delegation mode for --location global installs (codex/both targets only): auto|explicit',
-    )
     .option('--no-cli', 'Skip installing the repo-harness CLI globally')
     .option('--no-sync-skill', 'Skip refreshing repo-harness skill aliases under host skill roots')
     .option('--no-hooks', 'Skip global hook adapter installation during full runtime install')
-    .option('--no-external-skills', 'Skip Waza, Mermaid, and cross-review (repo-harness-cross-review/claude-plan) skill bootstrap')
+    .option('--no-external-skills', 'Skip mutable third-party Waza and Mermaid skill bootstrap')
+    .option('--with-reverse-skill', 'Explicitly install the high-risk reverse-skill-router after independent authorization review')
     .option('--no-codegraph', 'Skip CodeGraph CLI/MCP configuration')
     .option('--brain-root <path>', 'Brain vault root to persist for repo-harness brain commands')
     .option('--json', 'Output JSON instead of human-readable text')
-    .action(async (rawOpts: GlobalRuntimeCommandOptions & { location?: string; delegationMode?: string; state?: boolean; rollback?: boolean }, cmd: Command) => {
+    .action(async (rawOpts: GlobalRuntimeCommandOptions & { location?: string; state?: boolean; rollback?: boolean }, cmd: Command) => {
       const target = assertTarget(rawOpts.target, 'install');
       if (
         rawOpts.migrateProfileState === true
@@ -405,19 +402,14 @@ export function buildProgram(): Command {
       // state cannot be mixed with a new protocol-2 route projection.
       readInstalledProfile();
       const location = assertLocation(rawOpts.location!, 'install');
-      const interactive = process.stdin.isTTY === true && process.stdout.isTTY === true && rawOpts.json !== true;
-      const delegationMode = await resolveDelegationMode(
-        { target, delegationMode: rawOpts.delegationMode },
-        location,
-        cmd,
-        { interactive },
-      );
-      const result = runInstall({
+      const installAdapters = () => runInstall({
         target,
         location,
-        delegationMode,
         profile: assertInstallProfile(rawOpts.profile ?? 'full'),
       });
+      const result = location === 'global'
+        ? withRuntimeHostTransactionLock(process.env, installAdapters)
+        : installAdapters();
       for (const line of result.lines) console.log(line);
       process.exit(result.exitCode);
     });
@@ -537,10 +529,11 @@ export function buildProgram(): Command {
     .option('--no-cli', 'Skip installing the repo-harness CLI globally')
     .option('--no-sync-skill', 'Skip refreshing repo-harness skill aliases under host skill roots')
     .option('--no-hooks', 'Skip global hook adapter installation')
-    .option('--with-external-skills', 'Also bootstrap third-party Waza, Mermaid, and cross-review skills')
-    .option('--no-external-skills', 'Compatibility no-op; update no longer bootstraps third-party skills by default')
-    .option('--configure-codegraph', 'Also configure CodeGraph CLI/MCP during runtime refresh')
-    .option('--no-codegraph', 'Compatibility no-op; update no longer configures CodeGraph by default')
+    .option('--with-external-skills', 'Also refresh mutable third-party Waza and Mermaid providers')
+    .option('--with-reverse-skill', 'Explicitly install the high-risk reverse-skill-router after independent authorization review')
+    .option('--no-external-skills', 'Do not refresh third-party Waza and Mermaid providers (default)')
+    .option('--configure-codegraph', 'Refresh CodeGraph CLI/MCP (default during update)')
+    .option('--no-codegraph', 'Skip refreshing the global CodeGraph CLI/MCP')
     .option('--brain-root <path>', 'Brain vault root for manifest sync')
     .option('--repo <path>', 'Deprecated: use repo-harness init --repo <path>')
     .option('--dry-run', 'Deprecated: use repo-harness init --dry-run for repo-level planning')
@@ -559,6 +552,7 @@ export function buildProgram(): Command {
       syncSkill?: boolean;
       hooks?: string | false;
       withExternalSkills?: boolean;
+      withReverseSkill?: boolean;
       externalSkills?: boolean;
       codegraph?: boolean;
       configureCodegraph?: boolean;
@@ -590,14 +584,16 @@ export function buildProgram(): Command {
         : rawOpts.channel
           ? `repo-harness@${rawOpts.channel}`
           : 'repo-harness@latest';
-      const result = runGlobalRuntimeSetup({
+      const result = runTransactionalRuntimeRefresh({
         target,
         installCli: rawOpts.cli !== false,
         installSpec,
+        updateMode: true,
         syncSkill: rawOpts.syncSkill !== false,
         hostAdapters: rawOpts.hooks !== false,
-        externalSkills: rawOpts.withExternalSkills === true,
-        codegraph: rawOpts.configureCodegraph === true,
+        externalSkills: rawOpts.externalSkills === false ? false : rawOpts.withExternalSkills === true ? true : undefined,
+        reverseSkill: rawOpts.withReverseSkill === true,
+        codegraph: rawOpts.codegraph === false ? false : rawOpts.configureCodegraph === true ? true : undefined,
         brainRoot: rawOpts.brainRoot,
       });
       if (rawOpts.json === true) {
@@ -616,10 +612,10 @@ export function buildProgram(): Command {
     .action((rawOpts: { target: string; location: string }) => {
       const target = assertTarget(rawOpts.target, 'uninstall');
       const location = assertLocation(rawOpts.location, 'uninstall');
-      const result = runUninstall({
-        target,
-        location,
-      });
+      const uninstallAdapters = () => runUninstall({ target, location });
+      const result = location === 'global'
+        ? withRuntimeHostTransactionLock(process.env, uninstallAdapters)
+        : uninstallAdapters();
       for (const line of result.lines) console.log(line);
       process.exit(result.exitCode);
     });
@@ -630,9 +626,16 @@ export function buildProgram(): Command {
     .argument('<event>', 'Hook event name')
     .requiredOption('--route <route>', 'Route id (default, edit, bash, always)')
     .action((event: string, rawOpts: { route: string }) => {
+      let input: Buffer | undefined;
+      try {
+        input = readFileSync(0);
+      } catch {
+        input = undefined;
+      }
       const result = runHook({
         event: event as HookEvent,
         routeId: rawOpts.route as RouteId,
+        input,
       });
       process.exit(result.exitCode);
     });
@@ -718,6 +721,7 @@ export function buildProgram(): Command {
   program.addCommand(buildChatgptCommand());
   program.addCommand(buildRunCommand());
   program.addCommand(buildStateCommand());
+  program.addCommand(buildArchitectureProjectionCommand());
   program
     .command('circuit-breaker-record', { hidden: true })
     .description('Internal persistent workflow circuit breaker')

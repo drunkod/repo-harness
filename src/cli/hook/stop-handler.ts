@@ -22,12 +22,14 @@ import { randomBytes } from 'crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { execFileSync } from 'child_process';
 import type { EffectiveState } from '../../core/state/types';
+import { consumePendingPostEditEvents, processArchitectureCascade } from './mutation-observed';
 import {
-  delegationScope,
-  type DelegationScope,
-  withDelegationStateTransaction,
-} from './delegation-state';
-import { consumePendingPostEditEvents } from './mutation-observed';
+  advanceArchitectureDriftCursor,
+  architectureDriftSourceEvent,
+  computeArchitectureDriftChangedSet,
+} from './architecture-drift';
+import { drainArchitectureProjectionJobs, type ArchitectureProjectionDrainResultV1 } from '../../effects/architecture/projection-orchestrator';
+import { loadArchitectureProjectionPolicy } from '../../effects/architecture/archctx-provider';
 import { runMinimalChangeCli } from './minimal-change-cli';
 import { publishCheckpointFromLedger } from '../../effects/evidence/checkpoint-store';
 import {
@@ -54,7 +56,7 @@ export interface StopHandlerDependencies {
   readonly observeProjectionWrite?: (target: StopProjectionTarget) => void;
   /** Invoked once after the complete Stop projection batch commits. */
   readonly observeProjectionTransaction?: () => void;
-  readonly beforeDelegationLock?: () => void;
+  readonly drainArchitectureProjection?: (repoRoot: string, env: NodeJS.ProcessEnv) => ArchitectureProjectionDrainResultV1;
 }
 
 export interface StopHandlerInput {
@@ -285,51 +287,6 @@ class StopProjectionBatch {
   }
 }
 
-function claimDelegationFallback(
-  repoRoot: string,
-  payload: StopPayload,
-  env: NodeJS.ProcessEnv,
-  now: Date,
-  beforeLock?: () => void,
-): boolean {
-  const scope = delegationScope(
-    payload as unknown as Record<string, unknown>,
-    env,
-  );
-  const scopes: readonly DelegationScope[] = scope ? [scope] : [];
-  // Keep the rendezvous seam immediately before lock acquisition. The
-  // transaction itself rereads latest and scoped state after acquisition.
-  beforeLock?.();
-  try {
-    return withDelegationStateTransaction(repoRoot, scopes, (transaction) => {
-      const state = transaction.snapshot.state;
-      if (!state) return false;
-      const created = Number(state.created_at_epoch);
-      const age = Number.isFinite(created) ? Math.floor(now.getTime() / 1000) - created : 0;
-      const eligible = state.eligible === true
-        && state.explicit === true
-        && state.spawned !== true
-        && state.fallback_used !== true
-        && state.stop_fallback !== false
-        && age >= 0
-        && age <= 24 * 60 * 60;
-      if (!eligible) return false;
-      const timestamp = now.toISOString();
-      const committed = transaction.commit({
-        ...state,
-        fallback_used: true,
-        fallback_used_at: timestamp,
-        updated_at: timestamp,
-      });
-      return committed !== null;
-    });
-  } catch {
-    // Hook availability is intentionally fail-open when the shared lock is
-    // unavailable or a state projection is malformed.
-    return false;
-  }
-}
-
 function projection(repoRoot: string, activePlan: string | null, env: NodeJS.ProcessEnv, now: Date): {
   paths: ProjectionPaths;
   content: { handoff: string; resume: string; event: string; runSummary: string };
@@ -484,10 +441,36 @@ export function runStopHandler(opts: StopHandlerInput): StopHandlerResult {
   const activePlanMarker = opts.collector.getActivePlanMarker();
   const activePlan = ownership.owner === null || ownership.ownedByCurrent ? activePlanMarker : null;
 
+  let architectureDrain: ArchitectureProjectionDrainResultV1 | null = null;
+  let architectureDrainError = '';
+  let journalSideEffectError = '';
+  let driftWarnings: readonly string[] = [];
+  try {
+    const changedSet = computeArchitectureDriftChangedSet(repoRoot);
+    driftWarnings = changedSet.warnings;
+    const driftEvent = architectureDriftSourceEvent(changedSet);
+    architectureDrain = dependencies.drainArchitectureProjection?.(repoRoot, env)
+      ?? drainArchitectureProjectionJobs(repoRoot, { env, sourceEvents: driftEvent ? [driftEvent] : [] });
+    if (architectureDrain.status === 'disabled') {
+      for (const changedPath of changedSet.paths) {
+        const cascade = processArchitectureCascade(repoRoot, env, changedPath);
+        if (!cascade.ok) throw new Error(cascade.error);
+      }
+    }
+    // The cursor is the retry boundary: it only moves past a range the
+    // consumer acknowledged, so a retry-pending, dead-lettered, or throwing
+    // drain replays the same range on the next Stop.
+    if (architectureDrain.acknowledgeSourceEvents && changedSet.headSha !== null) {
+      advanceArchitectureDriftCursor(repoRoot, changedSet.headSha, now);
+    }
+  } catch (error) {
+    architectureDrainError = error instanceof Error ? error.message : String(error);
+  }
   try {
     consumePendingPostEditEvents(repoRoot, env);
-  } catch {
-    // Deferred journal housekeeping never blocks Stop.
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    journalSideEffectError = message;
   }
 
   // EPC-07 (reordered from EPC-06's additive placement, documented in
@@ -520,6 +503,36 @@ export function runStopHandler(opts: StopHandlerInput): StopHandlerResult {
   dependencies.observeProjectionTransaction?.();
 
   const stderr: string[] = [`[FinalizeHandoff] Refreshed ${projected.paths.handoff}.\n`];
+  for (const warning of driftWarnings) stderr.push(`${warning}\n`);
+  if (architectureDrain?.status === 'retry-pending' || architectureDrain?.status === 'dead-letter') {
+    stderr.push(`[ArchitectureProjection] ${architectureDrain.status}: ${architectureDrain.error ?? 'unknown failure'}\n`);
+  } else if (architectureDrainError) {
+    stderr.push(`[ArchitectureProjection] orchestration failed: ${architectureDrainError}\n`);
+  }
+  if (journalSideEffectError) stderr.push(`[PostEditJournal] side effects failed: ${journalSideEffectError}\n`);
+  let architectureGate: 'advisory' | 'strict' = 'advisory';
+  try {
+    architectureGate = loadArchitectureProjectionPolicy(repoRoot).failureGate;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    architectureDrainError = architectureDrainError ? `${architectureDrainError}; projection policy invalid: ${message}` : `projection policy invalid: ${message}`;
+    // An unreadable policy cannot prove that strict projection delivery was
+    // enabled. Preserve the default advisory posture unless a durable job is
+    // already active and therefore proves this lane owns pending work.
+    const activeQueue = architectureDrain?.queue;
+    architectureGate = activeQueue && (activeQueue.pending > 0 || activeQueue.running > 0 || activeQueue.deadLetters > 0)
+      ? 'strict'
+      : 'advisory';
+  }
+  if (architectureGate === 'strict' && (architectureDrainError || architectureDrain?.status === 'retry-pending' || architectureDrain?.status === 'dead-letter')) {
+    const recovery = architectureDrain?.status === 'dead-letter' && architectureDrain.jobId
+      ? ` Recover with: repo-harness architecture-projection retry-dead-letter --job-id ${architectureDrain.jobId} --json.`
+      : ' Re-run repo-harness architecture-projection drain --json after correcting the reported failure.';
+    return {
+      ...block(`[ArchitectureProjection] Strict projection failure gate blocked Stop: ${architectureDrainError || architectureDrain?.error || architectureDrain?.status}.${recovery}`),
+      stderr: stderr.join(''),
+    };
+  }
   let state: EffectiveState | null = null;
   try {
     state = opts.collector.getStopEffectiveState();
@@ -560,11 +573,6 @@ export function runStopHandler(opts: StopHandlerInput): StopHandlerResult {
     now,
   );
   if (planGate) return { ...planGate, stderr: stderr.join('') };
-
-  if (claimDelegationFallback(repoRoot, payload, env, now, dependencies.beforeDelegationLock)) {
-    const result = block(`[DelegationFallback] This turn explicitly requested bounded delegation, but no SubagentStart event was observed. Continue the task now by spawning the independent explorer/reviewer or isolated worker workstreams first when at least two independent workstreams exist, wait for them, reconcile their findings in the parent, then complete the response. Do not spawn for a trivial or strictly sequential task.${minimal.suffix}`);
-    return { ...result, stderr: stderr.join('') };
-  }
 
   return { exitCode: 0, stdout: '', stderr: stderr.join('') };
 }

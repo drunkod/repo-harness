@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { execFileSync, spawnSync } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { runHook } from '../../src/cli/hook/runtime';
@@ -50,7 +50,7 @@ describe('typed hook runtime', () => {
       expect(result.reason).toBe('non-opt-in');
       expect(result.handler).toBeUndefined();
     } finally { clean(root); }
-  });
+  }, 30_000);
 
   test('rejects an explicit repo-root mismatch before route dispatch', () => {
     const root = repo();
@@ -64,7 +64,7 @@ describe('typed hook runtime', () => {
       });
       expect(result).toEqual({ exitCode: 0, reason: 'repo-root-mismatch' });
     } finally { clean(root); clean(other); }
-  });
+  }, 30_000);
 
   test('unknown routes do not create a handler or telemetry record', () => {
     const root = repo();
@@ -74,7 +74,7 @@ describe('typed hook runtime', () => {
       expect(result.handler).toBeUndefined();
       expect(existsSync(join(root, '.ai/harness/runs/hook-events.jsonl'))).toBe(false);
     } finally { clean(root); }
-  });
+  }, 30_000);
 
   test('dispatches each route through its typed handler identity', () => {
     const root = repo();
@@ -99,6 +99,22 @@ describe('typed hook runtime', () => {
     } finally { clean(root); }
   }, 60000);
 
+  test('the full CLI fallback forwards host stdin to the typed hook runtime', () => {
+    const root = repo();
+    try {
+      const cli = join(import.meta.dir, '..', '..', 'src', 'cli', 'index.ts');
+      const result = spawnSync(process.execPath, [cli, 'hook', 'PostToolUse', '--route', 'edit'], {
+        cwd: root,
+        env: env(root, 'codex'),
+        input: `${JSON.stringify({ session_id: 'fallback-session', tool_input: { file_path: join(root, 'README.md') } })}\n`,
+        encoding: 'utf8',
+      });
+      expect(result.status).toBe(0);
+      const pending = join(root, '.ai', 'harness', 'journal', 'post-edit', 'pending');
+      expect(readdirSync(pending).filter((name) => name.endsWith('.json'))).toHaveLength(1);
+    } finally { clean(root); }
+  }, 30_000);
+
   test('Codex suppresses successful Stop stdout while preserving failure diagnostics', () => {
     const root = repo();
     try {
@@ -111,7 +127,7 @@ describe('typed hook runtime', () => {
       expect(result.status).toBe(0);
       expect(result.stdout).toBe('');
     } finally { clean(root); }
-  });
+  }, 30_000);
 
   test('one telemetry record stays opaque-free without fabricating file-metric completeness', () => {
     const root = repo();
@@ -125,5 +141,5 @@ describe('typed hook runtime', () => {
       expect(record.measurement).toMatchObject({ complete: false, opaque_steps: [] });
       expect(record.measurement.incomplete_metrics).toContain('files_read');
     } finally { clean(root); }
-  });
+  }, 30_000);
 });

@@ -1,0 +1,33 @@
+schemaVersion: archcontext.node/v2
+id: capability.public-surface.adoption
+kind: capability
+name: Adoption
+status: active
+summary: Plans and applies repository adoption through the canonical filesystem transaction boundary.
+responsibilities:
+  - Own adoption planning, path safety, transaction apply, and rollback behavior.
+source:
+  include:
+    - "src/cli/commands/adoption-plan.ts"
+    - "src/core/adoption/**"
+    - "src/effects/fs-transaction.ts"
+    - "src/effects/path-safety.ts"
+    - "tests/cli/adoption-plan.test.ts"
+    - "tests/fixtures/adoption/**"
+  entrypoints:
+    - id: entrypoint.adoption.primary
+      path: "src/cli/commands/adoption-plan.ts"
+      symbols:
+        - name: "runAdoptionApply"
+          sinks:
+            - id: sink.adoption.primary
+              path: "src/effects/fs-transaction.ts"
+              symbol: "applyAdoptionPlan"
+extensions:
+  contractFiles:
+    agents: "AGENTS.md"
+    claude: "CLAUDE.md"
+  lspProfile: "typescript-lsp"
+  verification:
+    - "bun test tests/cli/adoption-plan.test.ts"
+    - "bun run check:type"

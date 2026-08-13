@@ -214,7 +214,7 @@ describe("init command", () => {
     }
   }, 30000);
 
-  test("runInit can bootstrap core Waza, Mermaid, and cross-review skills for Claude and Codex", () => {
+  test("runInit bootstraps the full-profile Waza, Mermaid, and cross-review set without explicit-only Reverse Skill", () => {
     const tmp = join(tmpdir(), `repo-harness-init-skills-${Date.now()}`);
     const source = join(tmp, "source");
     const repo = join(tmp, "repo");
@@ -259,6 +259,7 @@ describe("init command", () => {
       expect(readFileSync(bunxLog, "utf-8")).toContain(
         "skills add BfdCampos/dotfiles -g -a claude-code codex -s mermaid -y",
       );
+      expect(readFileSync(bunxLog, "utf-8")).not.toContain("zhaoxuya520/reverse-skill");
       // SSD-06: repo-harness-cross-review installs on both hosts (host-aware
       // provider mode selection lives inside the package); claude-plan stays
       // Codex-only (unchanged, R4).
@@ -313,6 +314,22 @@ describe("init command", () => {
       mkdirSync(repo, { recursive: true });
       setupFakeSource(source);
 
+      // Explicit env is required here, not decorative: for an npx cache source
+      // initCommandEnv() (src/cli/commands/init.ts) builds `{ ...(env ?? {}),
+      // AGENTIC_DEV_LINK_INSTALLED_COPIES: "0" }`, so passing no env yields a
+      // command env holding only that key. REPO_HARNESS_HOME and HOME are both
+      // dropped and the registry write falls back to homedir() — the operator's
+      // real ~/.repo-harness. Spreading process.env keeps the isolated home
+      // installed by tests/preload-home-isolation.ts.
+      //
+      // The delete keeps this test deterministic: initCommandEnv() only forces
+      // the flag to "0" when it is undefined, so an ambient
+      // AGENTIC_DEV_LINK_INSTALLED_COPIES in the operator's shell would be passed
+      // straight through and the `sync link=0` assertion below would fail for a
+      // reason that has nothing to do with the code under test.
+      const childEnv = { ...process.env };
+      delete childEnv.AGENTIC_DEV_LINK_INSTALLED_COPIES;
+
       const result = runInit({
         repo,
         sourceRoot: source,
@@ -320,6 +337,7 @@ describe("init command", () => {
         externalSkills: false,
         verify: false,
         codegraph: false,
+        env: childEnv,
       });
 
       expect(result.exitCode).toBe(0);
@@ -327,6 +345,68 @@ describe("init command", () => {
         "sync link=0",
       );
     } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("npx cache sources keep process.env as the constructed command env base", () => {
+    // Regression guard for initCommandEnv() (src/cli/commands/init.ts): for an
+    // npx cache source with no caller env it used to return
+    // `{ ...(env ?? {}), AGENTIC_DEV_LINK_INSTALLED_COPIES: "0" }` — a child env
+    // holding exactly one key, with the whole process environment discarded.
+    // commandEnv is not only spawned with (runProcess re-merges process.env), it
+    // is also read as an environment record: runAdoptionApply threads it into
+    // registerRepoHarnessRepo, and repoHarnessHome (src/effects/repo-registry.ts:60)
+    // resolves REPO_HARNESS_HOME ?? HOME ?? homedir() off that record. Dropping
+    // the base therefore silently redirects the registry write to the operator's
+    // real home — the one hole tests/preload-home-isolation.ts cannot defend.
+    const tmp = join(tmpdir(), `repo-harness-init-npx-env-base-${Date.now()}`);
+    const source = join(tmp, "_npx", "abc123", "node_modules", "repo-harness");
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const harnessHome = join(tmp, "harness-home");
+    // This test drives the no-env path on purpose, so the marker has to live in
+    // process.env itself: REPO_HARNESS_HOME points at harnessHome, and the guard
+    // asserts the registry write lands there. Measured, not assumed: Bun caches
+    // os.homedir() at process start, so setting process.env.HOME mid-run does
+    // NOT redirect the homedir() fallback — on unfixed code this test writes to
+    // the operator's real ~/.repo-harness, which is precisely the leak under
+    // guard here. HOME is still set for the env.HOME readers inside runInit.
+    const previous = {
+      HOME: process.env.HOME,
+      REPO_HARNESS_HOME: process.env.REPO_HARNESS_HOME,
+      AGENTIC_DEV_LINK_INSTALLED_COPIES: process.env.AGENTIC_DEV_LINK_INSTALLED_COPIES,
+    };
+    try {
+      mkdirSync(source, { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(home, { recursive: true });
+      setupFakeSource(source);
+      process.env.HOME = home;
+      process.env.REPO_HARNESS_HOME = harnessHome;
+      delete process.env.AGENTIC_DEV_LINK_INSTALLED_COPIES;
+
+      const result = runInit({
+        repo,
+        sourceRoot: source,
+        syncSkill: false,
+        hostAdapters: false,
+        externalSkills: false,
+        verify: false,
+        codegraph: false,
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.steps.find((step) => step.step === "register repo harness repo")?.status).toBe("ok");
+      const registry = JSON.parse(readFileSync(join(harnessHome, "registered-repos.json"), "utf-8"));
+      expect(registry.repos).toEqual([
+        expect.objectContaining({ source: "init", path: realpathSync(repo) }),
+      ]);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       rmSync(tmp, { recursive: true, force: true });
     }
   });
@@ -377,7 +457,7 @@ describe("init command", () => {
     expect(res.stdout).toContain("--dry-run");
     expect(res.stdout).not.toContain("--experimental-ts-apply");
     expect(res.stdout).toContain("--no-codegraph");
-  });
+  }, 30_000);
 
   test("CLI update rejects repo refresh flags with an init hint", () => {
     const res = spawnSync("bun", [CLI, "update", "--repo", ".", "--json"], {
@@ -388,7 +468,7 @@ describe("init command", () => {
     expect(res.status).toBe(2);
     expect(res.stderr).toContain("repo-harness update no longer refreshes repositories");
     expect(res.stderr).toContain("repo-harness init --repo <path>");
-  });
+  }, 30_000);
 
   test("CLI init rejects user-level brain configuration flags", () => {
     const tmp = join(tmpdir(), `repo-harness-init-brain-${Date.now()}`);
@@ -405,7 +485,7 @@ describe("init command", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("init refuses HOME before running migration or host bootstrap", () => {
     const tmp = join(tmpdir(), `repo-harness-init-home-${Date.now()}`);

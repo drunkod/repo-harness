@@ -7,7 +7,7 @@ This repository self-hosts the `repo-harness` contract; the former `repo-harness
 - `tasks/current.md` for the tracked current-status snapshot derived from workflow artifacts
 - `tasks/todos.md` for deferred medium/long-term goals, not active execution checklists
 - `plans/prds/` for upper-layer PRDs; `plans/sprints/` for ordered sprint backlogs operated through `repo-harness run sprint-backlog`; task contracts stay the execution slices
-- `.ai/context/capabilities.json` for the capability registry and longest-prefix context boundaries
+- `.archcontext/model/nodes/*.yaml` for the capability nodes and longest-prefix context boundaries, selected by `.ai/harness/policy.json#context.capability_source`
 - `tasks/workstreams/` for capability long-running workstreams that project durable progress into local contracts
 - `tasks/lessons.md` for correction-derived rules
 - `docs/researches/` for deep repo knowledge
@@ -25,7 +25,7 @@ This repository self-hosts the `repo-harness` contract; the former `repo-harness
 - Use `tasks/notes/<plan-stem>.notes.md` only for non-obvious slice decisions, deviations, tradeoffs, and open questions; `<plan-stem>` is the active plan filename without `plan-` and `.md` (for example `20260531-0045-governance-workflow`). Do not use notes as durable memory or a task log, and archive/promote them deliberately when the slice closes.
 - Treat hook execution as typed and user-level: `~/.claude/settings.json` and `~/.codex/hooks.json` invoke `repo-harness-hook`, whose route registry selects exactly one in-process handler. `.ai/hooks/lib/workflow-state.sh` is an operator-helper library, never a host-event dispatcher.
 - Keep the umbrella hierarchy explicit: architecture owns stable truth, capability contracts own local agent context, `tasks/workstreams/<domain>/<capability>/` owns durable progress, and `tasks/todos.md` owns only deferred medium/long-term goals with tradeoff and revisit trigger.
-- Treat `.ai/context/capabilities.json` as the source of truth for capability prefixes; `agent-context-blocks.txt` and nested agent files are initialization inputs only, never runtime resolver authority.
+- Treat `.archcontext/model/nodes/*.yaml` as the source of truth for capability prefixes under `capability_source: "archcontext"`; `agent-context-blocks.txt` and nested agent files are initialization inputs only, never runtime resolver authority.
 - Keep architecture drift handling split: `architecture-queue.sh` writes architecture requests/events, `workstream-sync.sh` maintains durable capability workstreams, and `context-contract-sync.sh` only updates controlled local `CLAUDE.md`/`AGENTS.md` architecture blocks.
 - Keep `assets/workflow-contract.v1.json` and `.ai/harness/workflow-contract.json` in sync.
 - Keep `CLAUDE.md` and `AGENTS.md` short; put detailed guidance in `docs/reference-configs/`.
@@ -71,46 +71,37 @@ bun src/cli/index.ts init --repo . --dry-run
 <!-- BEGIN ARCHITECTURE CONTRACT -->
 ## Architecture Contract
 
-- Functional block: `scripts/inspect-project-state.ts`
-- Capability ID: `workflow-engine-inspection-migration`
-- Matched prefix: `scripts/inspect-project-state.ts`
-- Architecture domain: `workflow-engine`
-- Architecture capability: `inspection-migration`
-- Architecture module: `docs/architecture/modules/workflow-engine/inspection-migration.md`
-- Last architecture event: 2026-07-03T14:07:48+0800
-- Last changed path: `scripts/inspect-project-state.ts`
-- Severity: high
-- Change type: workflow-surface
+- Functional block: `scripts/verify-sprint.sh`
+- Capability ID: `verification-evals-checks`
+- Matched prefix: `scripts/verify-sprint.sh`
+- Architecture domain: `verification`
+- Architecture capability: `evals-checks`
+- Architecture module: `docs/architecture/modules/verification/evals-checks.md`
+- Last architecture event: 2026-08-05T00:46:11+0800
+- Last changed path: `tasks/workstreams/verification/evals-checks/github-issues-158-159.md`
+- Severity: medium
+- Change type: workstream-sync
 - Module responsibility: Keep this block aligned with the local boundary described by surrounding human-owned context.
-- Entrypoints: `scripts/inspect-project-state.ts`
+- Entrypoints: `scripts/verify-sprint.sh`
 - Allowed dependencies: Follow root `AGENTS.md` / `CLAUDE.md` and this local contract.
 - Forbidden dependencies: Do not cross sibling app/service/package boundaries without an architecture snapshot or explicit plan.
-- Runtime path: `scripts/inspect-project-state.ts`
+- Runtime path: `scripts/verify-sprint.sh`
 - LSP/tooling profile: `typescript-lsp`
 - Verification: Use root required checks plus local commands recorded in this capability contract.
 - Latest snapshot: `(none yet)`
-- Semantic diagram source: `docs/architecture/modules/workflow-engine/inspection-migration.md`
-- Latest human diagram: `(none yet)`
+- Semantic diagram source: `docs/architecture/modules/verification/evals-checks.md`
 - Pending architecture request: `(none)`
 
 ## Active Workstreams
 
-- `tasks/workstreams/workflow-engine/inspection-migration/20260703-inspection-migration.md`
+- `tasks/workstreams/verification/evals-checks/github-issues-158-159.md`
   - status: completed
-  - current_slice: completed-20260703-architecture-closeout
-  - source_plan: (none)
-- `tasks/workstreams/workflow-engine/inspection-migration/20260712-inspection-migration.md`
-  - status: completed
-  - current_slice: completed-20260712-repo-owned-agent-fleet
-  - source_plan: `plans/archive/plan-20260712-2053-repo-owned-agent-fleet.md`
-- `tasks/workstreams/workflow-engine/inspection-migration/agent-fleet-specialists.md`
-  - status: completed
-  - current_slice: completed-20260713-policy-seed
-  - source_plan: `plans/archive/plan-20260712-2215-agent-fleet-specialists.md`
+  - current_slice: completed-20260805-deployed-emitter-binding
+  - source_plan: plans/plan-20260805-0001-github-issues-158-159.md
 
 ## Current Session Projection
 
-- Durable progress lives under `tasks/workstreams/workflow-engine/inspection-migration`.
+- Durable progress lives under `tasks/workstreams/verification/evals-checks`.
 - `tasks/current.md` is the tracked derived status snapshot; it is not a live lock or task source.
 - `tasks/todos.md` is the deferred-goal ledger; current execution slices stay in the active plan's `## Task Breakdown`.
 <!-- END ARCHITECTURE CONTRACT -->

@@ -1,37 +1,48 @@
 #!/usr/bin/env bun
-import { existsSync, readdirSync, readFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { relative, resolve } from "path";
 import { spawnSync } from "child_process";
 import {
+  CAPABILITY_SOURCE_MODES,
+  capabilityRegistryFromArchcontextNodes,
   matchCapabilityPath,
   normalizeCapabilityPath,
   parseCapabilityRegistry,
+  type ArchcontextNodeFile,
   type Capability,
   type CapabilityRegistry,
   type CapabilityRegistryDiagnostic,
+  type CapabilityRegistryResolution,
+  type CapabilitySourceMode,
 } from "../src/core/capabilities/registry";
 
 export type { Capability, CapabilityRegistry, ContractFiles } from "../src/core/capabilities/registry";
 
-// archcontext-boundaries-v1 is a deliberately narrow, read-only export of the
-// capability registry shaped as a subset of ArchitectureNode (archcontext.node/v1).
-// Tests derive the bridge subset from archctx-contracts' authoritative schema;
-// docs/researches/20260705-archcontext-capability-filing-handover.md explains
-// why this stays a read-only bridge with no archctx CLI/daemon runtime dependency.
-export type ArchContextBoundaryNode = {
-  schemaVersion: "archcontext.node/v1";
+// Explicit one-shot registry -> ArchContext node/v2 migration projection. The
+// exporter carries only facts already present in the registry; it does not
+// become a second runtime authority and is never read by capability resolution.
+export type ArchContextNodeV2 = {
+  schemaVersion: "archcontext.node/v2";
   id: string;
   kind: "capability";
+  name: string;
+  status: "active";
+  summary: string;
+  responsibilities: string[];
   source: {
     include: string[];
   };
   extensions: {
+    contractFiles: {
+      agents: string;
+      claude: string;
+    };
     lspProfile: string;
     verification: string[];
   };
 };
 
-type Format = "json" | "text" | "prefixes" | "archcontext-boundaries-v1";
+type Format = "json" | "text" | "prefixes" | "archcontext-nodes-v2";
 
 type Args = {
   command: string;
@@ -42,6 +53,103 @@ type Args = {
 };
 
 const DEFAULT_REGISTRY = ".ai/context/capabilities.json";
+const HARNESS_POLICY = ".ai/harness/policy.json";
+const CAPABILITY_SOURCE_KEY = `${HARNESS_POLICY}#context.capability_source`;
+const ARCHCONTEXT_NODES_DIR = ".archcontext/model/nodes";
+const ARCHCONTEXT_NODE_FILE = /\.ya?ml$/;
+
+/**
+ * Capability source selection failures. These are configuration/authority
+ * failures rather than registry content failures, so they exit 2 and never
+ * degrade to the other source.
+ */
+export class CapabilitySourceError extends Error {
+  readonly exitCode = 2;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "CapabilitySourceError";
+  }
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/**
+ * Structural accessor for Bun's native YAML parser. Keeping the lookup
+ * structural avoids an npm YAML dependency in a helper that must run inside a
+ * repo with no node_modules, and doubles as the fail-closed guard for Bun
+ * runtimes older than 1.3.
+ */
+export function bunYamlParser(host: unknown): (source: string) => unknown {
+  const runtime = plainRecord(host)?.Bun;
+  const yaml = plainRecord(runtime)?.YAML;
+  const parse = plainRecord(yaml)?.parse;
+  if (typeof parse !== "function") {
+    throw new CapabilitySourceError(
+      `Bun.YAML is unavailable; ${CAPABILITY_SOURCE_KEY}="archcontext" requires Bun >= 1.3 ` +
+        "(upgrade Bun, or set the capability source back to \"registry\")"
+    );
+  }
+  return (source: string) => (parse as (input: string) => unknown).call(yaml, source);
+}
+
+export function capabilitySourceMode(repo: string): CapabilitySourceMode {
+  const policyPath = resolve(repo, HARNESS_POLICY);
+  if (!existsSync(policyPath)) return "registry";
+  let policy: unknown;
+  try {
+    policy = JSON.parse(readFileSync(policyPath, "utf-8"));
+  } catch (error) {
+    throw new CapabilitySourceError(
+      `malformed harness policy: ${HARNESS_POLICY}: ${(error as Error).message}`
+    );
+  }
+  const value = plainRecord(plainRecord(policy)?.context)?.capability_source;
+  if (value === undefined) return "registry";
+  if (typeof value === "string" && (CAPABILITY_SOURCE_MODES as readonly string[]).includes(value)) {
+    return value as CapabilitySourceMode;
+  }
+  throw new CapabilitySourceError(
+    `unknown capability source: ${JSON.stringify(value)}; ${CAPABILITY_SOURCE_KEY} must be one of ` +
+      CAPABILITY_SOURCE_MODES.join(", ")
+  );
+}
+
+export function readArchcontextNodeFiles(repo: string): ArchcontextNodeFile[] {
+  const nodesDir = resolve(repo, ARCHCONTEXT_NODES_DIR);
+  if (!existsSync(nodesDir)) {
+    throw new CapabilitySourceError(
+      `missing archcontext model directory: ${ARCHCONTEXT_NODES_DIR}; ` +
+        `${CAPABILITY_SOURCE_KEY}="archcontext" reads capabilities from that directory only`
+    );
+  }
+  const parseYaml = bunYamlParser(globalThis);
+  const entries = readdirSync(nodesDir, { withFileTypes: true })
+    .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
+  const files: ArchcontextNodeFile[] = [];
+  for (const entry of entries) {
+    const relPath = `${ARCHCONTEXT_NODES_DIR}/${entry.name}`;
+    if (!entry.isFile() || !ARCHCONTEXT_NODE_FILE.test(entry.name)) {
+      throw new CapabilitySourceError(
+        `unexpected entry in archcontext model directory: ${relPath}; expected only *.yaml or *.yml node files`
+      );
+    }
+    let value: unknown;
+    try {
+      value = parseYaml(readFileSync(resolve(nodesDir, entry.name), "utf-8"));
+    } catch (error) {
+      throw new CapabilitySourceError(
+        `invalid archcontext node YAML: ${relPath}: ${(error as Error).message}`
+      );
+    }
+    files.push({ path: relPath, value });
+  }
+  return files;
+}
 
 function usage(): never {
   console.error(
@@ -51,7 +159,7 @@ function usage(): never {
       "  scripts/capability-resolver.ts match --path <repo-relative-path> [--repo <repo>] [--format json|text]",
       "  scripts/capability-resolver.ts match --paths-from <file|-> [--repo <repo>] [--format json|text]",
       "  scripts/capability-resolver.ts validate [--repo <repo>] [--format json|text]",
-      "  scripts/capability-resolver.ts export --format archcontext-boundaries-v1 [--repo <repo>]",
+      "  scripts/capability-resolver.ts export --format archcontext-nodes-v2 [--repo <repo>]",
     ].join("\n")
   );
   process.exit(2);
@@ -80,7 +188,7 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--format": {
         const value = argv[++index] as Format;
-        if (!["json", "text", "prefixes", "archcontext-boundaries-v1"].includes(value)) usage();
+        if (!["json", "text", "prefixes", "archcontext-nodes-v2"].includes(value)) usage();
         args.format = value;
         break;
       }
@@ -98,8 +206,8 @@ function parseArgs(argv: string[]): Args {
   if (args.command === "match" && !args.path && !args.pathsFrom) usage();
   if (args.command === "match" && args.path && args.pathsFrom) usage();
   if (args.command === "match" && args.format === "prefixes") usage();
-  if (args.command === "export" && args.format !== "archcontext-boundaries-v1") usage();
-  if (args.command !== "export" && args.format === "archcontext-boundaries-v1") usage();
+  if (args.command === "export" && args.format !== "archcontext-nodes-v2") usage();
+  if (args.command !== "export" && args.format === "archcontext-nodes-v2") usage();
   return args;
 }
 
@@ -122,7 +230,25 @@ function missingRegistryError(): Error {
   );
 }
 
-function loadRegistry(repo: string): ReturnType<typeof parseCapabilityRegistry> {
+function capabilityAuthorityPath(mode: CapabilitySourceMode): string {
+  return mode === "archcontext" ? ARCHCONTEXT_NODES_DIR : DEFAULT_REGISTRY;
+}
+
+// One authority per mode: archcontext never falls back to the JSON registry and
+// the JSON registry never falls back to archcontext nodes.
+function loadRegistry(repo: string, mode: CapabilitySourceMode): CapabilityRegistryResolution {
+  if (mode === "archcontext") {
+    return capabilityRegistryFromArchcontextNodes(readArchcontextNodeFiles(repo), {
+      repoRoot: repo,
+      isExistingDirectory: (path) => {
+        try {
+          return statSync(resolve(repo, path)).isDirectory();
+        } catch {
+          return false;
+        }
+      },
+    });
+  }
   const registryPath = resolve(repo, DEFAULT_REGISTRY);
   if (!existsSync(registryPath)) {
     return parseCapabilityRegistry(null, { declared: false, repoRoot: repo });
@@ -130,16 +256,22 @@ function loadRegistry(repo: string): ReturnType<typeof parseCapabilityRegistry> 
   return parseCapabilityRegistry(readFileSync(registryPath, "utf-8"), { declared: true, repoRoot: repo });
 }
 
-function malformedRegistryError(diagnostics: readonly CapabilityRegistryDiagnostic[]): Error {
+function malformedRegistryError(
+  diagnostics: readonly CapabilityRegistryDiagnostic[],
+  authority: string,
+): Error {
   return new Error(
-    `malformed capability registry: ${DEFAULT_REGISTRY}: ${diagnostics.map((item) => item.message).join("; ")}`
+    `malformed capability registry: ${authority}: ${diagnostics.map((item) => item.message).join("; ")}`
   );
 }
 
 export function readRegistry(repo: string): CapabilityRegistry {
-  const resolution = loadRegistry(repo);
+  const mode = capabilitySourceMode(repo);
+  const resolution = loadRegistry(repo, mode);
   if (resolution.status === "absent") throw missingRegistryError();
-  if (resolution.status === "invalid") throw malformedRegistryError(resolution.diagnostics);
+  if (resolution.status === "invalid") {
+    throw malformedRegistryError(resolution.diagnostics, capabilityAuthorityPath(mode));
+  }
   return resolution.registry;
 }
 
@@ -241,24 +373,47 @@ function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
-function toArchContextBoundaryNode(capability: Capability): ArchContextBoundaryNode {
+function toArchContextNodeV2(capability: Capability, isExistingDirectory: (path: string) => boolean): ArchContextNodeV2 {
+  const displayName = capability.name.split("-").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+  const includes = capability.prefixes.map((prefix) => {
+    try {
+      return isExistingDirectory(prefix) ? `${prefix}/**` : prefix;
+    } catch {
+      return prefix;
+    }
+  });
   return {
-    schemaVersion: "archcontext.node/v1",
+    schemaVersion: "archcontext.node/v2",
     id: `capability.${capability.domain}.${capability.name}`,
     kind: "capability",
+    name: displayName,
+    status: "active",
+    summary: `Capability boundary for ${capability.domain}/${capability.name}.`,
+    responsibilities: [`Own the source paths declared by the ${capability.id} capability boundary.`],
     source: {
-      include: [...capability.prefixes],
+      include: includes,
     },
     extensions: {
+      contractFiles: {
+        agents: capability.contract_files.agents,
+        claude: capability.contract_files.claude,
+      },
       lspProfile: capability.lsp_profile,
       verification: [...capability.verification_hints],
     },
   };
 }
 
-export function buildArchContextBoundariesV1(registry: CapabilityRegistry): ArchContextBoundaryNode[] {
+export function buildArchContextNodesV2(
+  registry: CapabilityRegistry,
+  options: { repoRoot?: string; isExistingDirectory?: (path: string) => boolean } = {},
+): ArchContextNodeV2[] {
+  const repoRoot = options.repoRoot ?? process.cwd();
+  const isExistingDirectory = options.isExistingDirectory ?? ((path: string) => {
+    try { return statSync(resolve(repoRoot, path)).isDirectory(); } catch { return false; }
+  });
   return registry.capabilities
-    .map(toArchContextBoundaryNode)
+    .map((capability) => toArchContextNodeV2(capability, isExistingDirectory))
     .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
 }
 
@@ -270,7 +425,9 @@ async function readPathLines(input: string): Promise<string[]> {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const repo = repoRoot(args.repo);
-  const resolution = loadRegistry(repo);
+  const mode = capabilitySourceMode(repo);
+  const authority = capabilityAuthorityPath(mode);
+  const resolution = loadRegistry(repo, mode);
   if (resolution.status === "absent") throw missingRegistryError();
 
   if (args.command === "validate") {
@@ -281,9 +438,25 @@ async function main(): Promise<void> {
         "UNSUPPORTED_VERSION",
         "CAPABILITIES_NOT_ARRAY",
         "CAPABILITY_NOT_OBJECT",
+        "ARCHCONTEXT_NODE_NOT_OBJECT",
+        "ARCHCONTEXT_SCHEMA_VERSION_UNSUPPORTED",
+        "ARCHCONTEXT_NODE_ID_INVALID",
+        "ARCHCONTEXT_NODE_KIND_INVALID",
+        "ARCHCONTEXT_NODE_STATUS_INVALID",
+        "ARCHCONTEXT_NODE_NAME_INVALID",
+        "ARCHCONTEXT_NODE_SUMMARY_INVALID",
+        "ARCHCONTEXT_NODE_RESPONSIBILITIES_INVALID",
+        "ARCHCONTEXT_INCLUDE_REQUIRED",
+        "ARCHCONTEXT_EXCLUDE_UNSUPPORTED",
+        "ARCHCONTEXT_INCLUDE_SHAPE_UNSUPPORTED",
+        "ARCHCONTEXT_INCLUDE_SHAPE_AMBIGUOUS",
+        "ARCHCONTEXT_EXTENSIONS_REQUIRED",
+        "ARCHCONTEXT_LSP_PROFILE_REQUIRED",
+        "ARCHCONTEXT_VERIFICATION_REQUIRED",
+        "ARCHCONTEXT_CONTRACT_FILES_REQUIRED",
       ]);
       if (resolution.diagnostics.some((item) => structuralCodes.has(item.code))) {
-        throw malformedRegistryError(resolution.diagnostics);
+        throw malformedRegistryError(resolution.diagnostics, authority);
       }
     }
     const errors = resolution.status === "invalid"
@@ -299,7 +472,7 @@ async function main(): Promise<void> {
     process.exit(errors.length === 0 ? 0 : 1);
   }
 
-  if (resolution.status === "invalid") throw malformedRegistryError(resolution.diagnostics);
+  if (resolution.status === "invalid") throw malformedRegistryError(resolution.diagnostics, authority);
   const registry = resolution.registry;
 
   if (args.command === "list") {
@@ -324,7 +497,7 @@ async function main(): Promise<void> {
     if (exportErrors.length > 0) {
       throw new Error(`capability registry is invalid:\n${exportErrors.join("\n")}`);
     }
-    printJson(buildArchContextBoundariesV1(registry));
+    printJson(buildArchContextNodesV2(registry, { repoRoot: repo }));
     return;
   }
 
@@ -370,6 +543,6 @@ if (import.meta.main) {
     await main();
   } catch (error) {
     console.error(`[CapabilityResolver] ${(error as Error).message}`);
-    process.exit(1);
+    process.exit((error as { exitCode?: number }).exitCode ?? 1);
   }
 }

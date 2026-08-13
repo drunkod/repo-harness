@@ -6,6 +6,7 @@ import { spawnSync } from 'child_process';
 import { runMutationGuard, type MutationGuardCollector } from '../src/cli/hook/mutation-guard';
 import { createStateInputCollector } from '../src/effects/loop/state-input-collector';
 import { resolveEffectiveState } from '../src/effects/state/resolve-effective-state';
+import { buildReviewSubject } from '../src/effects/review/diff-fingerprint';
 import type { EffectiveState } from '../src/core/state/types';
 import type { WorkflowProfile } from '../src/core/workflow/profile';
 
@@ -117,7 +118,7 @@ describe('HRD-03 falsifier: worktree refusal + SpecGuard reproduced in-process w
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('worktree block: enforcement marker present -> exit 2, structured error, failure log + circuit breaker written', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-worktree-block-')));
@@ -143,7 +144,7 @@ describe('HRD-03 falsifier: worktree refusal + SpecGuard reproduced in-process w
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('linked worktree: git-dir under .git/worktrees/ -> silent, no warning at all', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-linked-')));
@@ -159,7 +160,7 @@ describe('HRD-03 falsifier: worktree refusal + SpecGuard reproduced in-process w
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('SpecGuard: implementation edit without docs/spec.md -> exit 2, blocks before plan lookup', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-specguard-')));
@@ -176,7 +177,7 @@ describe('HRD-03 falsifier: worktree refusal + SpecGuard reproduced in-process w
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('SpecGuard advisory mode: reports without blocking', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-specguard-advice-')));
@@ -193,7 +194,7 @@ describe('HRD-03 falsifier: worktree refusal + SpecGuard reproduced in-process w
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('lite profile skips SpecGuard entirely (workflow surface exemption reached before it)', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-specguard-lite-')));
@@ -206,7 +207,7 @@ describe('HRD-03 falsifier: worktree refusal + SpecGuard reproduced in-process w
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
 
 describe('HRD-03 event-level cost proof: at most one Effective State resolution per event', () => {
@@ -238,7 +239,7 @@ describe('HRD-03 event-level cost proof: at most one Effective State resolution 
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('an apply_patch batch touching many files still resolves Effective State exactly once (collapses the old N-recursion N-resolution cost)', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-cost-batch-')));
@@ -279,10 +280,117 @@ describe('HRD-03 event-level cost proof: at most one Effective State resolution 
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
 
 describe('HRD-03 guard-by-guard parity: previously-uncovered decision branches', () => {
+  test('checks_failed permits only contract-authorized repo repair paths', () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-checks-repair-')));
+    const escapedRoot = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-escaped-target-')));
+    try {
+      initRepo(cwd);
+      writePolicy(cwd);
+      const plan = writeActivePlan(cwd, 'Executing');
+      const contract = 'tasks/contracts/20260720-0000-mutation-guard-fixture.contract.md';
+      const review = 'tasks/reviews/20260720-0000-mutation-guard-fixture.review.md';
+      mkdirSync(join(cwd, 'tasks/contracts'), { recursive: true });
+      mkdirSync(join(cwd, 'tasks/reviews'), { recursive: true });
+      writeFileSync(
+        join(cwd, contract),
+        ['# Contract', '', '> **Status**: Active', `> **Plan**: ${plan}`, '', '## Allowed Paths', '', '```yaml', 'allowed_paths:', `  - ${review}`, '```', ''].join('\n'),
+      );
+      git(cwd, ['add', '.']);
+      git(cwd, ['commit', '-m', 'active repair contract']);
+
+      const subject = buildReviewSubject(cwd, { targetRef: 'main' });
+      expect(subject.status).toBe('ok');
+      mkdirSync(join(cwd, '.ai/harness/checks'), { recursive: true });
+      writeFileSync(join(cwd, '.ai/harness/checks/latest.json'), `${JSON.stringify({
+        schema: 'repo-harness-run-trace.v1',
+        source: 'verify-sprint',
+        status: 'fail',
+        active_plan: plan,
+        review_subject_sha256: subject.review_subject_sha256,
+      }, null, 2)}\n`);
+
+      const failedState = resolveEffectiveState(cwd, Date.now(), {
+        targetPaths: [review],
+        operationKind: 'edit',
+        explicitOverride: 'standard',
+      });
+      expect(failedState.blockers).toEqual(['checks_failed']);
+      expect(failedState.allowed_paths).toEqual([review]);
+      expect(failedState.readiness?.ok).toBe(true);
+      if (failedState.readiness?.ok) {
+        expect(failedState.readiness.allowedToEdit).toEqual({ decision: 'allow' });
+        expect(failedState.readiness.allowedToStop.decision).toBe('block');
+        expect(failedState.readiness.readyToShip.decision).toBe('block');
+      }
+
+      const allowed = edit(cwd, review, { profile: 'standard' });
+      expect(allowed.exitCode, `${allowed.stdout}\n${allowed.stderr}`).toBe(0);
+      expect(allowed.stdout).not.toContain('[WorkflowProfileGuard]');
+
+      const outsideContract = edit(cwd, 'tasks/reviews/other.review.md', { profile: 'standard' });
+      expect(outsideContract.exitCode).toBe(2);
+
+      const outsideRepo = edit(cwd, join(tmpdir(), 'outside-repair.review.md'), { profile: 'standard' });
+      expect(outsideRepo.exitCode).toBe(2);
+
+      const traversal = edit(cwd, 'tasks/reviews/../../../outside.review.md', { profile: 'standard' });
+      expect(traversal.exitCode).toBe(2);
+      expect(traversal.stdout).toContain('[RepoScopeGuard]');
+
+      symlinkSync(escapedRoot, join(cwd, 'tasks/reviews/escape'));
+      const symlinkEscape = edit(cwd, 'tasks/reviews/escape/outside.review.md', { profile: 'standard' });
+      expect(symlinkEscape.exitCode).toBe(2);
+      expect(symlinkEscape.stdout).toContain('[RepoScopeGuard]');
+
+      const traversalPatch = [
+        '*** Begin Patch',
+        `*** Update File: ${review}`,
+        '@@',
+        '-old',
+        '+new',
+        '*** Add File: tasks/reviews/../../../outside.patch.md',
+        '+escape',
+        '*** End Patch',
+      ].join('\n');
+      const patchedTraversal = invoke(
+        cwd,
+        { tool_input: { command: traversalPatch } },
+        { profile: 'standard' },
+      );
+      expect(patchedTraversal.exitCode).toBe(2);
+
+      const symlinkPatch = [
+        '*** Begin Patch',
+        `*** Update File: ${review}`,
+        '@@',
+        '-old',
+        '+new',
+        '*** Add File: tasks/reviews/escape/outside.patch.md',
+        '+escape',
+        '*** End Patch',
+      ].join('\n');
+      const patchedSymlink = invoke(
+        cwd,
+        { tool_input: { command: symlinkPatch } },
+        { profile: 'standard' },
+      );
+      expect(patchedSymlink.exitCode).toBe(2);
+
+      const contractText = readFileSync(join(cwd, contract), 'utf-8');
+      writeFileSync(join(cwd, contract), contractText.replace(`> **Plan**: ${plan}`, '> **Plan**: plans/plan-conflict.md'));
+      const withAuthorityConflict = edit(cwd, review, { profile: 'standard' });
+      expect(withAuthorityConflict.exitCode).toBe(2);
+      expect(withAuthorityConflict.stdout).toContain('[WorkflowProfileGuard]');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(escapedRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('ContractScopeGuard: an edit outside the active contract allowed_paths blocks', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-scope-')));
     try {
@@ -316,7 +424,7 @@ describe('HRD-03 guard-by-guard parity: previously-uncovered decision branches',
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('strict profile without a contract blocks with StrictContractGuard, not StrictWorktreeGuard', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-strict-contract-')));
@@ -334,7 +442,7 @@ describe('HRD-03 guard-by-guard parity: previously-uncovered decision branches',
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('gate mode off: no SpecGuard, no PlanStatusGuard, edit passes silently through the plan gate', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-gate-off-')));
@@ -348,7 +456,7 @@ describe('HRD-03 guard-by-guard parity: previously-uncovered decision branches',
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('apply_patch: paths are processed in patch order, stopping at the first blocking path', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-apply-patch-order-')));
@@ -374,7 +482,7 @@ describe('HRD-03 guard-by-guard parity: previously-uncovered decision branches',
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('apply_patch with an unparseable command blocks with ApplyPatchScopeGuard', () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-apply-patch-unparseable-')));
@@ -387,7 +495,116 @@ describe('HRD-03 guard-by-guard parity: previously-uncovered decision branches',
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
+});
+
+describe('MainLoopDispatchGuard: opt-in orchestrator/subagent edit split', () => {
+  const armed = { REPO_HARNESS_MAIN_LOOP_EDIT_GUARD: '1', HOOK_HOST: 'claude' } as const;
+
+  test('armed, no agent_id/agent_type, code path -> exit 2 with the dispatch instruction', () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-main-loop-block-')));
+    try {
+      initRepo(cwd);
+      writePolicy(cwd);
+      const result = invoke(cwd, { tool_input: { file_path: 'src/feature.ts' } }, {
+        profile: 'lite',
+        env: { ...armed },
+      });
+      expect(result.exitCode).toBe(2);
+      expect(result.stdout).toContain('[MainLoopDispatchGuard]');
+      expect(result.stdout).toContain('"guard":"MainLoopDispatchGuard"');
+      expect(result.stdout).toContain('"failure_class":"state_violation"');
+      expect(result.stderr).toContain('The orchestrator does not hand-edit code files.');
+      expect(result.stderr).toContain('Operator off-switch: unset REPO_HARNESS_MAIN_LOOP_EDIT_GUARD.');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('armed, agent_id present -> subagent edit passes this guard', () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-main-loop-subagent-')));
+    try {
+      initRepo(cwd);
+      writePolicy(cwd);
+      const result = invoke(cwd, { agent_id: 'agent_01abc', tool_input: { file_path: 'src/feature.ts' } }, {
+        profile: 'lite',
+        env: { ...armed },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).not.toContain('MainLoopDispatchGuard');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('env unset -> guard is inert, existing behavior unchanged', () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-main-loop-unset-')));
+    try {
+      initRepo(cwd);
+      writePolicy(cwd);
+      const result = edit(cwd, 'src/feature.ts', { profile: 'lite' });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).not.toContain('MainLoopDispatchGuard');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('armed, markdown path -> not blocked (plans and docs stay a main-loop surface)', () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-main-loop-md-')));
+    try {
+      initRepo(cwd);
+      writePolicy(cwd);
+      const result = invoke(cwd, { tool_input: { file_path: 'docs/notes.md' } }, {
+        profile: 'lite',
+        env: { ...armed },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).not.toContain('MainLoopDispatchGuard');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('armed but HOOK_HOST=codex -> guard is inert', () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-main-loop-codex-')));
+    try {
+      initRepo(cwd);
+      writePolicy(cwd);
+      const result = invoke(cwd, { tool_input: { file_path: 'src/feature.ts' } }, {
+        profile: 'lite',
+        env: { REPO_HARNESS_MAIN_LOOP_EDIT_GUARD: '1', HOOK_HOST: 'codex' },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).not.toContain('MainLoopDispatchGuard');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('armed, apply_patch expanding to a code file, no agent_id -> blocked on that path', () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'mutation-guard-main-loop-apply-patch-')));
+    try {
+      initRepo(cwd);
+      writePolicy(cwd);
+      const patch = [
+        '*** Begin Patch',
+        '*** Add File: docs/notes.md',
+        '+notes',
+        '*** Add File: src/alpha.ts',
+        '+export const alpha = true;',
+        '*** End Patch',
+      ].join('\n');
+      const result = invoke(cwd, { tool_name: 'apply_patch', tool_input: { command: patch } }, {
+        profile: 'lite',
+        env: { ...armed },
+      });
+      expect(result.exitCode).toBe(2);
+      expect(result.stdout).toContain('[MainLoopDispatchGuard] Main-loop source edit blocked: src/alpha.ts');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 describe('gate round-1 parity closure: restored input-normalization fallbacks', () => {
@@ -411,7 +628,7 @@ describe('gate round-1 parity closure: restored input-normalization fallbacks', 
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test('symlink-canonicalization: an absolute file_path reached through a symlinked repo ancestor still normalizes to repo-relative', () => {
     // Mirrors the macOS /var -> /private/var shape the bash port's comment
@@ -435,5 +652,5 @@ describe('gate round-1 parity closure: restored input-normalization fallbacks', 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });

@@ -28,6 +28,54 @@ normalize_slug() {
 
 ACTIVE_PLAN_MARKER=".ai/harness/active-plan"
 
+# .ai/harness/policy.json#context.capability_source selects the single
+# capability authority: "registry" owns .ai/context/capabilities.json,
+# "archcontext" owns .archcontext/model/nodes. Without a JSON runtime this
+# reports the registry default, which only ever suppresses a seed.
+capability_source() {
+  local policy_file=".ai/harness/policy.json"
+  local runtime=""
+
+  [[ -f "$policy_file" ]] || { printf 'registry'; return 0; }
+  for candidate in node bun python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      runtime="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$runtime" ]]; then
+    printf 'registry'
+    return 0
+  fi
+
+  case "$runtime" in
+    python3)
+      "$runtime" - "$policy_file" <<'PY_EOF'
+import json
+import sys
+
+try:
+    policy = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+    value = policy.get("context", {}).get("capability_source")
+except Exception:
+    value = None
+print(value if isinstance(value, str) and value else "registry", end="")
+PY_EOF
+      ;;
+    *)
+      "$runtime" -e '
+const fs = require("fs");
+let value;
+try {
+  const policy = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  value = policy && policy.context ? policy.context.capability_source : undefined;
+} catch {}
+process.stdout.write(typeof value === "string" && value ? value : "registry");
+' "$policy_file"
+      ;;
+  esac
+}
+
 read_active_plan_marker() {
   local marker_file="$1"
   local marker_plan
@@ -501,9 +549,7 @@ delegation:
   runner:
     preferred:
       - subagent
-      - codex-exec
-      - main-thread
-    fallback: main-thread
+    fallback: null
     brief_is_authoritative: true
 ```
 
@@ -975,7 +1021,10 @@ HANDOFF_EOF
     : > "tasks/workstreams/.gitkeep"
   fi
 
-  if [[ ! -f ".ai/context/capabilities.json" ]]; then
+  # Seeding the JSON registry into an archcontext-authority repo would
+  # reinstate the retired second authority, so the capability_source selector
+  # gates the seed. Registry-mode repos (the default) are unchanged.
+  if [[ "$(capability_source)" == "registry" && ! -f ".ai/context/capabilities.json" ]]; then
     cat > ".ai/context/capabilities.json" <<'CAPABILITIES_EOF'
 {
   "version": 1,
@@ -994,7 +1043,6 @@ CAPABILITIES_EOF
 
 - Latest snapshot: (none yet)
 - Semantic diagram source: (none yet)
-- Latest human diagram: (none yet)
 
 ## Architecture Drift Flow
 
@@ -1003,7 +1051,7 @@ CAPABILITIES_EOF
 - `repo-harness run context-contract-sync` keeps only the controlled architecture block in functional-block `AGENTS.md` and `CLAUDE.md` files aligned.
 - `repo-harness run workstream-sync` keeps durable multi-session progress under `tasks/workstreams/<domain>/<capability>/` and projects only pointers into local contracts.
 - Semantic architecture diagrams live as Mermaid fenced blocks in the relevant module or snapshot Markdown.
-- Human-readable architecture diagrams are optional `mermaid` HTML files in `docs/architecture/diagrams/` and should link back to the Markdown semantic source.
+- Markdown Mermaid fenced blocks are the only architecture diagram artifacts; do not generate standalone HTML.
 
 ## Pending Requests
 
@@ -1061,7 +1109,10 @@ ARCHITECTURE_INDEX_EOF
     "map_file": ".ai/context/context-map.json",
     "capability_registry_file": ".ai/context/capabilities.json",
     "capability_resolver": "repo-harness run capability-resolver",
+    "capability_config": "repo-harness run capability-config",
     "capability_match_rule": "longest-prefix; same-length ambiguity fails",
+    "capability_source": "registry",
+    "capability_source_rule": "single authority selected by capability_source; registry reads .ai/context/capabilities.json, archcontext reads .archcontext/model/nodes/*.yaml; no dual-read and no fallback",
     "functional_block_selector": {
       "script": "repo-harness run select-agent-context-blocks",
       "config_file": ".ai/context/agent-context-blocks.txt",
@@ -1090,6 +1141,11 @@ ARCHITECTURE_INDEX_EOF
     "diagram_skill": "mermaid",
     "diagram_skill_source": "~/.codex/skills/mermaid",
     "vendoring_policy": "do-not-vendor-diagram-skill-assets",
+    "projection_provider": "disabled",
+    "projection_apply": "disabled",
+    "projection_failure_gate": "advisory",
+    "projection_version": "0.4.2",
+    "projection_timeout_ms": 120000,
     "freshness_gate": "advisory",
     "gate_min_severity": "medium",
     "pending_card_scope": "capability",
@@ -1169,13 +1225,11 @@ ARCHITECTURE_INDEX_EOF
     "strict_max_agents": 3,
     "max_depth": 1,
     "allow_parallel_writers": false,
-    "stop_fallback": true,
     "state_file": ".ai/harness/delegation/latest.json",
-    "preferred_runners": ["subagent", "codex-subagent", "codex-exec", "main-thread"],
-    "fallback_runner": "main-thread",
+    "preferred_runners": ["subagent"],
     "brief_source": "tasks/contracts/<stem>.contract.md",
-    "runner_rule": "the active task contract is the authoritative execution brief consumed by contract-run; native subagent (Claude) or codex-subagent (Codex's own native subagent) is an optional parallelism accelerator, preferred first per host. Degrade to codex-exec, then sequential main-thread, on the SAME contract when spawn is unavailable, sandboxed, or unreliable. Runner-availability fallback MUST be recorded in the contract-run manifest and MUST NOT silently succeed; it is a runner-availability fallback, not a product-semantics compatibility fallback.",
-    "rule": "UserPromptSubmit.delegation only injects bounded subagent context after explicit user authorization such as /delegate, /parallel, spawn subagents, or parallel investigation, regardless of delegation.mode. When delegation.mode resolves to \"auto\", the in-process session-context builder (src/cli/hook/session-context.ts) instead injects one standing bounded-delegation authorization block at SessionStart (Codex host only) for the whole session; UserPromptSubmit.delegation does not re-assert it on later prompts. The global ~/.repo-harness/config.json delegation.mode value, when exactly \"auto\" or \"explicit\", takes precedence over this repo policy value when resolving that SessionStart mode."
+    "runner_rule": "the active task contract is the authoritative execution brief. Claude uses its native subagent surface. Codex uses native spawn_agent with the exact installed agent_type and fork_turns=none; official SubagentStart agent_type/model fields are the runtime observation. Missing, default, mismatched, invalid, or unverified native routing fails closed without an alternate fleet runner. Reasoning effort remains configured_unverified until Codex exposes an official runtime field.",
+    "rule": "UserPromptSubmit.delegation injects bounded delegation context only for the typed /delegate or /parallel command. Natural-language inference and SessionStart standing authorization are not delegation authorities."
   },
   "sidecar_research": {
     "default": true,
@@ -1326,6 +1380,18 @@ ARCHITECTURE_INDEX_EOF
       "project_init_command": "codegraph init -i .",
       "sync_command": "codegraph sync .",
       "vendoring_policy": "do-not-add-package-dependency"
+    },
+    "archctx": {
+      "cli_package": "archctx",
+      "contracts_package": "archctx-contracts",
+      "contracts_scope": "release-gated-packed-schema-authority",
+      "install_mode": "release-gated-runtime-dependency-when-projection-enabled",
+      "readiness": "advisory",
+      "hook_policy": "do-not-block-hooks",
+      "vendoring_policy": "do-not-vendor",
+      "model_dir": ".archcontext/model",
+      "nodes_dir": ".archcontext/model/nodes",
+      "capability_source_key": ".ai/harness/policy.json#context.capability_source"
     }
   },
   "agentic_development": {

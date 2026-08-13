@@ -1,0 +1,32 @@
+schemaVersion: archcontext.node/v2
+id: capability.public-surface.root-router
+kind: capability
+name: Root Router
+status: active
+summary: Routes repository-level product and agent context into capability-specific contracts.
+responsibilities:
+  - Own the root public contract, product entry documentation, and top-level agent routing.
+source:
+  include:
+    - "SKILL.md"
+    - "README.md"
+    - "AGENTS.md"
+    - "CLAUDE.md"
+    - "docs/spec.md"
+  entrypoints:
+    - id: entrypoint.root-router.primary
+      path: "src/cli/commands/adoption-plan.ts"
+      symbols:
+        - name: "runAdoptionPlan"
+          sinks:
+            - id: sink.root-router.primary
+              path: "src/cli/commands/adoption-plan.ts"
+              symbol: "createPlan"
+extensions:
+  contractFiles:
+    agents: "AGENTS.md"
+    claude: "CLAUDE.md"
+  lspProfile: "typescript-lsp"
+  verification:
+    - "bun scripts/inspect-project-state.ts --repo . --format text"
+    - "bun src/cli/index.ts init --repo . --dry-run"

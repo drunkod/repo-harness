@@ -1,0 +1,45 @@
+schemaVersion: archcontext.node/v2
+id: capability.workflow-engine.contract-assets
+kind: capability
+name: Contract Assets
+status: active
+summary: Maintains canonical workflow contracts, templates, capability nodes, and helper projections.
+responsibilities:
+  - Own workflow contract assets, policy seeders, capability authority, and generated helper parity.
+source:
+  include:
+    - "assets/workflow-contract.v1.json"
+    - ".ai/harness/workflow-contract.json"
+    - ".ai/harness/policy.json"
+    - ".ai/context/context-map.json"
+    - ".archcontext/model/nodes/**"
+    - "scripts/capability-resolver.ts"
+    - "scripts/capability-config.ts"
+    - "scripts/contract-run.ts"
+    - "scripts/contract-worktree.sh"
+    - "scripts/archive-workflow.sh"
+    - "scripts/merge-gate.ts"
+    - "scripts/ship-worktrees.sh"
+    - "src/cli/commands/init.ts"
+    - "src/cli/commands/capability-context.ts"
+    - "src/cli/runtime/helper-runner.ts"
+    - "assets/templates/**"
+    - "assets/reference-configs/**"
+    - "docs/reference-configs/**"
+  entrypoints:
+    - id: entrypoint.contract-assets.primary
+      path: "src/core/adoption/workflow-contract-asset.ts"
+      symbols:
+        - name: "loadWorkflowContractAsset"
+          sinks:
+            - id: sink.contract-assets.primary
+              path: "src/core/adoption/workflow-contract-asset.ts"
+              symbol: "readWorkflowContractAsset"
+extensions:
+  contractFiles:
+    agents: "assets/AGENTS.md"
+    claude: "assets/CLAUDE.md"
+  lspProfile: "typescript-lsp"
+  verification:
+    - "bun test tests/workflow-contract.test.ts tests/scaffold-parity.test.ts"
+    - "bun scripts/capability-resolver.ts validate --format text"

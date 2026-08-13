@@ -1,0 +1,35 @@
+schemaVersion: archcontext.node/v2
+id: capability.runtime-harness.mcp-sidecar
+kind: capability
+name: MCP Sidecar
+status: active
+summary: Provides the local MCP sidecar and its repository access policy boundary.
+responsibilities:
+  - Own MCP lifecycle, workspace registration, access policy, and local browser integration.
+source:
+  include:
+    - "src/cli/mcp/**"
+    - "src/cli/commands/mcp.ts"
+    - "src/cli/chatgpt-browser/file-policy.ts"
+    - "src/effects/repo-registry.ts"
+    - "docs/repo-harness-chatgpt-mcp-setup.md"
+    - "docs/reference-configs/chatgpt-coding-mcp.md"
+    - "docs/researches/20260711-devspace-chatgpt-local-control.md"
+  entrypoints:
+    - id: entrypoint.mcp-sidecar.primary
+      path: "src/cli/mcp/server.ts"
+      symbols:
+        - name: "createRepoHarnessMcpServer"
+          sinks:
+            - id: sink.mcp-sidecar.primary
+              path: "src/cli/mcp/tools.ts"
+              symbol: "callMcpTool"
+extensions:
+  contractFiles:
+    agents: "AGENTS.md"
+    claude: "CLAUDE.md"
+  lspProfile: "typescript-lsp"
+  verification:
+    - "bun test tests/cli/mcp*.test.ts"
+    - "bun run check:type"
+    - "repo-harness mcp doctor --repo . --live"

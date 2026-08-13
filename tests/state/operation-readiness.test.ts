@@ -13,6 +13,7 @@ import {
   type EvaluateReadinessResult,
 } from '../../src/core/workflow/operation-readiness';
 import type { WorkflowProfile } from '../../src/core/workflow/profile';
+import { readArchitectureProjectionPolicy } from '../../src/core/architecture/projection';
 
 const FIXTURE_PATH = join(import.meta.dir, 'fixtures/loop-semantics/operation-readiness.json');
 const CHARACTERIZATION_PATH = join(import.meta.dir, 'fixtures/loop-semantics/characterization.json');
@@ -99,6 +100,25 @@ function toEvaluateReadinessInput(raw: RawCaseInput): EvaluateReadinessInput {
 }
 
 describe('evaluateReadiness fixture-driven matrix', () => {
+  test('architecture projection policy keeps provider and apply orthogonal and fail-closed', () => {
+    expect(readArchitectureProjectionPolicy({ architecture: {
+      projection_provider: 'archctx',
+      projection_apply: 'manual',
+      projection_failure_gate: 'strict',
+      projection_version: '0.4.2',
+      projection_timeout_ms: 120000,
+    } })).toEqual({ provider: 'archctx', applyMode: 'manual', failureGate: 'strict', requiredVersion: '0.4.2', timeoutMs: 120000 });
+    expect(readArchitectureProjectionPolicy({ architecture: {
+      projection_provider: 'disabled',
+      projection_apply: 'disabled',
+      projection_failure_gate: 'misspelled-inactive-value',
+      projection_timeout_ms: -1,
+    } })).toEqual({ provider: 'disabled', applyMode: 'disabled', failureGate: 'advisory', requiredVersion: '0.4.2', timeoutMs: 120000 });
+    expect(() => readArchitectureProjectionPolicy({ architecture: {
+      projection_provider: 'disabled',
+      projection_apply: 'automatic',
+    } })).toThrow('projection_apply must be disabled');
+  });
   test('fixture declares exactly the nine frozen characterization cells with no duplicates', () => {
     expect(fixture.positive_cases).toHaveLength(9);
     const fixtureNames = new Set(fixture.positive_cases.map((testCase) => testCase.name));
@@ -121,6 +141,38 @@ describe('evaluateReadiness fixture-driven matrix', () => {
       test(testCase.name, () => {
         expect(evaluateReadiness(toEvaluateReadinessInput(testCase.input))).toEqual(testCase.expected);
       });
+    }
+  });
+
+  test('contract-authorized checks_failed repair opens edit only', () => {
+    const requirements = {
+      edit: resolve({ profile: 'standard', operation: 'edit' }),
+      stop: resolve({ profile: 'standard', operation: 'stop' }),
+      ship: resolve({ profile: 'standard', operation: 'ship' }),
+    } as const;
+    const satisfiedRequirements: ArtifactRequirementKey[] = [];
+    for (const result of Object.values(requirements)) {
+      if (result.ok) {
+        for (const requirement of result.requirements) satisfiedRequirements.push(requirement.key);
+      }
+    }
+
+    const result = evaluateReadiness({
+      profile: 'standard',
+      operation: 'edit',
+      requirements,
+      evidence: {
+        satisfiedRequirements,
+        hardBlockers: ['checks_failed'],
+        checksFailedRepairAuthorized: true,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.allowedToEdit).toEqual({ decision: 'allow' });
+      expect(result.allowedToStop).toEqual({ decision: 'block', reasons: ['hard_blocker_present'] });
+      expect(result.readyToShip).toEqual({ decision: 'block', reasons: ['hard_blocker_present'] });
     }
   });
 });

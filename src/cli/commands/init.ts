@@ -27,6 +27,7 @@ import { fileURLToPath } from "url";
 import { runInstall, type InstallTargetSpec } from "./install";
 import { runBrain } from "./brain";
 import {
+  externalSkillInstallGroups as catalogExternalSkillInstallGroups,
   hostSkillPlacements as catalogHostSkillPlacements,
   parseSkillSurfaceCatalog,
   probeExpectations as catalogProbeExpectations,
@@ -112,18 +113,6 @@ function crossReviewSkillsFromCatalog(catalog: SkillSurfaceCatalog): ReadonlyArr
   return entries;
 }
 
-/** Groups kind:"external" catalog packages by upstream provider, preserving manifest declaration order. */
-function externalSkillGroupsFromCatalog(catalog: SkillSurfaceCatalog): ReadonlyMap<string, readonly string[]> {
-  const groups = new Map<string, string[]>();
-  for (const pkg of catalog.packages) {
-    if (pkg.kind !== "external" || pkg.provider === null) continue;
-    const list = groups.get(pkg.provider) ?? [];
-    list.push(pkg.name);
-    groups.set(pkg.provider, list);
-  }
-  return groups;
-}
-
 export interface InitCommandOptions {
   repo?: string;
   sourceRoot?: string;
@@ -194,7 +183,7 @@ function isNpxCacheSource(sourceRoot: string): boolean {
 function initCommandEnv(sourceRoot: string, env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv | undefined {
   if (!isNpxCacheSource(sourceRoot)) return env;
   if (env?.AGENTIC_DEV_LINK_INSTALLED_COPIES !== undefined) return env;
-  return { ...(env ?? {}), AGENTIC_DEV_LINK_INSTALLED_COPIES: "0" };
+  return { ...(env ?? process.env), AGENTIC_DEV_LINK_INSTALLED_COPIES: "0" };
 }
 
 function withStepName(step: InitStep, name: string, detail?: string): InitStep {
@@ -237,6 +226,10 @@ function hostIds(target: InstallTargetSpec): Array<"codex" | "claude"> {
   if (target === "codex") return ["codex"];
   if (target === "claude") return ["claude"];
   return ["claude", "codex"];
+}
+
+function targetFromHostIds(hosts: readonly ("codex" | "claude")[]): InstallTargetSpec {
+  return hosts.length === 2 ? "both" : hosts[0]!;
 }
 
 function homeDir(env?: NodeJS.ProcessEnv): string | null {
@@ -518,48 +511,41 @@ function syncWazaSharedRules(target: InstallTargetSpec, env?: NodeJS.ProcessEnv)
 
 function installExternalSkills(sourceRoot: string, target: InstallTargetSpec, env?: NodeJS.ProcessEnv): InitStep[] {
   const steps: InitStep[] = [];
-  const agents = hostAgents(target);
   const catalog = loadSkillSurfaceCatalog(sourceRoot);
-  const externalGroups = externalSkillGroupsFromCatalog(catalog);
-  const wazaSkills = externalGroups.get("tw93/Waza") ?? [];
-  const mermaidSkills = externalGroups.get("BfdCampos/dotfiles") ?? [];
-  const waza = runProcess(
-    "bunx",
-    [
-      "skills",
-      "add",
-      "tw93/Waza",
-      "-g",
-      "-a",
-      ...agents,
-      "-s",
-      ...wazaSkills,
-      "-y",
-    ],
-    sourceRoot,
-    env,
-  );
-  steps.push(withStepName(waza, "external skills Waza", `target=${target}`));
-  steps.push(waza.status === "ok"
-    ? syncWazaSharedRules(target, env)
-    : { step: "external skills Waza shared rules", status: "skipped", detail: "Waza install failed" });
-  const mermaid = runProcess(
-    "bunx",
-    [
-      "skills",
-      "add",
-      "BfdCampos/dotfiles",
-      "-g",
-      "-a",
-      ...agents,
-      "-s",
-      ...mermaidSkills,
-      "-y",
-    ],
-    sourceRoot,
-    env,
-  );
-  steps.push(withStepName(mermaid, "external skill mermaid", `target=${target}`));
+  const externalGroups = catalogExternalSkillInstallGroups(catalog, {
+    hosts: hostIds(target),
+    profileGate: "full",
+  });
+  for (const { provider, hosts, skills } of externalGroups) {
+    const groupTarget = targetFromHostIds(hosts);
+    const installed = runProcess(
+      "bunx",
+      [
+        "skills",
+        "add",
+        provider,
+        "-g",
+        "-a",
+        ...hostAgents(groupTarget),
+        "-s",
+        ...skills,
+        "-y",
+      ],
+      sourceRoot,
+      env,
+    );
+    const stepName = provider === "tw93/Waza"
+      ? "external skills Waza"
+      : provider === "BfdCampos/dotfiles"
+        ? "external skill mermaid"
+        : `external skills ${provider}`;
+    steps.push(withStepName(installed, stepName, `target=${groupTarget}`));
+    if (provider === "tw93/Waza") {
+      steps.push(installed.status === "ok"
+        ? syncWazaSharedRules(groupTarget, env)
+        : { step: "external skills Waza shared rules", status: "skipped", detail: "Waza install failed" });
+    }
+  }
   steps.push(...syncCrossReviewSkills(sourceRoot, target, env));
   return steps;
 }
@@ -585,7 +571,7 @@ export function runInit(
   const steps: InitStep[] = [];
 
   if (opts.brainRoot) {
-    commandEnv = { ...(commandEnv ?? {}), REPO_HARNESS_BRAIN_ROOT: opts.brainRoot };
+    commandEnv = { ...(commandEnv ?? process.env), REPO_HARNESS_BRAIN_ROOT: opts.brainRoot };
   }
 
   const targetError = validateRepoAdoptionTarget(repoRoot, opts.repo !== undefined, commandEnv);
@@ -768,7 +754,7 @@ export function runInit(
   }
 
   if (apply && verify) {
-    const verifyEnv = { ...(commandEnv ?? {}), REPO_HARNESS_SOURCE_ROOT: sourceRoot };
+    const verifyEnv = { ...(commandEnv ?? process.env), REPO_HARNESS_SOURCE_ROOT: sourceRoot };
     if (migrate.status === "ok") {
       const handoff = runProcess(
         "bun",

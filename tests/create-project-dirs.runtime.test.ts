@@ -9,6 +9,19 @@ const ROOT = join(import.meta.dir, "..");
 const REFERENCE_STUB_MARKER = "<!-- repo-harness: reference-config-stub v1 -->";
 const RUNTIME_SMOKE_TIMEOUT_MS = 15000;
 
+/**
+ * scripts/ensure-task-workflow.sh embeds its policy fallback as a quoted
+ * `POLICY_EOF` heredoc, so the body is literal JSON with no shell expansion.
+ * Parsing it directly keeps this seeder in the cross-seeder parity assertions
+ * without having to scaffold a whole workspace.
+ */
+function ensureTaskWorkflowSeedPolicy(): Record<string, any> {
+  const source = readFileSync(join(ROOT, "scripts/ensure-task-workflow.sh"), "utf-8");
+  const match = source.match(/<<'POLICY_EOF'\n([\s\S]*?)\nPOLICY_EOF\n/);
+  if (!match) throw new Error("scripts/ensure-task-workflow.sh POLICY_EOF heredoc not found");
+  return JSON.parse(match[1]);
+}
+
 function expectReferenceConfigStub(cwd: string, docId: string): void {
   const content = readFileSync(join(cwd, "docs/reference-configs", `${docId}.md`), "utf-8");
   expect(content).toContain(REFERENCE_STUB_MARKER);
@@ -104,7 +117,8 @@ describe("create-project-dirs runtime smoke", () => {
       expect(gitignore).toContain(".ai/harness/state/");
       expect(gitignore).toContain(".archcontext/");
       expect(gitignore).not.toContain(".ai/harness/chatgpt/bridge-extension/");
-      expect(gitignore).toContain(".repo-harness/chatgpt-browser.local.json");
+      expect(gitignore).toContain(".repo-harness/");
+      expect(gitignore).not.toContain(".repo-harness/chatgpt-browser.local.json");
       expect(gitignore).not.toContain("# repo-harness generated helper wrappers");
       expect(gitignore).not.toContain("scripts/check-task-workflow.sh");
       expect(gitignore).not.toContain("scripts/prepare-codex-handoff.sh");
@@ -339,6 +353,25 @@ describe("create-project-dirs runtime smoke", () => {
       expect(policy.external_tooling.codegraph.readiness).toBe("required-for-agent-code-navigation");
       expect(policy.external_tooling.codegraph.hook_policy).toBe("do-not-block-hooks");
       expect(policy.external_tooling.codegraph.vendoring_policy).toBe("do-not-add-package-dependency");
+      // archctx is an external optional CLI, never a runtime dependency: the entry
+      // must stay advisory and identical across every seeder that emits it.
+      const archctxEntry = {
+        cli_package: "archctx",
+        contracts_package: "archctx-contracts",
+        contracts_scope: "release-gated-packed-schema-authority",
+        install_mode: "release-gated-runtime-dependency-when-projection-enabled",
+        readiness: "advisory",
+        hook_policy: "do-not-block-hooks",
+        vendoring_policy: "do-not-vendor",
+        model_dir: ".archcontext/model",
+        nodes_dir: ".archcontext/model/nodes",
+        capability_source_key: ".ai/harness/policy.json#context.capability_source",
+      };
+      expect(policy.external_tooling.archctx).toEqual(archctxEntry);
+      expect(ensureTaskWorkflowSeedPolicy().external_tooling.archctx).toEqual(archctxEntry);
+      expect(
+        JSON.parse(readFileSync(join(ROOT, ".ai/harness/policy.json"), "utf-8")).external_tooling.archctx
+      ).toEqual(archctxEntry);
       expect(policy.external_tooling.agent_fleet.source).toBe("package:agents/fleet");
       expect(policy.external_tooling.agent_fleet.managed_agents).toEqual([
         "explorer",
@@ -420,6 +453,31 @@ describe("create-project-dirs runtime smoke", () => {
       expect(policy.context.capability_registry_file).toBe(".ai/context/capabilities.json");
       expect(policy.context.capability_resolver).toBe("repo-harness run capability-resolver");
       expect(policy.context.capability_config).toBe("repo-harness run capability-config");
+      // All three independently hardcoded policy seeders must agree on the capability
+      // authority switch; downstream repos stay on the JSON registry by default.
+      // Seeders: scripts/lib/project-init-lib.sh (bash `policy` above),
+      // src/core/adoption/standard-plan.ts (`tsDefaultPolicy`), and
+      // scripts/ensure-task-workflow.sh (its embedded POLICY_EOF fallback seed).
+      const fallbackSeedPolicy = ensureTaskWorkflowSeedPolicy();
+      const repoPolicy = JSON.parse(readFileSync(join(ROOT, ".ai/harness/policy.json"), "utf-8"));
+      for (const seeded of [policy, tsDefaultPolicy, fallbackSeedPolicy]) {
+        expect(seeded.context.capability_source).toBe("registry");
+      }
+      // This repo cut its own authority over to archcontext nodes (Stage 2); the
+      // seeded default above is what a newly generated repo gets, not what this repo
+      // runs on. Both shapes share the one selector and the one rule string.
+      expect(repoPolicy.context.capability_source).toBe("archcontext");
+      expect(existsSync(join(ROOT, ".archcontext/model/nodes"))).toBe(true);
+      expect(existsSync(join(ROOT, ".ai/context/capabilities.json"))).toBe(false);
+      for (const seeded of [policy, tsDefaultPolicy, fallbackSeedPolicy, repoPolicy]) {
+        expect(seeded.context.capability_source_rule).toBe(tsDefaultPolicy.context.capability_source_rule);
+        expect(seeded.context.capability_source_rule).toContain("no dual-read and no fallback");
+      }
+      // capability_config is seeded by the three file-writing seeders; standard-plan.ts
+      // does not carry it, so it is asserted separately from the switch itself.
+      for (const seeded of [policy, fallbackSeedPolicy, repoPolicy]) {
+        expect(seeded.context.capability_config).toBe("repo-harness run capability-config");
+      }
       expect(policy.documentation.profile).toBe("minimal-agentic");
       expect(policy.documentation.reference_source).toBe("user-level-runtime-docs");
       expect(policy.documentation.reference_stub_marker).toBe(REFERENCE_STUB_MARKER);
@@ -454,16 +512,16 @@ describe("create-project-dirs runtime smoke", () => {
       expect(policy.sidecar_research.spawn_decision).toContain("do not ask the user");
       expect(policy.sidecar_research.fallback_runner).toBe("main-thread trace");
       expect(policy.sidecar_research.main_thread_policy).toContain("if spawning is not worthwhile");
-      expect(policy.delegation.preferred_runners).toEqual([
-        "subagent",
-        "codex-subagent",
-        "codex-exec",
-        "main-thread",
-      ]);
-      expect(policy.delegation.fallback_runner).toBe("main-thread");
+      expect(policy.delegation.preferred_runners).toEqual(["subagent"]);
+      expect(policy.delegation.fallback_runner).toBeUndefined();
       expect(policy.delegation.brief_source).toBe("tasks/contracts/<stem>.contract.md");
-      expect(policy.delegation.runner_rule).toContain("codex-subagent (Codex's own native subagent)");
-      expect(policy.delegation.runner_rule).toContain("MUST NOT silently succeed");
+      expect(policy.delegation.runner_rule).toContain(
+        "Codex uses native spawn_agent with the exact installed agent_type",
+      );
+      expect(policy.delegation.runner_rule).toContain(
+        "fails closed without an alternate fleet runner",
+      );
+      expect(policy.delegation.runner_rule).toContain("configured_unverified");
       expect(policy.documentation.reference_configs).toContain("global-working-rules.md");
       expect(policy.documentation.reference_configs).toContain("minimal-change-hooks.md");
       expect(policy.upgrade.strategy_version).toBe(1);

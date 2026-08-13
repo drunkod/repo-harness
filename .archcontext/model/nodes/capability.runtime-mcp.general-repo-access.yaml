@@ -1,0 +1,34 @@
+schemaVersion: archcontext.node/v2
+id: capability.runtime-mcp.general-repo-access
+kind: capability
+name: General Repository Access
+status: active
+summary: Exposes bounded read-only repository tools through MCP.
+responsibilities:
+  - Own general repository reader tools, CodeGraph routing, and access-policy enforcement.
+source:
+  include:
+    - "src/cli/mcp/general-repo-access.ts"
+    - "src/cli/mcp/general-repo-access/**"
+    - "tests/cli/mcp-reader-tools.test.ts"
+    - "tests/cli/mcp-codegraph-contract.test.ts"
+    - "tests/cli/mcp-policy.test.ts"
+    - "tests/cli/mcp-tools.test.ts"
+  entrypoints:
+    - id: entrypoint.general-repo-access.primary
+      path: "src/cli/mcp/reader-tools.ts"
+      symbols:
+        - name: "callReaderTool"
+          sinks:
+            - id: sink.general-repo-access.primary
+              path: "src/cli/mcp/general-repo-access.ts"
+              symbol: "callGeneralRepoTool"
+extensions:
+  contractFiles:
+    agents: "AGENTS.md"
+    claude: "CLAUDE.md"
+  lspProfile: "typescript-lsp"
+  verification:
+    - "bun test tests/cli/mcp-reader-tools.test.ts tests/cli/mcp-codegraph-contract.test.ts"
+    - "bun test tests/cli/mcp-policy.test.ts tests/cli/mcp-tools.test.ts"
+    - "bun run check:type"

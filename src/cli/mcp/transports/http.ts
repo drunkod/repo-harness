@@ -18,12 +18,12 @@ import {
   type McpServerOptions,
 } from '../server';
 import {
+  assertNoLegacyRepoScopeMcpConfig,
   loadMcpLocalConfig,
   mcpOAuthTokenStorePath,
   parseMcpHttpAuthMode,
   readMcpBearerToken,
   readMcpOAuthPassphrase,
-  resolveMcpConfigScope,
   type McpHttpAuthMode,
 } from '../auth';
 import { createMcpOAuthProvider, McpOAuthTokenStore, type McpStoredAuthInfo } from '../oauth';
@@ -422,9 +422,9 @@ function sendSessionNotFound(res: Response, status = 404): void {
   });
 }
 
-function recordForSession(sessions: McpSessionStore<McpHttpTransport>, sessionId: string | undefined) {
+function acquireSession(sessions: McpSessionStore<McpHttpTransport>, sessionId: string | undefined) {
   if (!sessionId || !isValidSessionId(sessionId)) return undefined;
-  return sessions.get(sessionId);
+  return sessions.acquire(sessionId);
 }
 
 async function handleMcpPost(
@@ -443,10 +443,6 @@ async function handleMcpPost(
   }
   const sessionId = sessionIdFromRequest(req);
   if (!sessionId && isInitializeRequest(body)) {
-    if (!sessions.canCreate()) {
-      res.status(429).json({ error: { code: 'SESSION_LIMIT_REACHED', message: 'Too many active MCP sessions.' } });
-      return;
-    }
     const authorizationId = codingRuntimes ? authorizationIdFromRequest(req) : undefined;
     if (codingRuntimes && !authorizationId) {
       sendOAuthUnauthorized(req, res, 'Coding authorization identity is missing');
@@ -467,27 +463,46 @@ async function handleMcpPost(
         throw error;
       }
     }
+    const reservation = sessions.reserveForCreate();
+    if (!reservation) {
+      res.status(429).json({ error: { code: 'SESSION_LIMIT_REACHED', message: 'Too many active MCP sessions.' } });
+      return;
+    }
+    let sessionInitialized = false;
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (newSessionId) => { sessions.set(newSessionId, transport); },
+      onsessioninitialized: (newSessionId) => {
+        reservation.commit(newSessionId, transport);
+        sessionInitialized = true;
+      },
     }) as McpHttpTransport;
     transport.authorizationId = authorizationId;
     transport.onclose = () => {
       if (transport.sessionId) sessions.delete(transport.sessionId);
     };
     const server = createRepoHarnessMcpServer({ ...opts, codingRuntime });
-    await server.connect(transport);
-    await transport.handleRequest(req, res, body);
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, body);
+    } finally {
+      reservation.release();
+      if (!sessionInitialized) await transport.close().catch(() => undefined);
+    }
     return;
   }
   if (sessionId) {
-    const record = recordForSession(sessions, sessionId);
-    if (record && authorizationOwnsTransport(req, record.transport, codingRuntimes !== null)) {
+    const lease = acquireSession(sessions, sessionId);
+    if (lease && authorizationOwnsTransport(req, lease.record.transport, codingRuntimes !== null)) {
       const authorizationId = authorizationIdFromRequest(req);
       if (authorizationId) codingRuntimes?.touch(authorizationId);
-      await record.transport.handleRequest(req, res, body);
+      try {
+        await lease.record.transport.handleRequest(req, res, body);
+      } finally {
+        lease.release();
+      }
       return;
     }
+    lease?.release();
   }
   sendSessionNotFound(res);
 }
@@ -498,14 +513,19 @@ async function handleMcpGet(
   sessions: McpSessionStore<McpHttpTransport>,
   codingRuntimes: CodingAuthorizationRuntimeStore | null,
 ): Promise<void> {
-  const record = recordForSession(sessions, sessionIdFromRequest(req));
-  if (!record || !authorizationOwnsTransport(req, record.transport, codingRuntimes !== null)) {
+  const lease = acquireSession(sessions, sessionIdFromRequest(req));
+  if (!lease || !authorizationOwnsTransport(req, lease.record.transport, codingRuntimes !== null)) {
+    lease?.release();
     sendSessionNotFound(res);
     return;
   }
   const authorizationId = authorizationIdFromRequest(req);
   if (authorizationId) codingRuntimes?.touch(authorizationId);
-  await record.transport.handleRequest(req, res);
+  try {
+    await lease.record.transport.handleRequest(req, res);
+  } finally {
+    lease.release();
+  }
 }
 
 async function handleMcpDelete(
@@ -515,23 +535,28 @@ async function handleMcpDelete(
   codingRuntimes: CodingAuthorizationRuntimeStore | null,
 ): Promise<void> {
   const sessionId = sessionIdFromRequest(req);
-  const record = recordForSession(sessions, sessionId);
-  if (!sessionId || !record || !authorizationOwnsTransport(req, record.transport, codingRuntimes !== null)) {
+  const lease = acquireSession(sessions, sessionId);
+  if (!sessionId || !lease || !authorizationOwnsTransport(req, lease.record.transport, codingRuntimes !== null)) {
+    lease?.release();
     sendSessionNotFound(res);
     return;
   }
   const authorizationId = authorizationIdFromRequest(req);
   if (authorizationId) codingRuntimes?.touch(authorizationId);
-  await record.transport.handleRequest(req, res);
-  await sessions.closeAndDelete(sessionId);
+  try {
+    await lease.record.transport.handleRequest(req, res);
+  } finally {
+    lease.release();
+    await sessions.closeAndDelete(sessionId);
+  }
 }
 
 export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   const host = opts.host ?? '127.0.0.1';
   const port = opts.port ?? 8765;
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
-  const configScope = resolveMcpConfigScope(repoRoot);
-  const localConfig = loadMcpLocalConfig(repoRoot, configScope);
+  assertNoLegacyRepoScopeMcpConfig(repoRoot);
+  const localConfig = loadMcpLocalConfig();
   const profile = opts.profile ?? localConfig?.profile ?? 'planner';
   const storedEndpoint = localConfig?.chatgpt?.endpoint;
   const storedPublicOrigin = storedEndpoint ? new URL(storedEndpoint).origin : undefined;
@@ -545,13 +570,13 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   if (
     coding
     && (
-      configScope !== 'user'
-      || localConfig?.profile !== 'coding'
+      localConfig?.version !== 3
+      || localConfig.profile !== 'coding'
       || localConfig.coding?.enabled !== true
       || localConfig.authorizationRevision !== repoHarnessAuthorizationRevision()
     )
   ) {
-    throw new Error('coding profile requires enabled user-scoped v3 setup');
+    throw new Error('coding profile requires enabled v3 setup');
   }
   const readWriteRepos = readRegisteredRepoHarnessRepos({ adoptedOnly: true }).filter((repo) => repo.accessMode === 'read_write');
   if (coding && readWriteRepos.length === 0) {
@@ -561,13 +586,13 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   if (coding && authMode !== 'oauth') {
     throw new Error('coding profile requires OAuth authentication');
   }
-  const authToken = authMode === 'bearer' || authMode === 'url-token' ? opts.authToken ?? readMcpBearerToken(repoRoot, configScope) : null;
-  const oauthPassphrase = authMode === 'oauth' ? readMcpOAuthPassphrase(repoRoot, configScope) : null;
+  const authToken = authMode === 'bearer' || authMode === 'url-token' ? opts.authToken ?? readMcpBearerToken() : null;
+  const oauthPassphrase = authMode === 'oauth' ? readMcpOAuthPassphrase() : null;
   const sessionTtlMs = boundedIntegerEnv('REPO_HARNESS_MCP_SESSION_TTL_MS', SESSION_TTL_MS, 1_000, 24 * 60 * 60 * 1000);
   const maxSessions = boundedIntegerEnv('REPO_HARNESS_MCP_MAX_SESSIONS', MAX_SESSIONS, 1, 256);
   const sessions = new McpSessionStore<McpHttpTransport>({ ttlMs: sessionTtlMs, maxSessions });
   const codingRuntimes = coding ? new CodingAuthorizationRuntimeStore(sessionTtlMs, maxSessions) : null;
-  const tokenStore = authMode === 'oauth' ? new McpOAuthTokenStore(mcpOAuthTokenStorePath(repoRoot, configScope)) : null;
+  const tokenStore = authMode === 'oauth' ? new McpOAuthTokenStore(mcpOAuthTokenStorePath()) : null;
   tokenStore?.load();
   let observedAuthorizationRevision = repoHarnessAuthorizationRevision();
   const oauthProvider = tokenStore ? createMcpOAuthProvider(tokenStore, {
@@ -598,7 +623,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   };
   const authorizationTimer = coding ? setInterval(() => {
     const currentRevision = repoHarnessAuthorizationRevision();
-    const liveConfig = loadMcpLocalConfig(repoRoot, 'user');
+    const liveConfig = loadMcpLocalConfig();
     if (currentRevision !== observedAuthorizationRevision) {
       observedAuthorizationRevision = currentRevision;
       closeStaleCodingState();
@@ -615,7 +640,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
 
   app.use((req, res, next) => {
     if (coding) {
-      const liveConfig = loadMcpLocalConfig(repoRoot, 'user');
+      const liveConfig = loadMcpLocalConfig();
       const hasGrant = readRegisteredRepoHarnessRepos({ adoptedOnly: true }).some((repo) => repo.accessMode === 'read_write');
       if (
         liveConfig?.profile !== 'coding'
@@ -669,6 +694,10 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       active_sessions: sessions.size,
       max_sessions: sessions.maxSessions,
       session_ttl_ms: sessions.ttlMs,
+      sessions_created: sessions.metrics.created,
+      sessions_closed: sessions.metrics.closed,
+      sessions_expired: sessions.metrics.expired,
+      sessions_evicted: sessions.metrics.evicted,
       schema_hash: createHash('sha256').update(JSON.stringify(tools)).digest('hex'),
     });
   });

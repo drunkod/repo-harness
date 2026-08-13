@@ -1,76 +1,117 @@
-# Architecture Module: verification/evals-checks
+# verification/evals-checks 架构文档
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-evals-checks" sourceDigest="sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41" rendererVersion="archcontext.docs-renderer/v2" outputDigest="sha256:7b0fbb9eca77918bc2cdf77cfa9ca05b01cb19bb6de8cce2925869e8f4b15e8a" verifiedAgainst="main@c30f08fcf306b15911f300288bd10cbff03d5377@2026-08-12T23:03:40+08:00" -->
+> **狀態**:`active`
+> **Verified against**:`main@c30f08fcf306b15911f300288bd10cbff03d5377`(2026-08-12)
+> **Capability ID**:`capability.verification.evals-checks`(kind `capability`)
+> **Matched Prefixes**:`tests/**`、`evals/**`、`scripts/run-skill-evals.ts`、`scripts/run-harness-profile-benchmark.ts`、`scripts/validate-harness-profile-benchmark.ts`、`scripts/run-bounded-verifier-command.ts`、`scripts/verify-contract.sh`、`scripts/verify-sprint.sh`、`scripts/check-task-workflow.sh`、`scripts/check-task-sync.sh`、`scripts/check-agent-tooling.sh`、`scripts/check-brain-manifest.sh`、`scripts/sync-brain-docs.sh`
+> **Local Contracts**:`AGENTS.md`、`CLAUDE.md`
+> **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與 Git 狀態投影生成,手改會在下次投影被覆蓋。
 
-> **Capability ID**: `verification-evals-checks`
-> **Matched Prefixes**: `tests`, `evals`, `scripts/run-skill-evals.ts`, `scripts/run-harness-profile-benchmark.ts`, `scripts/validate-harness-profile-benchmark.ts`, `scripts/run-bounded-verifier-command.ts`, `scripts/verify-contract.sh`, `scripts/verify-sprint.sh`, `scripts/check-task-workflow.sh`, `scripts/check-task-sync.sh`, `scripts/check-agent-tooling.sh`, `scripts/check-brain-manifest.sh`, `scripts/sync-brain-docs.sh`
-> **Local Contracts**: `AGENTS.md`, `CLAUDE.md`
+Runs repository verification, contract gates, benchmarks, and evaluation suites.
 
-## P1 Map
+## 1. P1:能力架構地圖
 
-Verification is split into regression tests, repo-local workflow gates, migration
-dry-runs, eval fixtures, and advisory external-tooling probes.
+### 1.1 架構圖
 
-Authoritative checks:
+```mermaid
+flowchart LR
+  p1_capability_verification_evals_checks_82b2358d["Evals And Checks"]:::component
+  p1_component_evals_checks_primary_dcf800ce["Review Outcome Classifier"]:::component
+  p1_capability_verification_evals_checks_82b2358d -->|"Evaluate a cross-model review"| p1_component_evals_checks_primary_dcf800ce
+  classDef actor fill:#111827,color:#ffffff,stroke:#f9fafb,stroke-width:2px
+  classDef component fill:#075985,color:#ffffff,stroke:#bae6fd,stroke-width:2px
+  classDef datastore fill:#3f6212,color:#ffffff,stroke:#d9f99d,stroke-width:2px
+  classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
+```
 
-- `bun test`
-- `bash scripts/check-deploy-sql-order.sh`
-- `bash scripts/check-task-sync.sh`
-- `bash scripts/check-task-workflow.sh --strict`
-- External brain-vault drift is intentionally outside verification; operators may run the manual manifest/export commands separately.
-- `bun scripts/inspect-project-state.ts --repo . --format text`
-- `repo-harness init --repo . --dry-run`
-- non-dry-run `bun run benchmark:skills --eval <slug>` runs when release or
-  readiness evidence depends on skill effectiveness.
-- `bun scripts/run-harness-profile-benchmark.ts --execute --provider
-  <codex|claude>` owns the 3x9 No Harness / Adaptive Lite / Strict comparison.
-  Each report uses exactly one provider. No Harness uses an auth-only isolated
-  Codex home plus `--ignore-user-config --ignore-rules --ephemeral`, or Claude
-  `--safe-mode`; every arm binds `HOME`/settings and `BUN_INSTALL` to its
-  disposable run root.
-  `--require-authoritative` additionally requires every provider execution,
-  deterministic grader, task status, and No Harness isolation proof to pass.
-  The report binds one run ID to source commit, provider version, and
-  runner/manifest/fixture/workspace evidence hashes.
+- Proof: `proven` (`sha256:3880bef0552ef076d7a1bf843c9fe14088ac05efe72c205d8e2428a7b1a8518c`).
+- Semantic nodes: `2`; declared relations: `1`.
 
-Non-authoritative smoke:
+### 1.2 模組職責表
 
-- `bun run benchmark:skills --dry-run` only proves eval harness wiring. It is not
-  skill-effectiveness evidence for release/readiness claims.
-- The profile benchmark without `--execute` is also non-authoritative and keeps
-  every provider-owned metric null rather than estimating it.
-- `--regrade-existing` may recompute deterministic acceptance against retained
-  run workspaces after a grader bug fix. It cannot change provider streams or
-  make an unavailable usage record authoritative.
+| 宣告入口 | 錨點 | 職責 |
+| --- | --- | --- |
+| `entrypoint.evals-checks.primary` | `src/cli/commands/cross-review.ts#runCrossReviewCommand` | `sink.evals-checks.primary` → `src/effects/review/cross-review-runner.ts#runCrossReview` |
 
-## P2 Trace
+### 1.3 規模信號
 
-Concrete route: pre-merge `repo-harness-check` -> reports dirty worktree
-boundaries -> runs unit/regression tests -> checks task sync -> checks workflow
-strict readiness -> inspects repo state -> dry-runs self-migration -> reports
-whether release or merge readiness is blocked.
+- 文件數:`514`
+- 總行數:`167458`
+- 匹配前綴:`tests/**`、`evals/**`、`scripts/run-skill-evals.ts`、`scripts/run-harness-profile-benchmark.ts`、`scripts/validate-harness-profile-benchmark.ts`、`scripts/run-bounded-verifier-command.ts`、`scripts/verify-contract.sh`、`scripts/verify-sprint.sh`、`scripts/check-task-workflow.sh`、`scripts/check-task-sync.sh`、`scripts/check-agent-tooling.sh`、`scripts/check-brain-manifest.sh`、`scripts/sync-brain-docs.sh`
+- 復算:`archctx docs plan --json`(掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`)
 
-Inputs are current git state, tracked files, ignored runtime paths, required
-CodeGraph readiness, advisory tooling state, and skill eval metrics when a
-release/readiness claim uses skill-effectiveness evidence. Outputs are command
-exit codes, `full_test_count`, `dry_run_ratio`, `grader_pass_rate`,
-`effectiveness_authority`, and concise readiness evidence.
+### 1.4 依賴邊界
 
-Error paths:
+出向關係:
 
-- `check-deploy-sql-order.sh` reads optional `.ai/harness/policy.json#operations.deploy_sql`; a valid override selects its roots, naming modes, and invariant file, while absence selects direct `deploy/sql/` children with `ordered4` names. Malformed or unsafe configured paths fail closed instead of falling back to the default layout.
-- `check-task-sync.sh` fails when substantive repo changes lack `tasks/` synchronization.
-- `check-task-workflow.sh --strict` fails for missing contract files, legacy docs, missing JSON runtime, or broken deploy SQL order; it does not inspect external brain-vault state.
-- Skill eval evidence is non-authoritative when it is missing or dry-run-heavy;
-  release filings must record the missing evidence or the repair command.
-- External tooling update checks may be skipped or timed out; CodeGraph host/index readiness is required for agent code navigation, while version freshness and other external tooling remain advisory unless the user explicitly asks for tooling maintenance.
+- `calls` → `component.evals-checks.primary` — Evaluate a cross-model review
 
-## P3 Decision
+入向關係:
 
-Verification is broad because this repo is both source and self-hosted example.
-The invariant is that self-hosted runtime files, generated templates, and
-installable copies must not drift silently.
+- 無。
 
-At 10x repo size, the first failure would be full-test cost. The current split
-lets small slices run focused tests while release/pre-merge runs the full gate.
+## 2. P2:端到端數據流
+
+> **Proof**: `proven` (`sha256:3880bef0552ef076d7a1bf843c9fe14088ac05efe72c205d8e2428a7b1a8518c`); selectors `1/1`.
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
+sequenceDiagram
+  autonumber
+  participant p2_capability_4262990f as Evals And Checks
+  participant p2_component_7b8d80ff as Review Outcome Classifier
+  p2_capability_4262990f->>p2_component_7b8d80ff: Dispatch Review Outcome Classifier
+  alt Evaluate a cross-model review completes
+  p2_capability_4262990f->>p2_component_7b8d80ff: Invoke Review Outcome Classifier
+    Note over p2_capability_4262990f: Return success receipt
+  else Evaluate a cross-model review is rejected or fails
+  p2_capability_4262990f->>p2_component_7b8d80ff: Propagate Review Outcome Classifier failure
+    Note over p2_capability_4262990f: Return typed failure
+  end
+```
+<!-- END ARCHCONTEXT:generated target="projection_target.entity.capability-verification-evals-checks" -->
+## 3. P3：设计决策与不变量
+
+### 权威 skill eval 证据边界
+
+- 当 release/readiness 断言依赖 skill effectiveness 时，必须执行 non-dry-run `bun run benchmark:skills --eval <slug>`，并保留 `full_test_count` 与 `effectiveness_authority` 的结构化证据。
+- **Non-authoritative smoke** 只证明 harness 接线可运行。`bun run benchmark:skills --dry-run` is not skill-effectiveness evidence，不得升格为发布或就绪证明。
+
+**为什么验证面这么宽。** 本仓库同时是产品源码和自托管样例，自托管 runtime 文件、生成模板、已安装副本三者不得静默漂移。这是整个能力面的根不变量。
+
+**必须守住的不变量：**
+
+1. **生产者/消费者单向分离。** profile benchmark 生产证据，bounded verifier 与 `verify-sprint` 只消费。`is_evidence_producer_command()`（`scripts/verify-contract.sh:512`）把这条边界写成执行前拒绝，而不是靠约定——否则收口 gate 会退化成无界 job runner。
+2. **evidence emitter 单一权威。** `scripts/emit-verify-evidence.ts` 是唯一 emitter；已安装 helper 按包布局解析它，缺失时 fail-closed 返回 cannot-bind，从不复制 emitter 或合成证据路径。
+3. **有界执行 + 进程组回收。** 每条契约命令跑在自己的 detached 进程组里，共享一个绝对截止点；force-kill 阶段寻址原始 PGID 而非当前 leader，堵住 TERM-resistant 后代的逃逸口。
+4. **昂贵通道串行化。** 权威 benchmark 在任何 run workspace/report 变更前取 Git-common-dir expensive-run lock 并跨 provider 生命周期持有；dry-run 与 regrade-only 不占该通道。owner 异常死亡时 token 不可回收，留给人工恢复而非自动重开通道。
+5. **非权威永远不能升格。** dry-run eval、无 `--execute` 的 benchmark、`--regrade-existing` 三者的输出形状允许存在，但不得被当作 effectiveness 证据；provider-owned 指标宁可留 null 也不估算。
+6. **`## Required Checks` 是唯一清单来源。** `repo-harness-check` skill 不维护自己的副本；该段缺失是首个 blocking finding，不是套用默认清单的理由。
+
+**与现有 prose 的冲突（以源码为准）：**
+
+- 下方 2026-07-14 段落写 `verify-contract.sh` 是 "one fixed 600-second deadline"。当前源码 `scripts/verify-contract.sh:5` 是 `VERIFICATION_BUDGET_MS=1200000`，即 1200 秒（20 分钟）。历史段落按 append-only 原样保留，**当前事实以 1200 秒为准**。
+- 旧 P1 段把权威清单写成 `bash scripts/check-task-workflow.sh --strict`；根 `## Required Checks` 现用 `repo-harness run check-task-workflow --strict`（helper runtime 调用形态），且额外含 `bash scripts/check-architecture-sync.sh`。本文 §1.4 按根契约列出。
+- `assets/skill-commands/repo-harness-check/SKILL.md` 把 Codex 必需 skill 写作 `health`/`check`/`mermaid`，仓库根 `CLAUDE.md` 写的是 `health`、`check`、`diagram-design`。两处未对齐，本文不替任一方裁定。
+
+**10x 规模下先垮的点。** 不是 verifier，而是全量测试成本与证据生产延迟：183 个测试文件 / 66,345 LOC 已是 `bun test` 的主要壁钟成本，而 3×9 矩阵单次授权跑受 50 分钟绝对预算约束。当前拆分让小切片跑聚焦测试、release/pre-merge 才跑全量 gate；再放大一个量级时，先撑不住的是 benchmark 的 evidence-production latency 与 expensive lane 的串行度，而不是有界验证本身。
+
+## 4. 历史决策记录（append-only）
+
+以下段落逐字保留自本文件的历史版本，不翻译、不改写。
+
+## 2026-08-05 Deployed-helper evidence binding
+
+- `scripts/emit-verify-evidence.ts` remains the single evidence-emitter
+  authority. It is already included by the package's declared `scripts/`
+  publication surface.
+- The installed helper executes from `assets/templates/helpers/` and resolves
+  that package-owned emitter through the deterministic package layout before
+  the explicit source-checkout override. Direct source-helper execution still
+  resolves the emitter as a sibling.
+- Missing sibling, package, and explicit source-root locations remain a
+  fail-closed cannot-bind result; no emitter copy or synthesized evidence path
+  was added.
 
 ## 2026-07-14 Verifier Evidence Lifecycle Cutover
 
@@ -161,3 +202,5 @@ lets small slices run focused tests while release/pre-merge runs the full gate.
   69 model calls, and 68 s of hooks versus Strict at 391 s, 55 calls, and 60 s
   of hooks. Optimize cold hook execution and Standard/Strict promotion cost
   before claiming a performance win; do not lower deterministic risk floors.
+
+- `tasks/workstreams/verification/evals-checks/github-issues-158-159.md`

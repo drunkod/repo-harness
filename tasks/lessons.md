@@ -12,6 +12,12 @@
 
 ## Active Lessons
 
+- Date: 2026-08-11
+- Triggered by correction: final ship review proved that a protected closeout helper still executed `node --version` from the caller-provided `PATH` before replacing that `PATH` with its minimal environment.
+- Mistake pattern: treating canonical path plus a compatible version string as executable provenance; validation executed the untrusted candidate and then promoted it into the protected runtime authority.
+- Prevention rule: protected subprocess boundaries must discover runtimes only from explicit product-owned system/install roots, never from caller environment lookup. A negative regression must place a side-effecting fake executable on caller `PATH` and prove it is not executed even during discovery.
+- Where to apply next time: helper runtime construction, package-manager/runtime discovery, hook adapters, and any path that promotes an executable into a sanitized child environment.
+
 - Date: 2026-07-26
 - Triggered by correction: PR #132 review found that a repo-external target was reported correctly but also counted as an anonymous capability, while NUL-bearing paths and Win32 absolute hook paths diverged from the intended fail-closed and repo-scope boundaries.
 - Mistake pattern: using one partition predicate as both reporting classification and validation authority, then treating every non-POSIX-absolute path as repo-relative.
@@ -120,8 +126,20 @@
 - Prevention rule: cross-model cost attribution must satisfy two conditions before it enters any report or KPI: (1) the execution's model identity is runtime-confirmed by SubagentStart role-routing evidence (`status: verified`), not by config files or child prose; (2) the comparison is stated in model-weighted credits or currency, never raw tokens. Same-model harness-profile comparisons may stay raw-token. Executions without confirmed identity are reported as unattributed, not credited to the cheaper model's ledger.
 - Where to apply next time: any future fleet-savings claim, `evals/` cost reports, extensions of `scripts/run-harness-profile-benchmark.ts` that mix models or providers, and any KPI derived from delegation usage.
 
+- Date: 2026-08-09
+- Triggered by correction: the ArchContext projection runtime correctly emitted Mermaid-only Markdown with zero HTML artifacts, but the sibling `repo-harness-architecture` skill, architecture queue prompt, generated contract blocks, and reference templates still advertised or discovered optional standalone HTML.
+- Mistake pattern: proving one producer path while leaving a second agent-facing instruction path with contradictory output authority; a zero-artifact E2E does not prove that every dispatched agent receives the same contract.
+- Prevention rule: architecture diagrams have one product artifact format: evidence-backed Mermaid fenced blocks inside architecture Markdown. The external `mermaid` skill may assist authoring and review, and a pinned CLI may validate renderability, but neither owns an HTML product artifact. Gates must scan generated skills, queue prompts, templates, contract projections, and consumer fixtures together.
+- Where to apply next time: architecture projection releases, repo-harness skill/template changes, architecture queue instruction changes, and every adoption or runtime E2E that claims Mermaid-only output.
+
 - Date: 2026-07-18
 - Triggered by correction: the session-stop handoff generator's auto-derived "Exact Next Step" ordered `contract-worktree cleanup --slug closeout-authority-bootstrap` on a worktree holding 34 modified files of live unmerged WIP plus 4 untracked workflow artifacts; the instruction survived into a fresh session's takeover packet and was nearly executed. Separately, the same Stop hook regenerates `.ai/harness/handoff/current.md`/`resume.md` on every session/subagent stop, so a hand-authored dispatch packet written into those files was silently clobbered back to the wrong instruction within minutes.
 - Mistake pattern: the next-action derivation calls a contract worktree "merged" from a pure branch-ancestry check (`branch tip is ancestor of main`), which is trivially true for any branch with zero unique commits — including a worktree whose entire value is uncommitted work. Consumers of the packet then treat "merged, clean up" as verified state. Compounding it, the single-slot handoff files are hook-owned mutable state, not durable authored documents, so anything hand-written there has hook-regeneration lifetime.
 - Prevention rule: before any worktree cleanup/removal, verify emptiness of the working tree itself (`git status --short -uall` in that worktree), never branch ancestry alone; a dirty or untracked-carrying worktree is live work regardless of branch topology. Hand-authored dispatch/handoff packets must live in their own files (e.g. `.ai/harness/handoff/<topic>-dispatch.md`) with `current.md`/`resume.md` at most pointing at them; treat the canonical pair as regenerated projection, not storage.
 - Where to apply next time: `workflow_write_handoff`'s next-action derivation and `contract-worktree cleanup`'s merged-check (both should fail closed on dirty worktrees — candidate fix belongs to the closeout-authority lane); any future parallel-session dispatch packet; any takeover session inheriting an "Exact Next Step" that names a destructive command — re-verify the target's state before executing it.
+
+- Date: 2026-08-11
+- Triggered by correction: issue #174 showed ChatGPT Connector reconnects could create replacement Streamable HTTP sessions without closing the superseded session, so the fixed-size store reached 64 records and rejected every later `initialize` with `SESSION_LIMIT_REACHED` until process restart or the 30-minute TTL elapsed.
+- Mistake pattern: treating a hard session cap plus eventual TTL cleanup as sufficient lifecycle control when the remote client may abandon sessions without sending `DELETE` and without producing a transport `onclose` event.
+- Prevention rule: bounded remote-session stores must reserve capacity atomically, track in-flight requests, and reclaim the least-recently-used idle record at the admission boundary; active requests remain fail-closed and lifecycle outcomes must be observable as created, closed, expired, and evicted counters.
+- Where to apply next time: MCP Streamable HTTP transports, reconnecting connector protocols, authorization runtime stores, and any bounded in-memory lifecycle store whose clients can disappear without an explicit close handshake.

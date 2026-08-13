@@ -96,18 +96,15 @@ describe("Hook contracts", () => {
     expect(handler).toContain("last_blocked_hash");
   });
 
-  test("delegation standing authorization stays separate from per-prompt typed permission", () => {
+  test("delegation requires an explicit slash command and has no standing authorization", () => {
     const advisor = read("src/cli/hook/subagent-handler.ts");
     expect(advisor).toContain("activeContractPath");
     expect(advisor).not.toContain("policyDelegation.mode");
     expect(advisor).not.toContain("auto-mode");
     expect(advisor).not.toContain("readGlobalDelegationMode");
     const sessionStart = read("src/cli/hook/session-context.ts");
-    expect(sessionStart).toContain("Delegation Standing Authorization");
-    expect(sessionStart).toContain(
-      "standing user authorization for bounded native",
-    );
-    expect(sessionStart).toContain("effectiveDelegationMode");
+    expect(sessionStart).not.toContain("Delegation Standing Authorization");
+    expect(sessionStart).not.toContain("effectiveDelegationMode");
   });
 
   test("typed prompt handler keeps route hints, gates, acceptance, and circuit rendering", () => {
@@ -259,10 +256,11 @@ describe("Hook contracts", () => {
     expect(sync).toContain("Active Workstreams");
     expect(sync).toContain("discoverable_contexts");
     expect(sync).toContain("Semantic diagram source");
-    expect(sync).toContain("Latest human diagram");
-    expect(sync).toContain("docs/architecture/diagrams");
+    expect(sync).not.toContain("Latest human diagram");
+    expect(sync).not.toContain("docs/architecture/diagrams");
     expect(eventHelper).toContain("Mermaid fenced block");
-    expect(eventHelper).toContain("Markdown semantic source");
+    expect(eventHelper).toContain("only architecture diagram artifact");
+    expect(eventHelper).not.toContain("architecture HTML");
     expect(workstream).toContain("tasks/workstreams");
     expect(workstream).toContain("context-contract-sync.sh");
   });

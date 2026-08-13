@@ -11,6 +11,8 @@ import {
   type InstallProfile,
 } from '../../src/cli/installer/install-profile';
 
+const ROOT = path.join(import.meta.dir, '..', '..');
+
 function withTempHome(fn: (home: string) => void): void {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'repo-harness-status-')));
   const prev = process.env.HOME;
@@ -112,6 +114,48 @@ describe('status command (Phase 1C)', () => {
         expect(r.repo.inGitRepo).toBe(true);
         expect(r.repo.optIn).toBe(true);
         expect(r.repo.repoRoot).toBe(repo);
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+      }
+    });
+  }, 30_000);
+
+  test('reports model authority, projection provider, code facts, and apply independently', () => {
+    withTempHome(() => {
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'repo-harness-status-architecture-')),
+      );
+      try {
+        execSync('git init', { cwd: repo, stdio: 'ignore' });
+        fs.mkdirSync(path.join(repo, '.ai/harness'), { recursive: true });
+        fs.mkdirSync(path.join(repo, '.archcontext/model/nodes'), { recursive: true });
+        fs.writeFileSync(path.join(repo, '.ai/harness/workflow-contract.json'), '{}');
+        fs.writeFileSync(path.join(repo, '.archcontext/manifest.yaml'), 'schema_version: archcontext/v1\n');
+        fs.writeFileSync(path.join(repo, '.archcontext/product.yaml'), 'name: fixture\n');
+        fs.writeFileSync(
+          path.join(repo, '.ai/harness/policy.json'),
+          JSON.stringify({ context: { capability_source: 'archcontext' } }),
+        );
+
+        const report = runStatus(repo);
+        expect(report.architectureProjection).toEqual({
+          schemaVersion: 'repo-harness.architecture-projection-readiness/v1',
+          modelAuthority: { source: 'archcontext', ready: true },
+          projectionProvider: {
+            provider: 'disabled',
+            state: 'disabled',
+            binaryPath: null,
+            version: null,
+            reason: 'policy.architecture.projection_provider=disabled',
+          },
+          codeFacts: { requirement: 'required', state: 'not-evaluated' },
+          apply: { mode: 'disabled', enabled: false },
+        });
+        const text = formatStatus(report, false);
+        expect(text).toContain('model authority: archcontext (ready)');
+        expect(text).toContain('provider: disabled (disabled)');
+        expect(text).toContain('code facts: not-evaluated');
+        expect(text).toContain('apply: disabled');
       } finally {
         fs.rmSync(repo, { recursive: true, force: true });
       }

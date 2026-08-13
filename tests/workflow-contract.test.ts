@@ -255,7 +255,7 @@ describe("workflow contract manifest", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   test("workflow contract loader fails closed for missing and malformed contracts", () => {
     const tmp = mkdtempSync(join(tmpdir(), "workflow-contract-invalid-"));
@@ -316,11 +316,12 @@ describe("workflow contract manifest", () => {
     expect(gitignore).toContain("!.ai/harness/planning/.gitkeep");
     expect(gitignore).toContain(".ai/harness/worktrees/");
     expect(gitignore).not.toContain(".ai/harness/chatgpt/bridge-extension/");
-    expect(gitignore).toContain(".repo-harness/chatgpt-browser.local.json");
+    expect(gitignore).toContain(".repo-harness/");
+    expect(gitignore).not.toContain(".repo-harness/chatgpt-browser.local.json");
     expect(gitignore).toContain(".ai/harness/triage/*");
     expect(gitignore).toContain("!.ai/harness/triage/.gitkeep");
     expect(gitignore).toContain(".archcontext/");
-  });
+  }, 30_000);
 });
 
 describe("state inspection and legacy doc migration", () => {

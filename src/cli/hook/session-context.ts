@@ -38,6 +38,38 @@ import { runSecurityScan, type SecurityScanReport } from '../commands/security';
 import { fileExists, readText } from '../../effects/state/collect-state-inputs';
 import type { WorktreeOwnership } from '../../effects/loop/state-input-collector';
 import { resolveRecoveryEvidence } from '../../effects/evidence/recovery-materializer';
+import { parseHookInput } from './hook-input';
+import { mintOrAdoptSessionRunIdentity } from './run-identity';
+
+// ---------------------------------------------------------------------------
+// run-identity threading -- SessionStart's single mint/adopt point
+// ---------------------------------------------------------------------------
+
+/**
+ * SessionStart's single run-identity mint/adopt point (design freeze: run
+ * identity threading slice). Parses `.session_id`/`.run_id` from the raw
+ * hook payload via the same `parseHookInput` every other typed handler uses,
+ * then delegates to `mintOrAdoptSessionRunIdentity` for the actual
+ * mint-vs-adopt-vs-reuse decision. The return value is intentionally
+ * unused by the caller -- later hook invocations (including this
+ * SessionStart event's own telemetry record) resolve it through
+ * `resolveRunIdentity`'s session-state fallback tier, not through this
+ * function's return.
+ */
+export function ensureSessionRunIdentity(
+  repoRoot: string,
+  input: string | Buffer | undefined,
+  env: NodeJS.ProcessEnv,
+  now: Date,
+): void {
+  const hookInput = parseHookInput(input, { env, repoRoot });
+  mintOrAdoptSessionRunIdentity(
+    repoRoot,
+    { session_id: hookInput.get('.session_id'), run_id: hookInput.get('.run_id') },
+    env,
+    now,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // minimal-change-context.sh port (16 lines)
@@ -721,14 +753,14 @@ function architectureQueuePendingContext(repoRoot: string, nowMs: number): strin
       ? `${Math.floor((nowEpochSec - oldestEpochSec) / 86400)}d`
       : 'unknown';
 
+  // Checkpoint nudge, not a manual documentation obligation: architecture
+  // truth projection belongs to archcontext (docs/researches/
+  // 20260808-archctx-projection-handoff.md §4), so this card only reports that
+  // a checkpoint is due and names the command to inspect it.
   return [
     '# Architecture Queue',
     '',
-    `${pendingCount} capabilities have pending architecture drift (oldest ${oldestDays}). Run:`,
-    '',
-    '```bash',
-    'repo-harness run architecture-queue status',
-    '```',
+    `Checkpoint due: ${pendingCount} capabilities have pending architecture drift (oldest ${oldestDays}) -- \`repo-harness run architecture-queue status\`.`,
   ].join('\n');
 }
 
@@ -1074,8 +1106,17 @@ function toolingUpdateSyncPopulateAndRender(
 /** `evt-` lock's own crashed-holder threshold (`workflow_with_lock`'s 60s) reused for the tooling-advisory lock -- see `acquireToolingAdvisoryLock`'s doc comment for why this exists even though bash's own async branch had no such handling. */
 const TOOLING_ADVISORY_LOCK_STALE_SECONDS = 60;
 
-/** Marks a `bun session-context.ts <flag> <repoRoot> <target> <reportFile> <lockDir>` standalone invocation -- see the `import.meta.main` bootstrap at the bottom of this file. */
-const DETACHED_TOOLING_POPULATE_FLAG = '--detached-tooling-populate';
+/**
+ * Marks a `<entrypoint> <flag> <repoRoot> <target> <reportFile> <lockDir>`
+ * standalone invocation. Two dispatch surfaces receive it and both delegate to
+ * the single `runDetachedToolingPopulate` authority below: the `import.meta.main`
+ * bootstrap at the bottom of this file (unbundled -- `import.meta.url` in
+ * `triggerDetachedToolingPopulate` resolves to this module), and the branch in
+ * `src/cli/hook-entry.ts` (bundled -- `bun build` folds this file's
+ * `import.meta.main` to `false` and eliminates the bootstrap, while
+ * `import.meta.url` resolves to the bundle).
+ */
+export const DETACHED_TOOLING_POPULATE_FLAG = '--detached-tooling-populate';
 
 /**
  * Gatekeeper MEDIUM (adjudicated fix): restores the cross-session TTL
@@ -1220,75 +1261,6 @@ function toolingUpdateAdvisoryContext(repoRoot: string, env: NodeJS.ProcessEnv, 
   return null;
 }
 
-function delegationModeFromRepoPolicy(repoRoot: string): 'auto' | 'explicit' | null {
-  const raw = readText(repoRoot, '.ai/harness/policy.json');
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as { delegation?: { mode?: unknown } };
-    const mode = parsed.delegation?.mode;
-    return mode === 'auto' || mode === 'explicit' ? mode : null;
-  } catch {
-    return null;
-  }
-}
-
-function delegationModeFromGlobalConfig(home: string): 'auto' | 'explicit' | null {
-  if (!home) return null;
-  const path = join(home, '.repo-harness', 'config.json');
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf-8');
-  } catch {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(raw) as { delegation?: { mode?: unknown } };
-    const mode = parsed.delegation?.mode;
-    return mode === 'auto' || mode === 'explicit' ? mode : null;
-  } catch {
-    return null;
-  }
-}
-
-function effectiveDelegationMode(repoRoot: string, env: NodeJS.ProcessEnv): 'auto' | 'explicit' {
-  const globalMode = delegationModeFromGlobalConfig(env.HOME ?? '');
-  if (globalMode) return globalMode;
-  return delegationModeFromRepoPolicy(repoRoot) === 'auto' ? 'auto' : 'explicit';
-}
-
-function delegationMaxAgentsValue(repoRoot: string): string {
-  const raw = readText(repoRoot, '.ai/harness/policy.json');
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw) as { delegation?: { max_agents?: unknown } };
-      const value = parsed.delegation?.max_agents;
-      if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return String(value);
-      if (typeof value === 'string' && /^\d+$/.test(value)) return value;
-    } catch {
-      /* fall through to default */
-    }
-  }
-  return '2';
-}
-
-/** 8. `codex_delegation_auto_context`. */
-function codexDelegationAutoContext(repoRoot: string, env: NodeJS.ProcessEnv): string | null {
-  if (env.HOOK_HOST !== 'codex') return null;
-  if (effectiveDelegationMode(repoRoot, env) !== 'auto') return null;
-  const maxAgents = delegationMaxAgentsValue(repoRoot);
-  return [
-    '# Delegation Standing Authorization',
-    '',
-    'delegation.mode=auto is standing user authorization for bounded native',
-    'subagent delegation for this session. Spawn only when at least two',
-    `independent, bounded workstreams exist; spawn no more than ${maxAgents}`,
-    'agents; never give concurrent writers overlapping write ownership; pass',
-    'fork_turns="none" on spawn_agent calls that select an agent_type; close',
-    'finished agent threads; do not spawn for a trivial or strictly sequential',
-    'task.',
-  ].join('\n');
-}
-
 /** Exported so parity fixtures (tests/session-context.test.ts) can assert exact joined output without duplicating this literal. */
 export const INPUT_PRIORITY_CONTEXT = [
   '# Input Priority',
@@ -1322,8 +1294,7 @@ function safely(
 /**
  * The full `session-start-context.sh` composition, verbatim order: resume
  * blob (gated), capability queue, architecture queue, pending plan capture,
- * current status snapshot, active sprint, tooling update advisory, codex
- * delegation auto-authorization -- each appended with a single `\n`
+ * current status snapshot, active sprint, and tooling update advisory -- each appended with a single `\n`
  * separator, then the whole thing prefixed with the input-priority block IFF
  * non-empty.
  */
@@ -1347,7 +1318,6 @@ export function sessionStartMainContent(
   context = appendBlock(context, safely('current-status-snapshot', observeDiagnostic, () => currentStatusSnapshotContext(repoRoot)));
   context = appendBlock(context, safely('active-sprint', observeDiagnostic, () => activeSprintContext(repoRoot)));
   context = appendBlock(context, safely('tooling-update-advisory', observeDiagnostic, () => toolingUpdateAdvisoryContext(repoRoot, env, nowMs)));
-  context = appendBlock(context, safely('codex-delegation-auto', observeDiagnostic, () => codexDelegationAutoContext(repoRoot, env)));
 
   if (!context) return null;
   return `${INPUT_PRIORITY_CONTEXT}\n${context}`;
@@ -1355,7 +1325,7 @@ export function sessionStartMainContent(
 
 /** Headers that flip the old script-loop branch's `actionable` bit for this id (mirrors runtime.ts's retired `scriptActionable` regex verbatim). */
 const SESSION_START_ACTIONABLE_HEADERS =
-  /^# (Pending Plan Capture|Capability Context Queue|Architecture Queue|Active Sprint|Delegation Standing Authorization)/m;
+  /^# (Pending Plan Capture|Capability Context Queue|Architecture Queue|Active Sprint)/m;
 
 export function sessionStartMainSection(
   collector: SessionContextCollector,

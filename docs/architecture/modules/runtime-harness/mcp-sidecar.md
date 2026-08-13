@@ -1,117 +1,106 @@
-# Architecture Module: runtime-harness/mcp-sidecar
+# runtime-harness/mcp-sidecar 架构文档
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-mcp-sidecar" sourceDigest="sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41" rendererVersion="archcontext.docs-renderer/v2" outputDigest="sha256:400b46d8b2baf481c8d333adc3746d268c777030035a19c2827651e413a7f2fa" verifiedAgainst="main@1495a1d6d3b60b8b442061a420f443432e140791@2026-08-12T21:59:27+08:00" -->
+> **狀態**:`active`
+> **Verified against**:`main@1495a1d6d3b60b8b442061a420f443432e140791`(2026-08-12)
+> **Capability ID**:`capability.runtime-harness.mcp-sidecar`(kind `capability`)
+> **Matched Prefixes**:`src/cli/mcp/**`、`src/cli/commands/mcp.ts`、`src/cli/chatgpt-browser/file-policy.ts`、`src/effects/repo-registry.ts`、`docs/repo-harness-chatgpt-mcp-setup.md`、`docs/reference-configs/chatgpt-coding-mcp.md`、`docs/researches/20260711-devspace-chatgpt-local-control.md`
+> **Local Contracts**:`AGENTS.md`、`CLAUDE.md`
+> **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與 Git 狀態投影生成,手改會在下次投影被覆蓋。
 
-> **Capability ID**: `runtime-harness-mcp-sidecar`
-> **Matched Prefixes**: `src/cli/mcp`, `src/cli/commands/mcp.ts`, `src/effects/repo-registry.ts`, ChatGPT MCP setup/reference/Skill surfaces
-> **Local Contracts**: `AGENTS.md`, `CLAUDE.md`
+Provides the local MCP sidecar and its repository access policy boundary.
 
-## P1 Map
+## 1. P1:能力架構地圖
 
-The sidecar is a loopback-only local runtime exposed to remote ChatGPT through an
-operator-managed HTTPS tunnel.
-
-- `setup.ts`, `auth.ts`, and `repo-registry.ts` own ignored v3 config, stable
-  repo ids, access modes, and the monotonically increasing authorization
-  revision.
-- `oauth.ts` issues an opaque identity for each coding authorization grant,
-  preserves it across refresh-token rotation, and bounds dynamic clients by
-  capacity and expiry.
-- `transports/http.ts` owns Streamable HTTP, Host/CORS, OAuth discovery,
-  DCR/PKCE, redirect allowlists, transport-session lifecycle, and the bounded
-  authorization-runtime registry.
-- `server.ts`, `policy.ts`, and `tools.ts` select profile capabilities and keep
-  planner, executor, and orchestrator unchanged.
-- `state-tools.ts` owns the additive `summarize_repo_harness_state` adapter. It
-  projects the canonical Effective State v1 resolver rather than interpreting
-  `tasks/current.md`; the existing MCP policy profile is separately labeled
-  with `profile_authority: "mcp-policy"`. The retained `current` preview is
-  explicitly labeled by `current_authority` and `current_preview.authority` as
-  a non-authoritative projection.
-- `coding-workspaces.ts` owns explicit granted-repo selection, default managed
-  worktrees, instruction discovery, and local cleanup metadata.
-- `coding-tools.ts` owns workspace-relative read and rollback-capable guarded
-  file mutation plus mutation/audit/index evidence.
-- `process-sessions.ts` owns pipe-only local-user Bash sessions, output bounds,
-  process-tree cleanup, environment scrubbing, and ownership isolation.
-- CodeGraph remains an optional index adapter. The filesystem and repo registry
-  remain authorization and content truth.
-
-Cloudflare, DNS, ChatGPT app state, and service managers are external operator
-surfaces; repo-harness guides and probes them but does not mutate them.
-
-## P2 Trace
-
-ChatGPT developer-mode app -> named tunnel -> `127.0.0.1:8765/mcp` -> Host/CORS
-gate -> OAuth access token with `repo-harness.coding`, current authorization
-revision, and a server-side authorization id -> one or more MCP initialize
-sessions sharing that authorization runtime -> `open_workspace(repo_id)` -> explicit live
-`read_write` grant -> managed `codex/mcp-*` worktree -> workspace-relative
-`read`/`apply_patch` or local-user `exec_command`/`write_stdin` -> bounded result
-to ChatGPT.
-
-Patch success writes mutation/audit/index invalidation evidence and runs the
-CodeGraph refresh contract. Process completion writes only command hash and
-execution metadata, invalidates the repo-wide index, and triggers refresh.
-MCP DELETE or transport expiry closes only that transport because ChatGPT may
-initialize a fresh transport for each sequential tool call. The shared coding
-runtime and its process trees close on OAuth revoke, authorization revision or
-repo-grant change, coding disable, 30-minute authorization idle expiry, process
-timeout, or server shutdown. Managed worktrees remain for local inspection and
-require a clean, merged state before local cleanup.
-
-For state inspection, the public MCP path is
-`summarize_repo_harness_state` -> `state-tools.ts` -> the shared effectful
-resolver -> pure Effective State v1 projection. MCP deliberately resolves the
-fixed `inspect` policy and therefore matches a direct `inspect` resolution for
-task, phase, workflow profile, risk floor, plan/contract, blockers,
-freshness/conflicts, revision, version, and next action. A CLI request with
-explicit target paths or operation kind can legitimately select a different
-requested-risk profile; the repository authority fields still agree.
-`current: null` preserves the existing result key when no projection exists;
-otherwise the legacy redacted preview remains additive and explicitly
-non-authoritative. The tool advertises `readOnlyHint: false` because canonical
-resolution materializes the ignored cache and Git-common-dir version owner while
-changing no workflow authority or product data.
-
-OAuth request limits use the direct socket plus canonical route as identity;
-forwarded headers never mint new buckets. Error paths fail closed: missing
-grant, stale OAuth revision, dynamic-client or rate-bucket capacity, invalid Host,
-wildcard/foreign Origin, unregistered redirect, traversal, secret path,
-symlink, stale file revision, process ownership mismatch, and environment
-secrets return explicit errors without changing profile or falling back to a
-weaker execution mode. PTY and terminal resize are not public contracts under
-the Bun runtime; stdin, polling, SIGINT, and process-tree cleanup remain supported.
-
-## Semantic Diagram
+### 1.1 架構圖
 
 ```mermaid
 flowchart LR
-  ChatGPT["ChatGPT developer-mode app"] --> Tunnel["Operator-managed HTTPS tunnel"]
-  Tunnel --> HTTP["Loopback Streamable HTTP /mcp"]
-  HTTP --> Boundary{"Host + CORS + OAuth scope/revision"}
-  Boundary --> Runtime["OAuth authorization runtime"]
-  Runtime --> MCP["One or more MCP transport sessions"]
-  MCP --> Open["open_workspace(repo_id)"]
-  Open --> Grant{"live read_write grant"}
-  Grant --> Worktree["Managed worktree by default"]
-  Worktree --> Files["read / atomic apply_patch"]
-  Worktree --> Process["exec_command / write_stdin"]
-  Files --> Evidence["audit + mutation + index invalidation"]
-  Process --> Evidence
-  Evidence --> CodeGraph["Serialized CodeGraph refresh or dead letter"]
-  MCP --> TransportCleanup["DELETE / transport expiry closes transport"]
-  Runtime --> Cleanup["Revoke / revision / idle / shutdown kills process tree"]
+  p1_capability_runtime_harness_mcp_sidecar_4e12aaf3["MCP Sidecar"]:::component
+  p1_component_mcp_sidecar_primary_8f9b418c["MCP Tool Dispatcher"]:::component
+  p1_capability_runtime_harness_mcp_sidecar_4e12aaf3 -->|"Dispatch an MCP tool call"| p1_component_mcp_sidecar_primary_8f9b418c
+  classDef actor fill:#111827,color:#ffffff,stroke:#f9fafb,stroke-width:2px
+  classDef component fill:#075985,color:#ffffff,stroke:#bae6fd,stroke-width:2px
+  classDef datastore fill:#3f6212,color:#ffffff,stroke:#d9f99d,stroke-width:2px
+  classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-## P3 Decision
+- Proof: `proven` (`sha256:b7f930f382d4eb7627cbcc6f0abad1c7022e4785f751fe3154f2a6f10677d197`).
+- Semantic nodes: `2`; declared relations: `1`.
 
-The `coding` profile is separate and default-off because arbitrary local-user
-shell changes the trust model more than extending planner tools would. Explicit
-user-scoped grants, profile/revision-bound OAuth, worktree-first operation, and
-relative file APIs preserve the strongest repo-harness invariants without
-claiming that allowed roots sandbox Bash.
+### 1.2 模組職責表
 
-At 10x load, the first bottleneck is synchronous repo-wide CodeGraph refresh
-after mutations, not MCP routing. Refresh is intentionally serialized to avoid
-mutation/index races; operators can recover from dead-letter evidence without
-replaying the mutation. Per-authorization process count, duration, output ring,
-runtime idle TTL, and retention bounds cap the untrusted concurrency surface.
+| 宣告入口 | 錨點 | 職責 |
+| --- | --- | --- |
+| `entrypoint.mcp-sidecar.primary` | `src/cli/mcp/server.ts#createRepoHarnessMcpServer` | `sink.mcp-sidecar.primary` → `src/cli/mcp/tools.ts#callMcpTool` |
+
+### 1.3 規模信號
+
+- 文件數:`31`
+- 總行數:`13613`
+- 匹配前綴:`src/cli/mcp/**`、`src/cli/commands/mcp.ts`、`src/cli/chatgpt-browser/file-policy.ts`、`src/effects/repo-registry.ts`、`docs/repo-harness-chatgpt-mcp-setup.md`、`docs/reference-configs/chatgpt-coding-mcp.md`、`docs/researches/20260711-devspace-chatgpt-local-control.md`
+- 復算:`archctx docs plan --json`(掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`)
+
+### 1.4 依賴邊界
+
+出向關係:
+
+- `calls` → `component.mcp-sidecar.primary` — Dispatch an MCP tool call
+
+入向關係:
+
+- 無。
+
+## 2. P2:端到端數據流
+
+> **Proof**: `proven` (`sha256:b7f930f382d4eb7627cbcc6f0abad1c7022e4785f751fe3154f2a6f10677d197`); selectors `1/1`.
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
+sequenceDiagram
+  autonumber
+  participant p2_capability_4262990f as MCP Sidecar
+  participant p2_component_7b8d80ff as MCP Tool Dispatcher
+  p2_capability_4262990f->>p2_component_7b8d80ff: Dispatch MCP Tool Dispatcher
+  alt Dispatch an MCP tool call completes
+  p2_capability_4262990f->>p2_component_7b8d80ff: Invoke MCP Tool Dispatcher
+    Note over p2_capability_4262990f: Return success receipt
+  else Dispatch an MCP tool call is rejected or fails
+  p2_capability_4262990f->>p2_component_7b8d80ff: Propagate MCP Tool Dispatcher failure
+    Note over p2_capability_4262990f: Return typed failure
+  end
+```
+<!-- END ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-mcp-sidecar" -->
+## 3. P3：设计决策与不变量
+
+### 3.1 必须保持的不变量
+
+1. **单一存储权威。** MCP 的配置与凭证只有 `mcpStorageDir()` 一个来源。#167 之所以选择「迁移时轮换凭证而非搬运凭证」，是因为 repo-scope 的 bearer token 与 passphrase 曾经躺在 git 工作树里，可能已进入备份或历史；搬运会把一个已经泄露风险未知的秘密延寿（`setup.ts:765` 的注释即此判断）。删除 repo-scope OAuth token store 强制恰好一次重新授权，是这条决策的可观测代价。
+2. **授权真相在注册表，不在 MCP 配置。** `read_write` 授权与 `authorizationRevision` 都由 `registered-repos.json` 持有，写入走文件锁 + 原子 rename（`repo-registry.ts:183`、`:149`）。MCP 配置里的 `authorizationRevision` 只是一份必须与注册表相等的副本，不相等就整体拒绝服务。
+3. **coding 面默认关闭且需要三重显式条件**：v3 配置里 `profile: coding` + `coding.enabled: true`、至少一个 `read_write` 注册 repo、OAuth 认证。任意一条随时失效都立即拆掉运行时。
+4. **worktree-first。** `open_workspace` 默认建独立 worktree，`checkout` 必须显式指定。这让远端代理的失败落在一根可丢弃的分支上，而不是用户的工作树。
+5. **grant 选工作区，不等于 shell 沙箱。** 授权页文案直说 `exec_command` 能触达本地用户能触达的一切（`http.ts:220`）。文档与 UI 都不得反向承诺「allowed roots 沙箱化了 Bash」。
+6. **MCP 只投影状态，不解释状态。** `summarize_repo_harness_state` 复用与 CLI、Stop hook 相同的解析器；保留的 `current` 预览被两处字段显式标注为非权威。
+7. **CodeGraph 是可选适配器。** 文件系统与 repo 注册表是内容与授权真相；索引失败只写 dead-letter，不能反过来阻断已成功的变更。
+
+### 3.2 已知张力
+
+- `mcp.local.json` 的 `repo` 字段仍被写入（`setup.ts:821`），但 runtime 的 repoRoot 只来自 `--repo` 或 cwd（`server.ts:180`）。它属于**已实现、保留字段**：doctor 与迁移输出会显示它，没有解析路径消费它。
+- `McpLocalConfig.version` 仍接受 `1 | 2 | 3`（`auth.ts:128`），但 coding 面硬性要求 `version === 3`。v1/v2 只对非 coding profile 有效，属于窄口径的历史宽容，不是双权威。
+- `capabilities.reader` 是显式标注的 deprecated 键（`auth.ts:30`），仅在 `workspaceReader` 未定义时参与判断。
+
+### 3.3 10x 规模下先垮的点
+
+按当前实现，压力顺序是：
+
+1. **mutation 后的串行 CodeGraph 全仓刷新**（`coding-tools.ts` 的 refresh 链）。它被刻意串行化以避免 mutation/index 竞态；仓库变大或并发授权变多时，这是第一个吃掉端到端延迟的环节，而不是 MCP 路由。
+2. **`general-repo-access.ts` 的进程内快照缓存**：`MAX_ENTRY_METADATA_CACHE_ENTRIES = 200_000`、`MAX_SNAPSHOT_CACHE_ENTRIES = 16`、`SNAPSHOT_TTL_MS = 5min`（`general-repo-access.ts:184`–`:186`）。多个大仓交替访问会让快照命中率塌到接近零，退化为反复全量 walk。
+3. **`CodingAuthorizationRuntimeStore` 的容量与 session 上限共用一个数**：两者都取 `maxSessions`（默认 64，上限 256，`http.ts:567`–`:569`）。授权数与 transport 数的增长曲线并不相同，共用上限会让先到者挤掉后到者。
+4. **每请求同步复核**：`http.ts:616` 的中间件在每个请求上重读 `mcp.local.json` 与 `registered-repos.json`。这是 fail-closed 的代价，也是 QPS 上升时第一个变成同步 IO 热点的地方。
+
+单授权维度已有的硬上限——并发进程 4、单进程最长 30 分钟、输出环 4 MiB、完成后保留 15 分钟、runtime idle 复用 `sessionTtlMs`（默认 30 分钟）——限制的是不可信侧的并发面，不解决上面四点的吞吐问题。
+
+## 4. 历史决策记录（append-only）
+
+重写前的 `docs/architecture/modules/runtime-harness/mcp-sidecar.md` 全文为无日期的 P1/P2/P3 叙述段落，**不含任何带日期的章节**，因此本节当前没有需要逐字保留的条目。
+
+后续带日期的决策请在此追加，只增不改。

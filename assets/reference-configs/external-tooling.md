@@ -4,6 +4,7 @@ Generated repos route external tooling by host/runtime shape. Task-level
 skill routing lives in `docs/reference-configs/agentic-development-flow.md`.
 
 - `Waza` supplies `/think`, `/hunt`, and `/check` for daily small/medium work
+- `reverse-skill-router` is an explicit-only recommended router for independently authorized reverse-engineering and security work
 - `hai-stack` supplies `geju` for live, pre-contract exploration; only its frozen output enters a contract
 - Codex automation requires `health`, `check`, and `mermaid` from `~/.codex/skills`
 - `CodeGraph` is required agent readiness for code navigation and impact tracing
@@ -32,16 +33,20 @@ bootstrap path must not silently install unrelated toolchains or Claude
 marketplace plugins.
 
 `repo-harness uninstall` removes repo-harness managed Codex/Claude hook
-adapters. It intentionally does not uninstall Waza, Mermaid, CodeGraph,
+adapters. It intentionally does not uninstall Waza, Mermaid, Reverse Skill, CodeGraph,
 brain config, package-manager globals, or user-authored sibling hook entries.
 
-`repo-harness update` refreshes only the CLI and repo-harness-owned user-level
-runtime by default. Third-party tooling and CodeGraph registration stay
-readiness findings from `repo-harness setup check` unless the update command is
-run with an explicit opt-in such as `--with-external-skills` or
-`--configure-codegraph`. Repo-local workflow refresh stays on
-`repo-harness init`; `setup check --check-updates` reports an Agent action when
-the current adopted repo's dry-run adoption plan has pending operations.
+`repo-harness update` is a reconciliation command, not a best-effort package
+install. It verifies the installed package's exact `archctx` and
+`archctx-contracts` dependencies, package-local CodeGraph, compatible ArchContext
+Node runtime, and capability handshake. A stale Bun global dependency tree is
+reported with explicit remove/install recovery commands; update does not remove
+a working CLI before a replacement is known-good. The global CodeGraph CLI/MCP
+is refreshed at the exact shipped compatibility version. Mutable third-party
+Waza and Mermaid providers remain behind explicit `--with-external-skills`;
+`--no-codegraph` disables the CodeGraph refresh.
+Repo-local workflow refresh stays on `repo-harness init`; `setup check
+--check-updates` remains the read-only advisory surface.
 
 The cross-review skill is **harness-owned and self-contained** — its source
 lives in `assets/skills/repo-harness-cross-review/` and it wraps the peer CLI
@@ -58,6 +63,28 @@ plan consult on a mid-execution design fork) and is unaffected by this
 package's host-aware installation. These harness skills ship with the full
 profile (the default for `init`) and provide the peer acceptance gate surface
 for the typed `AcceptanceReceipt`; the review section is projection only.
+
+Reverse Skill is registered from `zhaoxuya520/reverse-skill` as the recommended
+but explicit-only `reverse-skill-router`. It is not part of either install
+profile because the upstream pack requires agents to read
+`field-journal/precedent-auth.md`, which treats merely mentioning a target as
+authorization. That assumption cannot replace a real scope or RoE boundary.
+The catalog pins upstream commit
+`539899ddc7608d63dc66e08e794d572e080f1a55` and the selected tree digest
+`sha256:7aafee6c0dec684d410af6864ab77da4d88b9d442142c0efb91b235ce9793dda`;
+repo-harness verifies the full staged tree before projecting it into either
+host root.
+After independent review, install it explicitly:
+
+```bash
+repo-harness install --with-reverse-skill
+repo-harness update --with-reverse-skill
+```
+
+Add `--no-external-skills` to the install command when Reverse Skill should be
+the only marketplace Skill added. The Skills CLI copies the router pack into
+the selected host Skill roots; repo-harness does not execute its workflows or
+bootstrap its optional analysis/security toolchains during install.
 
 The review scope is the current reviewable diff, not just committed branch
 history: branch diff against the default base, staged changes, unstaged tracked
@@ -411,7 +438,7 @@ diff -qr ~/.agents/skills/geju ~/.codex/skills/geju
 ### CodeGraph
 
 ```bash
-bun add -g @colbymchenry/codegraph@latest && codegraph sync . && codegraph status .
+bun add -g @colbymchenry/codegraph@1.5.0 && codegraph sync . && codegraph status .
 ```
 
 ## Agent Fleet
@@ -443,19 +470,19 @@ mapping.
 | `sonnet`, `haiku` | `gpt-5.6-luna` | `low`, `medium`, `high`, `xhigh`, `max` | same string, unchanged |
 | `fable` | `gpt-5.6-sol` | `low`, `medium`, `high`, `xhigh`, `max` | same string, unchanged |
 
-Two per-agent target overrides are applied after tuple validation, on top of
+Three per-agent target overrides are applied after tuple validation, on top of
 the family row above, and are the only effort remaps in the generator:
 `fast-worker` (`opus`/`medium`) targets `gpt-5.6-luna` at `max` reasoning
 instead of the opus family's `gpt-5.6-terra`/`medium`; `deep-worker`
-(`opus`/`high`) keeps the opus family's `gpt-5.6-terra` model but bumps
-reasoning to `xhigh` instead of `high`. Every other agent's Codex model and
-effort follow the family row unchanged.
+(`opus`/`high`) and `gatekeeper` (`opus`/`high`) keep the opus family's
+`gpt-5.6-terra` model but bump reasoning to `xhigh` instead of `high`. Every
+other agent's Codex model and effort follow the family row unchanged.
 
 `fast-worker`, `deep-worker`, `root-cause-prover`, and `harness-evaluator`
 receive `sandbox_mode = "workspace-write"`; every other role receives
 `sandbox_mode = "read-only"`. Current assignments are explorer
 (`sonnet/high`), deep-reasoner (`opus/xhigh`), fast-worker (`opus/medium`),
-deep-worker (`opus/high`), gatekeeper (`fable/xhigh`), root-cause-prover
+deep-worker (`opus/high`), gatekeeper (`opus/high`), root-cause-prover
 (`opus/high`), and harness-evaluator (`opus/high`). Root-cause-prover's prompt further limits
 writes to bugfix evidence inside the active contract's allowed paths;
 harness-evaluator runs existing skill/adoption surfaces only when both repo and
@@ -467,7 +494,7 @@ profiles scrub inherited repo-harness source/helper overrides. The guard rejects
 checkout and real HOME in either argument position; the role returns BLOCKED
 when the guard fails and must not access the independent `evals/bdd2/**` authority. The opus
 family projects to Terra by default with effort carried through unchanged; the only effort
-remaps are the two explicit per-agent overrides above, and any unmapped model/effort
+remaps are the three explicit per-agent overrides above, and any unmapped model/effort
 combination remains a hard error.
 
 The Codex generator also rewrites the exact upstream provider label in the
@@ -475,10 +502,46 @@ description (for example, `Opus at max effort` or `Sonnet at high effort`) to th
 mapped GPT-5.6 model and reasoning level. A missing label fails closed so the
 installed metadata cannot claim a different model from the TOML settings.
 
-These files define the desired installed role configuration. They do not by
-themselves prove that every native MultiAgentV2 spawn surface selects a named
-role instead of inheriting the parent model; keep runtime selection claims
-behind a real subagent canary.
+These files define the desired installed role configuration for Codex native
+MultiAgent `agent_type` selection. On Codex CLI 0.147, the supported repository
+fleet roots use the live v2 native spawn surface. `agent_type` is the only fleet
+identity/lifecycle authority, and a repository fleet dispatch packet must also
+pass `fork_turns="none"` and remain self-contained. If the live schema cannot
+accept the requested installed `agent_type` and v2 packet shape, the fleet
+dispatch fails closed instead of translating fields or selecting an App thread,
+`codex-exec`, a generic subagent, or the main thread.
+
+The native multi-agent tool surface is routed per root model by the Codex model
+catalog (`models_cache.json#multi_agent_version`, verified on CLI 0.147.0):
+`gpt-5.6-sol`/`sol-wm`/`terra` roots get v2 with `task_name`, `fork_turns`,
+`list_agents`, and `send_message`; `gpt-5.6-luna` and `codex-auto-review` roots
+get the v1 namespace. V1 still discovers configured custom agent TOMLs and
+accepts `agent_type`, but uses `fork_context=false`, `send_input`,
+`resume_agent`, `close_agent`, and `wait`; its tools may be deferred behind
+`tool_search`. A V1 root is outside this repository's v2 fleet packet contract,
+so dispatch from that surface fails closed as repository policy, not because
+Codex V1 can only create a generic built-in subagent.
+
+`features.multi_agent_v2 = true` is a global override that forces every root
+model onto v2. It is not a prerequisite for fleet dispatch from a sol/terra root
+and must not be enabled as a "fix" for a dispatch that failed to pass
+`agent_type`/`fork_turns`. The v2 `list_agents` tool enumerates live agent
+threads in the current task tree, not the installed role registry. Luna's v1
+marking has no official rationale (open upstream issue openai/codex#35097) and
+is treated as catalog state, not a model-capability claim.
+
+Installed files do not by themselves prove that Codex honored the configured
+model. Runtime selection claims stay behind official `SubagentStart`
+`agent_type`/`model` evidence. `SubagentStart` does not expose reasoning effort,
+so that field remains `configured_unverified` and is never promoted to a runtime
+claim.
+
+A 2026-08-11 Codex CLI 0.147 canary recorded `explorer` on its configured
+`gpt-5.6-luna` model and `deep-reasoner` on its configured `gpt-5.6-terra`
+model in one session. The strict tooling check aggregated both official
+observations as `verified`. This closes the older flat-V2 limitation for the
+versioned native surface; it does not turn missing future `agent_type` or model
+readback into a compatibility fallback.
 
 ### Local merge gate
 
@@ -518,27 +581,38 @@ and CI remain the remote merge authority.
 For Codex, repo-harness keeps configuration readiness and runtime routing
 readiness separate:
 
-- `UserPromptSubmit.delegation` initializes
-  `.ai/harness/delegation/latest.json` with
-  `native_role_routing.status = "unverified"` and a repo-scoped evidence
-  directory for that delegation.
+- `UserPromptSubmit.delegation` is an explicit command adapter only: `/delegate`
+  or `/parallel` injects the bounded dispatch contract. Natural-language prompt
+  classification and SessionStart standing authorization are not authorities.
 - `SubagentStart.context` consumes Codex's official `agent_type` and `model`
   fields plus `turn_id` and `agent_id`. It enumerates project custom-agent TOML
   files first, then user files, parses them with `Bun.TOML.parse`, selects by
   the schema-authoritative `name`, and writes one atomic observation per child
-  without reading Codex transcripts. The filename is only a convention; an
-  unrelated valid profile may inherit its model, while the selected profile
+  under the event-scoped directory referenced by
+  `.ai/harness/delegation/native-role-routing.json`, even when no prompt advisor
+  state exists. It does not read Codex transcripts. The filename is only a
+  convention; an unrelated valid profile may inherit its model, while the selected profile
   must pin one before repo-harness can verify model routing.
-- `check-agent-tooling.sh` deterministically aggregates every child observation
-  in the current delegation. An empty current delegation retains the latest
-  completed canary instead of erasing negative evidence. Each verified or
-  mismatched observation carries the selected TOML SHA-256, so later config
-  drift invalidates stale evidence. `--strict-readiness`
-  fails after `unavailable`, `mismatch`, `invalid`, or structurally malformed
-  evidence; only a genuinely absent canary remains advisory `unverified`.
+- `check-agent-tooling.sh` deterministically aggregates the current native
+  event scope only; it never revives a historical scope. The hook retains at
+  most 32 observations in that scope and removes older managed scope evidence
+  under a dedicated native-evidence lock. Each verified or mismatched
+  observation carries the selected TOML SHA-256, so later config drift
+  invalidates stale evidence. `--strict-readiness` fails after `unverified`,
+  `unavailable`, `mismatch`, `invalid`, structurally malformed evidence, an
+  empty current scope, or a missing current pointer target.
 
-SubagentStart does not expose `model_reasoning_effort`, so repo-harness never
-claims that per-role reasoning effort is verified from this gate.
+The official [Codex Subagents documentation](https://developers.openai.com/codex/subagents)
+documents `model_reasoning_effort` in each agent file, and the official
+[Configuration Reference](https://developers.openai.com/codex/config-reference)
+also documents `agents.default_subagent_reasoning_effort` plus explicit spawn
+effort precedence. `SubagentStart` does not expose the effective
+`model_reasoning_effort`, so repo-harness records `reasoning_effort_status =
+"configured_unverified"` and never promotes a configured or requested value to
+runtime proof. A missing, default,
+mismatched, invalid, or unverified native observation blocks a role-routing
+claim and authorizes no alternate fleet runner. repo-harness must not scrape
+rollout JSONL or SQLite as a compatibility path.
 
 `developer_instructions` is the packaged `.md` body plus the canonical
 EXECUTION_BOUNDARY anti-extras clause, kept byte-identical to the
@@ -621,10 +695,16 @@ reports packaged files as `up-to-date`.
 
 `repo-harness run check-agent-tooling --host both --strict-readiness` reports
 `agent_fleet` alongside `codegraph`. With `--check-updates`, it compares each
-installed Claude-side `.md` against the packaged source hash and reports
-`drift`/`synced` per agent without network access. The Codex `.toml` side is a
-generated artifact and is checked for presence; installer golden tests prove
-the deterministic generation.
+installed Claude-side `.md` against the packaged source hash without network
+access. When a file differs from that source, it consults the
+`--accept-user-managed` receipt (`~/.repo-harness/agent-fleet-user-managed.json`):
+an entry whose SHA-256 still matches the file's current installed content
+reports `user-managed` on its own report line instead of drift, while a
+missing or malformed receipt, an absent entry for that path, or a stale hash
+still reports `drift`, fail-closed. The per-host rollup is `up-to-date` once
+nothing is left in drift. The Codex `.toml` side is a generated artifact and
+is checked for presence; installer golden tests prove the deterministic
+generation.
 
 ### Uninstall
 
@@ -645,6 +725,157 @@ managed files by hand:
 ~/.codex/agents/root-cause-prover.toml
 ~/.codex/agents/harness-evaluator.toml
 ```
+
+## ArchContext Capability Source
+
+`.ai/harness/policy.json#context.capability_source` selects the single capability
+authority for a repo:
+
+| Value | Authority | Read path |
+|---|---|---|
+| `registry` (default) | `.ai/context/capabilities.json` | JSON capability registry |
+| `archcontext` | `.archcontext/model/nodes/*.yaml` | `archcontext.node/v2` capability nodes |
+
+Exactly one source is read. There is no dual-read, no merge, and no fallback in
+either direction: under `archcontext` a missing model directory fails instead of
+falling back to the JSON registry, and under `registry` a present model
+directory is never consulted. Under `archcontext` the JSON registry is not
+writable, so `repo-harness run capability-config add` refuses and points at the
+node files.
+
+Capability authority does not require the `archctx` CLI: node files are read
+directly with Bun's native YAML parser, so selecting `capability_source` never
+spawns a daemon or external process. Bun older than 1.3 has no `Bun.YAML`; that
+fails closed with upgrade guidance and only when `capability_source` is
+`archcontext`.
+
+Architecture projection is a separate authority. When
+`architecture.projection_provider=archctx`, repo-harness resolves the exact
+version from the consumer dependency tree, executes only that package's declared
+`bin.archctx`, performs a JSON capability handshake, and rejects PATH-only,
+escaping, or mismatched installations. The advisory
+global-tool detector below does not satisfy projection readiness; use
+`repo-harness architecture-projection status --json`. The provider remains
+disabled by default until the release pin is cut over.
+
+When enabled, PostEdit writes only `change_observed` v2 journal records. Stop
+coalesces all eligible records into one durable projection job, excludes
+ArchContext-owned `docs/architecture/**` and declared agent-context targets,
+and acknowledges the source records only after a typed projection receipt is
+durable. Process, timeout, stale-snapshot, invalid-result, and refresh failures
+remain pending for three attempts before an explicit dead-letter transition.
+Preflight failures are jobs too. Each pending journal slot has a stable source
+key while its delivery event id rotates on every coalesced edit; a dead letter
+blocks aggregate jobs containing that source key, so later edits cannot reset
+its attempt budget. Store transitions and queue/dead-letter read models share
+one repository lock. One repository has at most one claimed provider process.
+If the Stop owner disappears, its running claim remains quarantined for 150
+seconds—longer than the 120-second provider bound—before recovery can start a
+new attempt; an abandoned third attempt then transitions directly to dead-letter.
+Before a retry is claimed, the job refreshes delivery ids for its existing
+stable source keys, so edits incorporated before the new snapshot can be
+acknowledged while edits arriving during projection remain pending.
+`ArchitectureRefreshSignalV1` is the only major-change refresh authority; the
+consumer does not infer impact from path names, diff size, or queue-helper
+stdout. A typed refresh-required signal runs the canonical architecture,
+context-contract, and capability-context writers even when the legacy queue
+helper creates no drift card. SessionStart and
+`repo-harness architecture-projection drain --json` expose queue state.
+Each successful canonical refresh action is checkpointed by action key before
+the next action runs, so a partial failure resumes without replaying completed
+writers. Missing or stale CLI authority remains a typed refresh failure; it is
+not silently skipped.
+
+Projection delivery failures use the independent
+`architecture.projection_failure_gate` (`advisory` by default); the existing
+`architecture.freshness_gate` retains its merge/drift meaning. A strict
+projection failure can be recovered without deleting runtime evidence via
+`repo-harness architecture-projection retry-dead-letter --job-id <job> --json`.
+An unreadable policy with no active projection queue remains an advisory
+configuration error; it cannot silently promote the default gate to strict.
+The runtime snapshot excludes `.ai/harness/**`, so concurrent harness receipts
+and traces cannot invalidate a provider snapshot.
+
+Managed host adapters give only `Stop.default` 150 seconds so the configured
+120-second provider bound has control-plane margin. Every other managed route
+remains at 30 seconds, and installer refresh replaces only repo-harness-owned
+entries while preserving sibling user hooks.
+
+Before rolling back to a runtime that only understands journal v1, disable the
+projection provider with the current runtime, run
+`repo-harness architecture-projection drain --json`, and verify the pending
+journal count reported as `sourceJournalPending` is zero. The manual drain owns
+the same selective source acknowledgement as Stop. Downgrading with v2
+observations still pending is not a supported rollback state.
+
+### `source.include` grammar
+
+Upstream matches an include glob against the whole repo-relative path, so a
+wildcard-free literal addresses one file, not a directory subtree. To keep the
+two authorities from disagreeing about what a boundary covers, only two shapes
+are accepted:
+
+| Include | Capability prefix |
+|---|---|
+| `src/core/adoption/**` | `src/core/adoption` |
+| `AGENTS.md` (wildcard-free, not an existing directory) | `AGENTS.md` |
+
+Everything else fails closed. A wildcard-free literal that names an existing
+directory is rejected as ambiguous with guidance to write `<dir>/**`.
+`source.exclude` is not supported, because capability prefixes have no exclusion
+form. Include order is preserved as prefix order.
+
+### Required node fields
+
+| Capability field | Node source | Rule |
+|---|---|---|
+| `domain` / `name` | `id` segments 2 and 3 | `id` must be exactly `capability.<domain>.<name>`, with no `namespace::` prefix |
+| display `name` | `name` | required non-empty node/v2 field; validated but not translated into registry identity |
+| `summary` | `summary` | required non-empty node/v2 field; validated but not translated into registry semantics |
+| `responsibilities` | `responsibilities` | required non-empty string array; validated but not translated into registry semantics |
+| `id` | derived | `<domain>-<name>` |
+| `architecture_module` | derived | `docs/architecture/modules/<domain>/<name>.md` |
+| `workstream_dir` | derived | `tasks/workstreams/<domain>/<name>` |
+| `prefixes` | `source.include` | include grammar above |
+| `contract_files` | `extensions.contractFiles.agents` / `.claude` | declared, never derived: root-facing capabilities deliberately do not follow their prefix |
+| `lsp_profile` | `extensions.lspProfile` | required |
+| `verification_hints` | `extensions.verification` | required array; explicit `[]` is allowed |
+
+Nodes whose `kind` is not `capability`, or whose `status` is not `active`, are
+skipped and claim no prefixes. Required node/v2 descriptive fields are validated
+even when they are not translated. Optional fields this bridge does not consume —
+`source.entrypoints`, `ownership`, `interfaces`,
+`criticality`, `riskDomains`, `notes`, `parent` — are ignored rather than
+translated into local semantics.
+
+### Fail-closed conditions
+
+Source-selection failures exit `2`:
+
+| Condition | Behavior |
+|---|---|
+| unknown `capability_source` value | error naming the policy key and legal values |
+| unreadable `.ai/harness/policy.json` | error naming the policy file |
+| missing `.archcontext/model/nodes` under `archcontext` | error; never falls back to the JSON registry |
+| subdirectory or non-`.yaml`/`.yml` entry in the model directory | error naming the entry |
+| unparseable node YAML | error naming the node file |
+| `Bun.YAML` unavailable | error with the Bun upgrade path |
+
+Node-shape failures surface as `ARCHCONTEXT_*` registry diagnostics and make
+`capability-resolver validate` exit `1` with no stdout; missing/empty node/v2
+`name`, `summary`, or `responsibilities` is a structural error and never yields a
+partial registry. Derived registries then go through the same
+validation as the JSON registry, so duplicate ids, duplicate prefixes, and
+invalid paths keep their existing diagnostic codes.
+
+### Node/v2 export round-trip
+
+`repo-harness run capability-resolver export --format archcontext-nodes-v2`
+emits complete `archcontext.node/v2` capability nodes. Existing directory
+prefixes become explicit `<dir>/**` selectors, while file prefixes remain exact.
+The exported `extensions.contractFiles`, `lspProfile`, and `verification` fields
+round-trip through the canonical node/v2 reader without deriving missing
+semantics. The retired `archcontext-boundaries-v1` format is rejected.
 
 ## Manual Brain Vault Export
 

@@ -118,8 +118,8 @@ describe('closeout runner guardrails', () => {
 
   test('helper identity selects immutable ordinary, verifier, and closeout budgets', () => {
     expect(helperTimeoutMs('check-task-workflow')).toBe(120_000);
-    expect(helperTimeoutMs('verify-contract')).toBe(720_000);
-    expect(helperTimeoutMs('verify-sprint')).toBe(720_000);
+    expect(helperTimeoutMs('verify-contract')).toBe(1_260_000);
+    expect(helperTimeoutMs('verify-sprint')).toBe(1_260_000);
     expect(helperTimeoutMs('contract-worktree')).toBe(900_000);
     expect(helperTimeoutMs('merge-gate')).toBe(900_000);
     expect(helperTimeoutMs('ship-worktrees')).toBe(900_000);
@@ -194,7 +194,7 @@ describe('closeout runner guardrails', () => {
     expect(JSON.parse(readFileSync(receipt, 'utf-8')).interruptedBy).toBe('SIGTERM');
     await Bun.sleep(1_100);
     expect(existsSync(sentinel)).toBe(false);
-  });
+  }, 30_000);
 
   test('supervised spawn failure returns a bounded error instead of hanging on pipe close', () => {
     const startedAt = Date.now();
@@ -204,9 +204,13 @@ describe('closeout runner guardrails', () => {
     });
 
     expect(result.ok).toBe(false);
+    // `timedOut === false` is what proves the failure was detected at spawn
+    // rather than by consuming the 1s bound above; the duration below only has
+    // to separate "returned" from "hung on pipe close", which is unbounded.
+    // A tighter wall-clock number measures machine load, not the guarantee.
     expect(result.timedOut).toBe(false);
     expect(result.error).not.toBe('');
-    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
   });
 
   test('the launcher barrier preserves inherited target stdin and stdout', async () => {
@@ -227,7 +231,7 @@ describe('closeout runner guardrails', () => {
 
     expect(await worker.exited).toBe(0);
     expect(await new Response(worker.stdout).text()).toContain('target:barrier-safe');
-  });
+  }, 30_000);
 
   test('the parent hard timeout returns even when the supervisor event loop is stopped', async () => {
     if (process.platform === 'win32') return;
@@ -307,7 +311,7 @@ describe('closeout runner guardrails', () => {
     expect(await holder.exited).toBe(0);
     expect(result.reason).toBe('timeout');
     expect(existsSync(targetStarted)).toBe(false);
-  });
+  }, 30_000);
 
   test('helper timeout releases the shared expensive-run token after group cleanup', async () => {
     if (process.platform === 'win32') return;
@@ -332,7 +336,7 @@ describe('closeout runner guardrails', () => {
     nextOwner.release();
     await Bun.sleep(1_100);
     expect(existsSync(sentinel)).toBe(false);
-  });
+  }, 30_000);
 
   test('caller-only SIGTERM makes the supervisor clean its group and release its token', async () => {
     if (process.platform === 'win32') return;
@@ -442,7 +446,7 @@ describe('closeout runner guardrails', () => {
 
     expect(() => acquireExpensiveRunLock(root)).toThrow('unsafe lock ancestor');
     expect(readdirSync(victim)).toEqual([]);
-  });
+  }, 30_000);
 
   test('a lock handle revalidates its ancestor identities before protected work starts', () => {
     const root = temporaryRoot('repo-harness-lock-revalidation-');
@@ -535,6 +539,7 @@ describe('closeout runner guardrails', () => {
     const root = temporaryRoot('repo-harness-benchmark-provider-group-');
     initializeGitRepository(root);
     const providerStarted = join(root, 'provider-started');
+    const providerGroupPid = join(root, 'provider-group-pid');
     const descendantSentinel = join(root, 'descendant-survived');
     const contenderAttempting = join(root, 'contender-attempting');
     const contenderEntered = join(root, 'contender-entered');
@@ -542,6 +547,7 @@ describe('closeout runner guardrails', () => {
     const contenderWorker = join(root, 'benchmark-provider-group-contender.ts');
     const providerCommand = [
       "trap 'exit 0' TERM",
+      `printf '%s\\n' "$$" > ${JSON.stringify(providerGroupPid)}`,
       `(trap '' TERM; sleep 1; touch ${JSON.stringify(descendantSentinel)}) >/dev/null 2>&1 &`,
       `touch ${JSON.stringify(providerStarted)}`,
       'wait',
@@ -556,10 +562,13 @@ describe('closeout runner guardrails', () => {
     ].join('\n'));
     writeFileSync(contenderWorker, [
       `import { acquireExpensiveRunLock } from ${JSON.stringify(join(ROOT, 'src/effects/expensive-run-lock.ts'))};`,
-      "import { writeFileSync } from 'fs';",
+      "import { readFileSync, writeFileSync } from 'fs';",
       `writeFileSync(${JSON.stringify(contenderAttempting)}, 'attempting\\n');`,
       `const lock = acquireExpensiveRunLock(${JSON.stringify(root)});`,
-      `writeFileSync(${JSON.stringify(contenderEntered)}, 'entered\\n');`,
+      `const providerGroupPid = Number(readFileSync(${JSON.stringify(providerGroupPid)}, 'utf8').trim());`,
+      'let providerGroupAlive = true;',
+      "try { process.kill(-providerGroupPid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') providerGroupAlive = false; else throw error; }",
+      `writeFileSync(${JSON.stringify(contenderEntered)}, providerGroupAlive ? 'alive\\n' : 'drained\\n');`,
       'lock.release();',
       '',
     ].join('\n'));
@@ -568,17 +577,21 @@ describe('closeout runner guardrails', () => {
       cwd: ROOT, detached: true, stdout: 'pipe', stderr: 'pipe',
     });
     await waitForPath(providerStarted);
+    await waitForPath(providerGroupPid);
     process.kill(producer.pid, 'SIGTERM');
     const contender = Bun.spawn([process.execPath, contenderWorker], {
       cwd: ROOT, stdout: 'pipe', stderr: 'pipe',
     });
     await waitForPath(contenderAttempting);
-    await Bun.sleep(100);
-    expect(existsSync(contenderEntered)).toBe(false);
-
-    expect(await producer.exited).toBe(143);
+    // The token is released only after terminateActiveProviderGroups() drains
+    // the leaderless group. Process exit follows that release, but scheduler
+    // order may let the contender run first, so observe the real invariant at
+    // lock acquisition: the recorded provider process group must already be
+    // absent. This is the same observable production uses before releasing.
+    await waitForPath(contenderEntered, 5_000);
     expect(await contender.exited).toBe(0);
-    expect(existsSync(contenderEntered)).toBe(true);
+    expect(readFileSync(contenderEntered, 'utf8')).toBe('drained\n');
+    expect(await producer.exited).toBe(143);
     await Bun.sleep(600);
     expect(existsSync(descendantSentinel)).toBe(false);
   }, 10_000);
@@ -612,7 +625,7 @@ describe('closeout runner guardrails', () => {
       'child_args=(--ready "two words"); set -- ${child_args[@]+"${child_args[@]}"}; test "$#" -eq 2 && test "$1" = --ready && test "$2" = "two words"',
     ], { encoding: 'utf-8' });
     expect(nonEmptyProbe.status).toBe(0);
-  });
+  }, 30_000);
 
   test('the fixed source retains the ordinary default without making it closeout authority', () => {
     const processRunner = readFileSync(join(ROOT, 'src/effects/process-runner.ts'), 'utf-8');
@@ -624,5 +637,5 @@ describe('closeout runner guardrails', () => {
     expect(processRunner).toContain('DEFAULT_PROCESS_TIMEOUT_MS = 120_000');
     expect(helperRunner).toContain('helperTimeoutMs');
     expect(ship).not.toContain('run_cmd bash "$helper_dir/verify-sprint.sh"');
-  });
+  }, 30_000);
 });

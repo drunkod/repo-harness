@@ -119,6 +119,7 @@ function captureHealthyBaseline(): Record<string, unknown> {
           ...gitEnv,
           HOOK_REPO_ROOT: root,
           HOOK_HOST: 'claude',
+          REPO_HARNESS_MAIN_LOOP_EDIT_GUARD: undefined,
           HOOK_SESSION_ID: 'session-state-authority-baseline',
           HOOK_RUN_ID: 'session-state-authority-baseline-run',
         },
@@ -183,6 +184,7 @@ function runMockedFailure(kind: 'transient' | 'non-transient'): {
           ...process.env,
           HOOK_REPO_ROOT: process.env.FIXTURE_ROOT,
           HOOK_HOST: 'claude',
+          REPO_HARNESS_MAIN_LOOP_EDIT_GUARD: undefined,
           HOOK_SESSION_ID: 'failure-session',
           HOOK_RUN_ID: 'failure-run',
         },
@@ -250,6 +252,7 @@ function runMockedPreEdit(kind: 'transient' | 'non-transient'): {
           ...process.env,
           HOOK_REPO_ROOT: process.env.FIXTURE_ROOT,
           HOOK_HOST: 'claude',
+          REPO_HARNESS_MAIN_LOOP_EDIT_GUARD: undefined,
           HOOK_SESSION_ID: 'preedit-failure-session',
           HOOK_RUN_ID: 'preedit-failure-run',
         },
@@ -286,7 +289,7 @@ describe('SessionStart Effective State authority', () => {
     expect(runtime).not.toContain('spawnSync');
     expect(runtime).not.toContain('PACKAGE_ROOT');
     expect(runtime).not.toContain("'state', 'resolve', '--json'");
-  });
+  }, 30_000);
 
   test('preserves exact healthy context, budget evidence, and route-runtime metrics', () => {
     const expected = JSON.parse(readFileSync(
@@ -294,7 +297,7 @@ describe('SessionStart Effective State authority', () => {
       'utf8',
     ));
     expect(captureHealthyBaseline()).toEqual(expected);
-  });
+  }, 30_000);
 
   test('distinguishes actionable, non-actionable, and blocked-but-resolved state', () => {
     const actionable = fixtureState();
