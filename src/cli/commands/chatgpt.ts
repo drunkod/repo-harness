@@ -543,6 +543,7 @@ export function buildChatgptCommand(): Command {
           dryRun: result.dryRun,
           error: result.error,
         }, null, 2));
+        if (result.status === 'failed' || result.status === 'surface_blocked') process.exitCode = 2;
       });
     });
 
@@ -579,7 +580,7 @@ export function buildChatgptCommand(): Command {
           console.log(JSON.stringify({ sessions }, null, 2));
           return;
         }
-        for (const session of sessions) console.log(`${session.sessionId}\t${session.mode}\t${session.status}\t${session.outputPath}`);
+        for (const session of sessions) console.log(`${session.sessionId}\t${session.status}\t${session.outputPath}`);
       });
     });
 
@@ -587,7 +588,7 @@ export function buildChatgptCommand(): Command {
     .command('browser-cleanup')
     .description('Remove saved ChatGPT browser sessions; defaults to dry-run and requires --force to delete')
     .option('--repo <path>', 'Repository root', '.')
-    .option('--older-than-days <days>', 'Only include sessions whose directory mtime is older than this many days')
+    .option('--older-than-days <days>', 'Only include sessions whose updatedAt timestamp is older than this many days')
     .option('--status <status>', 'Only include a session status')
     .option('--mode <mode>', 'Only include a session mode: consult|create')
     .option('--limit <count>', 'Maximum sessions to remove')

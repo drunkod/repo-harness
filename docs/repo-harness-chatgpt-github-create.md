@@ -133,9 +133,9 @@ repo-harness chatgpt browser-create \
 The fixed execution boundary instructs the remote app to:
 
 - operate only on the exact `owner/name` repository;
-- fetch repository metadata and the exact base commit before writing;
-- stop if the actual default branch or base is different;
-- create the dedicated branch directly from the exact base SHA;
+- fetch repository metadata, the exact base commit, and the target branch before writing;
+- stop if the actual default branch or base is different, or if the target branch already exists;
+- create the previously absent dedicated branch directly from the exact base SHA;
 - read existing target files before writing;
 - leave the attached plan and contract unchanged;
 - write only to the dedicated branch and never force-update a ref;
@@ -157,6 +157,7 @@ The response must contain exactly one fenced JSON block:
   "defaultBranch": "main",
   "baseCommit": "1111111111111111111111111111111111111111",
   "branch": "agent/example-change",
+  "targetBranchExisted": false,
   "commitSha": "2222222222222222222222222222222222222222",
   "pullRequest": {
     "number": 123,
@@ -170,6 +171,7 @@ The response must contain exactly one fenced JSON block:
   "toolEvents": [
     "get_repo",
     "fetch_commit",
+    "get_branch",
     "create_branch",
     "create_commit",
     "update_ref",
@@ -185,14 +187,13 @@ The parser enforces:
 
 - the exact selected app, repository, default branch, base commit, and target
   branch;
+- `targetBranchExisted: false`, proving the target name was reported absent before Create;
 - a full implementation SHA different from the base SHA;
-- safe, non-empty changed-file paths;
-- at least one recognized GitHub write action in `toolEvents`;
-- when `--draft-pr` was requested, matching draft-PR URL, base, head, and head
-  SHA;
-- when no PR was requested, no PR object;
-- no reported merge, auto-merge, ready-for-review, thread-resolution, or CI
-  rerun action.
+- safe, non-empty changed-file paths that do not modify the plan or contract;
+- the complete repository/base/branch/create/commit/ref action sequence in `toolEvents`;
+- only recognized actions in `toolEvents`;
+- when `--draft-pr` was requested, matching draft-PR URL, base, head, head SHA, and `create_pull_request` evidence;
+- when no PR was requested, no PR object.
 
 The prompt requests repository/base reads and a bounded branch/commit/ref
 sequence. Current Oracle output does not provider-attest each ChatGPT tool call,
@@ -263,7 +264,9 @@ A successful envelope has this shape:
   "readActions": [
     "get_repo",
     "fetch_commit",
+    "get_branch",
     "compare_commits",
+    "list_changed_files",
     "get_pr_info"
   ]
 }
@@ -275,14 +278,11 @@ A match requires:
 - a new `readBackSessionId` distinct from the Create `sessionId`;
 - the exact repository/default/base/branch/app identity;
 - an existing implementation commit and matching branch head;
-- comparison status `ahead` for the exact base and implementation SHAs;
-- the same changed-file set as the Create result;
-- `get_repo`, `fetch_commit`, and `compare_commits`, plus a PR read action when
-  a PR was reported;
-- no reported write action.
-
-`aheadBy` and `behindBy` are retained as reported diagnostics; the enforced
-comparison gate is the exact base/head pair plus status `ahead`.
+- comparison status `ahead` for the exact base and implementation SHAs, with `aheadBy >= 1` and `behindBy === 0`;
+- the same safe changed-file set as the Create result, excluding the protected plan and contract;
+- the complete recognized repository/commit/branch/compare/changed-file action sequence;
+- an explicit PR lookup whether a PR is reported or absent;
+- no unrecognized or write action.
 
 A matching result records:
 

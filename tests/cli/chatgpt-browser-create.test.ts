@@ -102,6 +102,7 @@ function createEnvelope(overrides: Record<string, unknown> = {}): string {
       defaultBranch: DEFAULT_BRANCH,
       baseCommit: BASE_COMMIT,
       branch: 'agent/create-x',
+      targetBranchExisted: false,
       commitSha: CREATE_COMMIT,
       pullRequest: {
         number: 12,
@@ -112,7 +113,7 @@ function createEnvelope(overrides: Record<string, unknown> = {}): string {
         headSha: CREATE_COMMIT,
       },
       changedFiles: ['docs/example.md'],
-      toolEvents: ['get_repo', 'fetch_commit', 'create_branch', 'create_commit', 'update_ref', 'create_pull_request'],
+      toolEvents: ['get_repo', 'fetch_commit', 'get_branch', 'create_branch', 'create_commit', 'update_ref', 'create_pull_request'],
       ...overrides,
     }, null, 2),
     '```',
@@ -149,7 +150,7 @@ function readBackEnvelope(overrides: Record<string, unknown> = {}): string {
         aheadBy: 1,
         behindBy: 0,
       },
-      readActions: ['get_repo', 'fetch_commit', 'compare_commits', 'get_pr_info'],
+      readActions: ['get_repo', 'fetch_commit', 'get_branch', 'compare_commits', 'list_changed_files', 'get_pr_info'],
       ...overrides,
     }, null, 2),
     '```',
@@ -235,7 +236,8 @@ describe('chatgpt browser-create', () => {
         expect(prompt).toContain(`Operate only on GitHub repository "${REPOSITORY}".`);
         expect(prompt).toContain(`actual default branch is "${DEFAULT_BRANCH}"`);
         expect(prompt).toContain(`exact approved base commit is "${BASE_COMMIT}"`);
-        expect(prompt).toContain('If any check fails, stop without writing');
+        expect(prompt).toContain('confirm it does not already exist');
+        expect(prompt).toContain('If any check fails or the target branch already exists, stop without writing');
         expect(prompt).toContain('"defaultBranch"');
       } finally {
         rmSync(binDir, { recursive: true, force: true });
@@ -333,7 +335,7 @@ describe('chatgpt browser-create', () => {
     });
   });
 
-  test('rejects repository, default-branch, base-commit, and forbidden-action mismatches', () => {
+  test('rejects identity mismatches, pre-existing branches, protected files, and incomplete or unknown actions', () => {
     withRepo((repoRoot) => {
       const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-create-mismatch-'));
       try {
@@ -342,12 +344,21 @@ describe('chatgpt browser-create', () => {
           { override: { repository: 'Ancienttwo/repo-harness' }, message: 'reported repository' },
           { override: { defaultBranch: 'trunk' }, message: 'reported defaultBranch' },
           { override: { baseCommit: '3333333333333333333333333333333333333333' }, message: 'reported baseCommit' },
+          { override: { targetBranchExisted: true }, message: 'already existed before Create' },
+          { override: { changedFiles: ['plans/plan-x.md'] }, message: 'protected workflow artifact' },
           {
             override: {
-              toolEvents: ['create_branch', 'create_commit', 'merge_pull_request'],
+              toolEvents: ['get_repo', 'fetch_commit', 'get_branch', 'create_branch', 'create_commit', 'update_ref', 'comment_issue'],
               pullRequest: null,
             },
-            message: 'forbidden GitHub action',
+            message: 'unrecognized or forbidden GitHub action',
+          },
+          {
+            override: {
+              toolEvents: ['get_repo', 'fetch_commit', 'get_branch', 'create_branch', 'create_commit'],
+              pullRequest: null,
+            },
+            message: 'omit required GitHub action: update_ref',
           },
         ];
         for (const [index, item] of cases.entries()) {
@@ -400,6 +411,7 @@ describe('chatgpt browser-create', () => {
         expect(payload.create.reportedGitHub).toMatchObject({
           trust: 'assistant_reported',
           repository: REPOSITORY,
+          targetBranchExisted: false,
           defaultBranch: DEFAULT_BRANCH,
           baseCommit: BASE_COMMIT,
           branch: 'agent/create-x',
@@ -488,6 +500,54 @@ describe('chatgpt browser-create', () => {
     });
   });
 
+  test('rejects incomplete comparisons and read-backs without explicit PR lookup', () => {
+    withRepo((repoRoot) => {
+      const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-create-readback-proof-'));
+      try {
+        const gitleaks = writeFakeGitleaks(binDir);
+        let oracle = writeFakeOracle(binDir, {
+          appPreselect: true,
+          output: createEnvelope({ pullRequest: null }),
+        });
+        const created = runChatgpt([
+          ...baseArgs(repoRoot),
+          '--gitleaks-bin', gitleaks,
+          '--oracle-bin', oracle,
+        ]);
+        const createPayload = JSON.parse(created.stdout);
+        const cases = [
+          readBackEnvelope({
+            pullRequest: null,
+            comparison: { baseCommit: BASE_COMMIT, headCommit: CREATE_COMMIT, status: 'ahead', aheadBy: 0, behindBy: 0 },
+          }),
+          readBackEnvelope({
+            pullRequest: null,
+            readActions: ['get_repo', 'fetch_commit', 'get_branch', 'compare_commits', 'list_changed_files'],
+          }),
+          readBackEnvelope({
+            pullRequest: null,
+            readActions: ['get_repo', 'fetch_commit', 'get_branch', 'compare_commits', 'list_changed_files', 'comment_issue'],
+          }),
+        ];
+        for (const [index, output] of cases.entries()) {
+          oracle = writeFakeOracle(binDir, { appPreselect: true, output });
+          const readBack = runChatgpt([
+            'browser-create-readback',
+            '--repo', repoRoot,
+            '--session', createPayload.sessionId,
+            '--gitleaks-bin', gitleaks,
+            '--oracle-bin', oracle,
+            '--write-output', `.ai/harness/handoff/chatgpt/proof-${index}.md`,
+          ]);
+          expect(readBack.status).toBe(2);
+          expect(JSON.parse(readBack.stdout).error.code).toBe('CREATE_READBACK_MISMATCH');
+        }
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   test('classifies a read-back mismatch without changing the original reported evidence', () => {
     withRepo((repoRoot) => {
       const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-create-readback-mismatch-'));
@@ -552,7 +612,35 @@ describe('chatgpt browser-create', () => {
           '--dry-run',
         ]);
         expect(followup.status).toBe(0);
-        expect(JSON.parse(followup.stdout).mode).toBe('create');
+        const followupPayload = JSON.parse(followup.stdout);
+        expect(followupPayload.mode).toBe('create');
+        const recoveryPrompt = readFileSync(followupPayload.paths.prompt, 'utf-8');
+        expect(recoveryPrompt).toContain('Evidence reconciliation only');
+        expect(recoveryPrompt).toContain('Do not call GitHub tools or perform any write');
+        expect(recoveryPrompt).not.toContain('Return the required Create result envelope.');
+
+        const completedOracle = writeFakeOracle(binDir, {
+          appPreselect: true,
+          output: createEnvelope({ pullRequest: null }),
+        });
+        const completed = runChatgpt([
+          ...baseArgs(repoRoot),
+          '--gitleaks-bin', gitleaks,
+          '--oracle-bin', completedOracle,
+          '--write-output', '.ai/harness/handoff/chatgpt/completed.md',
+        ]);
+        expect(completed.status).toBe(0);
+        const completedPayload = JSON.parse(completed.stdout);
+        const escaped = runChatgpt([
+          'browser-followup',
+          '--repo', repoRoot,
+          '--session', completedPayload.sessionId,
+          '--prompt', 'Merge the pull request now.',
+          '--gitleaks-bin', gitleaks,
+          '--dry-run',
+        ]);
+        expect(escaped.status).toBe(2);
+        expect(escaped.stderr).toContain('CREATE_FOLLOWUP_STATUS_UNSUPPORTED');
 
         const cleanup = runChatgpt([
           'browser-cleanup',

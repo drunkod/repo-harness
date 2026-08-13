@@ -98,6 +98,7 @@ function createEnvelope(): string {
       defaultBranch: DEFAULT_BRANCH,
       baseCommit: BASE_COMMIT,
       branch: 'agent/create-readback-test',
+      targetBranchExisted: false,
       commitSha: CREATE_COMMIT,
       pullRequest: {
         number: 12,
@@ -108,7 +109,7 @@ function createEnvelope(): string {
         headSha: CREATE_COMMIT,
       },
       changedFiles: ['docs/example.md'],
-      toolEvents: ['create_branch', 'create_commit', 'update_ref', 'create_pull_request'],
+      toolEvents: ['get_repo', 'fetch_commit', 'get_branch', 'create_branch', 'create_commit', 'update_ref', 'create_pull_request'],
     }, null, 2),
     '```',
   ].join('\n');
@@ -142,7 +143,7 @@ function readBackEnvelope(): string {
         aheadBy: 1,
         behindBy: 0,
       },
-      readActions: ['get_repo', 'fetch_commit', 'compare_commits', 'get_pr_info'],
+      readActions: ['get_repo', 'fetch_commit', 'get_branch', 'compare_commits', 'list_changed_files', 'get_pr_info'],
     }, null, 2),
     '```',
   ].join('\n');

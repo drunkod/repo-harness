@@ -1,4 +1,4 @@
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { basename, dirname, join, relative } from 'path';
 import { resolveBrowserOutputPath } from './file-policy';
 import type {
@@ -388,10 +388,10 @@ export function cleanupBrowserSessions(repoRoot: string, opts: {
       const metaPath = join(sessionDir, 'meta.json');
       if (!existsSync(metaPath)) return null;
       const meta = normalizeBrowserSessionMeta(JSON.parse(readFileSync(metaPath, 'utf-8')) as BrowserSessionMeta);
-      const stat = statSync(sessionDir);
       if (opts.status && meta.status !== opts.status) return null;
       if (opts.mode && meta.mode !== opts.mode) return null;
-      if (cutoff !== undefined && stat.mtimeMs >= cutoff) return null;
+      const activityMs = Date.parse(meta.updatedAt);
+      if (cutoff !== undefined && (!Number.isFinite(activityMs) || activityMs >= cutoff)) return null;
       return { sessionId: entry.name, sessionDir };
     })
     .filter((entry): entry is { sessionId: string; sessionDir: string } => entry !== null)

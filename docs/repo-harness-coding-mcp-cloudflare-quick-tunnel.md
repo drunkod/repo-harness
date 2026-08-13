@@ -11,15 +11,13 @@ Cloudflare Quick Tunnel
    ↓ HTTP/2
 cloudflared on Mac
    ↓
-Mac FlClash / TUN
+Optional local proxy/TUN
    ↓
-Phone SOCKS proxy
+Optional trusted SOCKS relay
    ↓
-VMess
+Trusted outbound proxy/VPS
    ↓
-V2Ray VPS
-   ↓
-direct-out for TCP/7844
+direct route for TCP/7844
    ↓
 Cloudflare Tunnel edge
 
@@ -29,11 +27,11 @@ Cloudflare request returns through tunnel
    ↓
 Repo Harness MCP
    ↓
-~/nix-config
+~/your-repository
 
 ```
 
-Normal proxy traffic can continue to use Cloudflare WARP on the VPS. Only Cloudflare Tunnel TCP/7844 needs to bypass WARP.
+If the outbound host uses Cloudflare WARP, normal proxy traffic can continue through it while Cloudflare Tunnel TCP/7844 uses a direct route.
 
 The important working conditions are:
 
@@ -63,7 +61,7 @@ repo-harness --version
 Also verify the Home Manager/profile version:
 
 ```
-/etc/profiles/per-user/test/bin/repo-harness --version
+/etc/profiles/per-user/$USER/bin/repo-harness --version
 
 ```
 
@@ -115,7 +113,7 @@ echo
 Or use the helper:
 
 ```
-/etc/profiles/per-user/test/bin/repo-harness-mcp-health
+/etc/profiles/per-user/USER/bin/repo-harness-mcp-health
 
 ```
 
@@ -169,7 +167,7 @@ dns:
 Verify from the Mac that the phone SOCKS port is reachable:
 
 ```
-nc -vz -w 5 10.50.109.158 7891
+nc -vz -w 5 PHONE_OR_RELAY_IP 7891
 
 ```
 
@@ -186,7 +184,7 @@ Then verify normal HTTPS through the phone:
 curl -v \
   --connect-timeout 10 \
   --max-time 30 \
-  --proxy socks5h://10.50.109.158:7891 \
+  --proxy socks5h://PHONE_OR_RELAY_IP:7891 \
   https://www.cloudflare.com/cdn-cgi/trace
 
 ```
@@ -211,7 +209,7 @@ The Mac uses the phone as its SOCKS outbound:
 proxies:
   - name: "PhoneProxy"
     type: socks5
-    server: 10.50.109.158
+    server: PHONE_OR_RELAY_IP
     port: 7891
     udp: true
 
@@ -222,7 +220,7 @@ Keep local/private networks direct before proxy rules:
 ```
 rules:
   - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
-  - IP-CIDR,10.50.109.158/32,DIRECT,no-resolve
+  - IP-CIDR,PHONE_OR_RELAY_IP/32,DIRECT,no-resolve
   - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
   - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
@@ -703,8 +701,8 @@ grep -E \
 Once the Quick Tunnel is stable:
 
 ```
-/etc/profiles/per-user/test/bin/repo-harness-mcp-bootstrap \
-  --repo "$HOME/nix-config" \
+/etc/profiles/per-user/USER/bin/repo-harness-mcp-bootstrap \
+  --repo "$HOME/your-repository" \
   --endpoint "${QUICK_URL}/mcp"
 
 ```
@@ -736,14 +734,14 @@ The current runtime workaround is:
 
 ```
 launchctl setenv PATH \
-  "$HOME/.bun/bin:/etc/profiles/per-user/test/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  "$HOME/.bun/bin:/etc/profiles/per-user/USER/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 ```
 
 Then restart Repo Harness:
 
 ```
-/etc/profiles/per-user/test/bin/repo-harness-mcp-restart
+/etc/profiles/per-user/USER/bin/repo-harness-mcp-restart
 
 ```
 
@@ -782,7 +780,7 @@ The `public_origin` should equal the current Quick Tunnel hostname.
 # 16. Run Repo Harness health
 
 ```
-/etc/profiles/per-user/test/bin/repo-harness-mcp-health
+/etc/profiles/per-user/USER/bin/repo-harness-mcp-health
 
 ```
 
@@ -798,7 +796,7 @@ repo-harness MCP health and OAuth discovery passed
 # 17. Run full doctor
 
 ```
-/etc/profiles/per-user/test/bin/repo-harness-mcp-doctor
+/etc/profiles/per-user/USER/bin/repo-harness-mcp-doctor
 
 ```
 
@@ -998,8 +996,8 @@ done
 Then update Repo Harness:
 
 ```
-/etc/profiles/per-user/test/bin/repo-harness-mcp-bootstrap \
-  --repo "$HOME/nix-config" \
+/etc/profiles/per-user/USER/bin/repo-harness-mcp-bootstrap \
+  --repo "$HOME/your-repository" \
   --endpoint "${QUICK_URL}/mcp"
 
 ```
@@ -1008,16 +1006,16 @@ Restart:
 
 ```
 launchctl setenv PATH \
-  "$HOME/.bun/bin:/etc/profiles/per-user/test/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  "$HOME/.bun/bin:/etc/profiles/per-user/USER/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-/etc/profiles/per-user/test/bin/repo-harness-mcp-restart
+/etc/profiles/per-user/USER/bin/repo-harness-mcp-restart
 
 ```
 
 Verify:
 
 ```
-/etc/profiles/per-user/test/bin/repo-harness-mcp-doctor
+/etc/profiles/per-user/USER/bin/repo-harness-mcp-doctor
 
 ```
 

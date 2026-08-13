@@ -115,9 +115,35 @@ The implementation reuses or extends these existing test families:
 Create read-back is later exposed as an MCP tool. This MVP does not add that
 surface.
 
+## 2026-08-13 full-branch review follow-up
+
+A local review of all 80 commits over `main` found and fixed additional
+fail-closed gaps before any live GitHub write:
+
+- Create now requires assistant-reported proof that the target branch was absent
+  before creation and rejects any pre-existing target branch.
+- `toolEvents` is an allowlist with a required repository/base/branch/create/
+  commit/ref sequence; unknown actions fail closed, and draft PR creation
+  requires explicit action evidence.
+- changed-file evidence rejects the protected plan and contract.
+- read-back requires a strictly-ahead comparison (`aheadBy >= 1`,
+  `behindBy === 0`), complete recognized read actions, and a PR lookup even when
+  no PR is reported.
+- Create follow-up is limited to evidence reconciliation for blocked or
+  recoverable sessions. It discards the caller's free-form prompt, prohibits
+  GitHub actions, validates the returned Create envelope, and rejects completed
+  or dry-run sessions.
+- CLI follow-up failures now return exit code 2, text `browser-list` retains its
+  prior column contract, and cleanup ages sessions by `updatedAt` rather than
+  directory mtime.
+- the OAuth workaround binds the authorization URL to an explicit expected MCP
+  origin before reading or transmitting the local passphrase.
+- the Quick Tunnel guide uses neutral user, repository, and relay placeholders.
+
 ## Verification boundary
 
-The branch was reviewed through the connected GitHub source and API. No local
-Bun test suite, TypeScript check, or authenticated live browser run was executed
-as part of this reconciliation. Those remain required before acceptance; the
-live test additionally requires deliberate remote branch and draft-PR inputs.
+Local Create/read-back and skill-surface suites pass with fake Oracle and
+Gitleaks binaries. Type checking is currently unavailable because this checkout
+has no installed `node_modules/typescript`. The authenticated live browser test
+remains intentionally gated until the hardened dry run, browser doctor, exact
+remote base, and a fresh unused `agent/*` branch are confirmed.

@@ -44,6 +44,7 @@ export interface BrowserCreateReportedGitHubEvidence {
   defaultBranch: string;
   baseCommit: string;
   branch: string;
+  targetBranchExisted: boolean;
   commitSha: string;
   pullRequest?: BrowserCreatePullRequestEvidence;
   changedFiles: string[];

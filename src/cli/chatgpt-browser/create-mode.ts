@@ -1,5 +1,5 @@
 import { existsSync } from 'fs';
-import { isAbsolute, relative, resolve } from 'path';
+import { isAbsolute, posix, relative, resolve } from 'path';
 import { runBrowserConsult } from './engine';
 import { readBrowserSession, updateBrowserSessionMeta } from './session-store';
 import type {
@@ -19,31 +19,47 @@ const CREATE_RESULT_FENCE = 'repo-harness-create-result';
 const CREATE_READBACK_RESULT_FENCE = 'repo-harness-create-readback-result';
 const REQUIRED_BRANCH_PREFIX = 'agent/';
 
-const WRITE_TOOL_EVENTS = new Set([
+const CREATE_REQUIRED_ACTIONS = new Set([
+  'get_repo',
+  'fetch_commit',
+  'get_branch',
   'create_branch',
+  'create_commit',
+  'update_ref',
+]);
+
+const CREATE_ALLOWED_ACTIONS = new Set([
+  ...CREATE_REQUIRED_ACTIONS,
+  'get_file',
   'create_file',
   'update_file',
   'delete_file',
   'create_blob',
   'create_tree',
-  'create_commit',
-  'update_ref',
   'create_pull_request',
-]);
-
-const FORBIDDEN_CREATE_TOOL_EVENTS = new Set([
-  'merge_pull_request',
-  'enable_auto_merge',
-  'mark_pull_request_ready_for_review',
-  'resolve_review_thread',
-  'rerun_failed_workflow_run_jobs',
-  'rerun_workflow_job',
 ]);
 
 const READBACK_REQUIRED_ACTIONS = new Set([
   'get_repo',
   'fetch_commit',
+  'get_branch',
   'compare_commits',
+  'list_changed_files',
+]);
+
+const READBACK_ALLOWED_ACTIONS = new Set([
+  ...READBACK_REQUIRED_ACTIONS,
+  'get_pr_info',
+  'fetch_pr',
+  'list_pull_requests',
+  'search_pull_requests',
+]);
+
+const PR_READ_ACTIONS = new Set([
+  'get_pr_info',
+  'fetch_pr',
+  'list_pull_requests',
+  'search_pull_requests',
 ]);
 
 export class CreatePreconditionError extends Error {
@@ -213,8 +229,8 @@ export function buildCreatePrompt(input: BrowserCreateInput, context: BrowserCre
     'Before any write, use GitHub read actions to:',
     `1. fetch repository "${context.repository}" and confirm its actual default branch is "${context.defaultBranch}";`,
     `2. fetch commit "${context.baseCommit}" in that repository;`,
-    `3. confirm branch "${context.targetBranch}" is not the default branch.`,
-    'If any check fails, stop without writing and explain the mismatch.',
+    `3. fetch branch "${context.targetBranch}" and confirm it does not already exist.`,
+    'If any check fails or the target branch already exists, stop without writing and explain the mismatch.',
     '',
     'The approved task contract is authoritative.',
     'Read every existing target file before writing.',
@@ -240,12 +256,13 @@ export function buildCreatePrompt(input: BrowserCreateInput, context: BrowserCre
     `  "defaultBranch": "${context.defaultBranch}",`,
     `  "baseCommit": "${context.baseCommit}",`,
     `  "branch": "${context.targetBranch}",`,
+    '  "targetBranchExisted": false,',
     '  "commitSha": "<full commit SHA>",',
     context.draftPr
       ? `  "pullRequest": { "number": 123, "url": "https://github.com/${context.repository}/pull/123", "draft": true, "baseBranch": "${context.defaultBranch}", "headBranch": "${context.targetBranch}", "headSha": "<full commit SHA>" },`
       : '  "pullRequest": null,',
     '  "changedFiles": ["path/to/file"],',
-    '  "toolEvents": ["get_repo", "fetch_commit", "create_branch", "create_commit", "update_ref"]',
+    '  "toolEvents": ["get_repo", "fetch_commit", "get_branch", "create_branch", "create_commit", "update_ref"]',
     '}',
     '\`\`\`',
     '',
@@ -264,6 +281,7 @@ interface ParsedCreateEnvelope {
   defaultBranch: string;
   baseCommit: string;
   branch: string;
+  targetBranchExisted: boolean;
   commitSha: string;
   pullRequest?: BrowserCreatePullRequestEvidence;
   changedFiles: string[];
@@ -356,6 +374,7 @@ export function parseCreateResult(output: string): ParsedCreateEnvelope {
     defaultBranch: requiredString(parsed.defaultBranch, 'defaultBranch'),
     baseCommit: requiredString(parsed.baseCommit, 'baseCommit'),
     branch: requiredString(parsed.branch, 'branch'),
+    targetBranchExisted: requiredBoolean(parsed.targetBranchExisted, 'targetBranchExisted'),
     commitSha: requiredString(parsed.commitSha, 'commitSha'),
     pullRequest: parsePullRequest(parsed.pullRequest),
     changedFiles: stringArray(parsed.changedFiles, 'changedFiles'),
@@ -392,11 +411,16 @@ export function parseCreateReadBackResult(output: string): ParsedReadBackEnvelop
   };
 }
 
-function assertChangedFiles(paths: string[]): void {
+function assertChangedFiles(paths: string[], protectedPaths: string[] = []): void {
   if (paths.length === 0) throw new Error('changedFiles must contain at least one path');
+  const protectedSet = new Set(protectedPaths.map((path) => posix.normalize(path)));
   for (const path of paths) {
-    if (isAbsolute(path) || path === '..' || path.startsWith('../') || path.includes('/../')) {
+    const normalized = posix.normalize(path);
+    if (isAbsolute(path) || path.includes('\\') || normalized === '..' || normalized.startsWith('../')) {
       throw new Error(`changedFiles contains an unsafe path: ${path}`);
+    }
+    if (protectedSet.has(normalized)) {
+      throw new Error(`changedFiles contains protected workflow artifact: ${normalized}`);
     }
   }
 }
@@ -425,22 +449,30 @@ function assertCreateEnvelope(envelope: ParsedCreateEnvelope, context: BrowserCr
   if (envelope.branch !== context.targetBranch) {
     throw new Error(`reported branch ${envelope.branch} does not match ${context.targetBranch}`);
   }
+  if (envelope.targetBranchExisted) {
+    throw new Error(`target branch ${context.targetBranch} already existed before Create`);
+  }
   if (envelope.selectedApp !== context.requestedApp) {
     throw new Error(`reported selectedApp ${envelope.selectedApp} does not match ${context.requestedApp}`);
   }
   if (sameSha(envelope.commitSha, context.baseCommit)) {
     throw new Error('reported commitSha must differ from the base commit');
   }
-  assertChangedFiles(envelope.changedFiles);
-  if (!envelope.toolEvents.some((event) => WRITE_TOOL_EVENTS.has(event))) {
-    throw new Error('reported toolEvents contain no GitHub write action');
+  assertChangedFiles(envelope.changedFiles, [context.planPath, context.contractPath]);
+  const unknownAction = envelope.toolEvents.find((event) => !CREATE_ALLOWED_ACTIONS.has(event));
+  if (unknownAction) throw new Error(`reported unrecognized or forbidden GitHub action: ${unknownAction}`);
+  for (const action of CREATE_REQUIRED_ACTIONS) {
+    if (!envelope.toolEvents.includes(action)) {
+      throw new Error(`reported toolEvents omit required GitHub action: ${action}`);
+    }
   }
-  const forbidden = envelope.toolEvents.find((event) => FORBIDDEN_CREATE_TOOL_EVENTS.has(event));
-  if (forbidden) throw new Error(`reported forbidden GitHub action: ${forbidden}`);
 
   if (context.draftPr) {
     if (!envelope.pullRequest || envelope.pullRequest.draft !== true) {
       throw new Error('a requested draft pull request was not fully reported as draft');
+    }
+    if (!envelope.toolEvents.includes('create_pull_request')) {
+      throw new Error('reported toolEvents omit required GitHub action: create_pull_request');
     }
     assertPullRequestUrl(context.repository, envelope.pullRequest);
     if (envelope.pullRequest.baseBranch !== context.defaultBranch) {
@@ -464,6 +496,7 @@ function toReportedEvidence(envelope: ParsedCreateEnvelope): BrowserCreateReport
     defaultBranch: envelope.defaultBranch,
     baseCommit: envelope.baseCommit.toLowerCase(),
     branch: envelope.branch,
+    targetBranchExisted: envelope.targetBranchExisted,
     commitSha: envelope.commitSha.toLowerCase(),
     pullRequest: envelope.pullRequest,
     changedFiles: envelope.changedFiles,
@@ -598,7 +631,7 @@ function buildReadBackPrompt(
       : '  "pullRequest": null,',
     '  "changedFiles": ["path/to/file"],',
     `  "comparison": { "baseCommit": "${context.baseCommit}", "headCommit": "${reported.commitSha}", "status": "ahead", "aheadBy": 1, "behindBy": 0 },`,
-    '  "readActions": ["get_repo", "fetch_commit", "compare_commits", "get_pr_info"]',
+    '  "readActions": ["get_repo", "fetch_commit", "get_branch", "compare_commits", "list_changed_files", "list_pull_requests"]',
     '}',
     '\`\`\`',
     '',
@@ -638,10 +671,13 @@ function assertReadBackEnvelope(
   }
   if (!sameSha(envelope.comparison.baseCommit, context.baseCommit)
     || !sameSha(envelope.comparison.headCommit, reported.commitSha)
-    || envelope.comparison.status !== 'ahead') {
-    throw new CreateReadBackMismatchError('read-back comparison does not prove the implementation is ahead of the exact base');
+    || envelope.comparison.status !== 'ahead'
+    || envelope.comparison.aheadBy === undefined
+    || envelope.comparison.aheadBy < 1
+    || envelope.comparison.behindBy !== 0) {
+    throw new CreateReadBackMismatchError('read-back comparison does not prove the implementation is strictly ahead of the exact base');
   }
-  assertChangedFiles(envelope.changedFiles);
+  assertChangedFiles(envelope.changedFiles, [context.planPath, context.contractPath]);
   if (!sameStringSet(envelope.changedFiles, reported.changedFiles)) {
     throw new CreateReadBackMismatchError('read-back changedFiles do not match the Create result');
   }
@@ -650,8 +686,11 @@ function assertReadBackEnvelope(
       throw new CreateReadBackMismatchError(`read-back did not report required read action ${action}`);
     }
   }
-  const writeAction = envelope.readActions.find((action) => WRITE_TOOL_EVENTS.has(action) || FORBIDDEN_CREATE_TOOL_EVENTS.has(action));
-  if (writeAction) throw new CreateReadBackMismatchError(`read-back reported a forbidden write action: ${writeAction}`);
+  const unknownAction = envelope.readActions.find((action) => !READBACK_ALLOWED_ACTIONS.has(action));
+  if (unknownAction) throw new CreateReadBackMismatchError(`read-back reported an unrecognized or forbidden action: ${unknownAction}`);
+  if (!envelope.readActions.some((action) => PR_READ_ACTIONS.has(action))) {
+    throw new CreateReadBackMismatchError('read-back did not report a pull-request lookup action');
+  }
 
   if (reported.pullRequest) {
     if (!envelope.pullRequest) throw new CreateReadBackMismatchError('read-back did not find the reported pull request');
@@ -663,9 +702,6 @@ function assertReadBackEnvelope(
       || !envelope.pullRequest.headSha
       || !sameSha(envelope.pullRequest.headSha, reported.commitSha)) {
       throw new CreateReadBackMismatchError('read-back pull request state does not match the Create result');
-    }
-    if (!envelope.readActions.includes('get_pr_info') && !envelope.readActions.includes('fetch_pr')) {
-      throw new CreateReadBackMismatchError('read-back did not report a pull-request read action');
     }
   } else if (envelope.pullRequest !== undefined) {
     throw new CreateReadBackMismatchError('read-back found a pull request although Create reported none');
@@ -846,12 +882,20 @@ export async function runBrowserCreateReadBack(input: BrowserCreateReadBackInput
 }
 
 const CREATE_FOLLOWUP_RESUMABLE_STATUSES = new Set([
-  'completed',
   'recoverable',
   'incomplete_capture',
-  'dry_run',
   'surface_blocked',
 ]);
+
+function buildCreateRecoveryPrompt(context: BrowserCreateSessionContext): string {
+  return [
+    'Evidence reconciliation only. Do not call GitHub tools or perform any write.',
+    'Do not continue implementation, change refs, modify files, open or update a pull request, or rerun CI.',
+    `Using only results already present in this conversation, return exactly one ${CREATE_RESULT_FENCE} JSON block`,
+    `for repository "${context.repository}", base "${context.baseCommit}", and branch "${context.targetBranch}".`,
+    'If the required evidence is not already present, stop and say that independent human inspection is required.',
+  ].join('\n');
+}
 
 export async function runBrowserCreateFollowup(
   input: Omit<BrowserConsultInput, 'sourceSessionId'> & { sessionId: string },
@@ -870,15 +914,21 @@ export async function runBrowserCreateFollowup(
       'Create follow-up requires the oracle provider',
     );
   }
-  if (input.dryRun !== true && !CREATE_FOLLOWUP_RESUMABLE_STATUSES.has(existing.meta.status)) {
+  if (!CREATE_FOLLOWUP_RESUMABLE_STATUSES.has(existing.meta.status)) {
     throw new CreatePreconditionError(
       'CREATE_FOLLOWUP_STATUS_UNSUPPORTED',
       `cannot follow up from Create session ${input.sessionId} with status "${existing.meta.status}"`,
     );
   }
+  const context = existing.meta.create;
+  if (!context) {
+    throw new CreatePreconditionError('CREATE_FOLLOWUP_CONTEXT_MISSING', `session ${input.sessionId} has no Create context`);
+  }
   const result = await runBrowserConsult({
     ...input,
-    title: input.title ?? `followup ${input.sessionId}`,
+    title: input.title ?? `reconcile ${input.sessionId}`,
+    prompt: buildCreateRecoveryPrompt(context),
+    followups: [],
     sourceSessionId: input.sessionId,
     requireSecretScan: input.requireSecretScan === true || Boolean(existing.meta.security?.promptSecretScan),
     providerSessionId: input.providerSessionId ?? existing.meta.providerSessionId,
@@ -892,10 +942,22 @@ export async function runBrowserCreateFollowup(
     profileDirectory: input.profileDirectory ?? existing.meta.browser.profileDirectory,
     browserChannel: input.browserChannel ?? existing.meta.browser.channel,
   });
-  if (!result.meta.create?.readBack) return result;
-  const meta = updateBrowserSessionMeta(input.repoRoot, result.sessionId, (current) => ({
+  const finalized = finalizeCreateResult({
+    ...input,
+    chatgptApp: context.requestedApp,
+    repository: context.repository,
+    defaultBranch: context.defaultBranch,
+    baseCommit: context.baseCommit,
+    targetBranch: context.targetBranch,
+    planPath: context.planPath,
+    contractPath: context.contractPath,
+    draftPr: context.draftPr,
+    provider: 'oracle',
+  }, context, result);
+  if (!finalized.meta.create?.readBack) return finalized;
+  const meta = updateBrowserSessionMeta(input.repoRoot, finalized.sessionId, (current) => ({
     ...current,
     create: current.create ? { ...current.create, readBack: undefined } : current.create,
   }), input.sessionRoot);
-  return { ...result, meta };
+  return { ...finalized, meta };
 }

@@ -82,11 +82,14 @@ Do **not** paste the URL directly at the shell prompt. OAuth URLs contain `&`, w
 zsh: parse error near `&'
 ```
 
-Instead capture the clipboard directly:
+Instead capture the clipboard directly and bind the expected public MCP origin separately:
 
 ```bash
 export AUTH_URL="$(pbpaste)"
+export REPO_HARNESS_MCP_ORIGIN="https://CURRENT-PUBLIC-HOST"
 ```
+
+`REPO_HARNESS_MCP_ORIGIN` must be the exact origin configured in ChatGPT. The helper refuses to send the local passphrase anywhere else.
 
 Optionally validate it without printing the OAuth parameters:
 
@@ -96,9 +99,11 @@ import os
 import urllib.parse
 
 u = urllib.parse.urlsplit(os.environ["AUTH_URL"])
+expected = urllib.parse.urlsplit(os.environ["REPO_HARNESS_MCP_ORIGIN"])
 
 assert u.scheme == "https"
 assert u.path == "/authorize"
+assert (u.scheme, u.hostname, u.port) == (expected.scheme, expected.hostname, expected.port)
 
 q = dict(urllib.parse.parse_qsl(u.query))
 
@@ -130,10 +135,18 @@ import subprocess
 import urllib.parse
 
 auth_url = os.environ["AUTH_URL"].strip()
+expected_origin = os.environ["REPO_HARNESS_MCP_ORIGIN"].strip()
 u = urllib.parse.urlsplit(auth_url)
+expected = urllib.parse.urlsplit(expected_origin)
+
+if expected.scheme != "https" or not expected.hostname or expected.path not in ("", "/") or expected.query or expected.fragment:
+    raise SystemExit("Invalid REPO_HARNESS_MCP_ORIGIN")
 
 if u.scheme != "https" or u.path != "/authorize" or not u.hostname:
     raise SystemExit("Invalid authorization URL")
+
+if (u.scheme, u.hostname, u.port) != (expected.scheme, expected.hostname, expected.port):
+    raise SystemExit("Authorization URL origin does not match REPO_HARNESS_MCP_ORIGIN")
 
 params = dict(
     urllib.parse.parse_qsl(

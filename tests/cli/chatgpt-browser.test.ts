@@ -423,9 +423,22 @@ describe('chatgpt browser command', () => {
       expect(followupMeta.sourceSessionId).toBe(payload.sessionId);
       expect(followupMeta.browser.chatgptApp).toBeUndefined();
 
-      const cleanupPlan = runChatgpt(['browser-cleanup', '--repo', repoRoot, '--status', 'dry_run', '--limit', '1', '--json']);
+      const agedMeta = JSON.parse(readFileSync(metaPath, 'utf-8'));
+      agedMeta.updatedAt = '2000-01-01T00:00:00.000Z';
+      writeFileSync(metaPath, JSON.stringify(agedMeta, null, 2) + '\n');
+      const cleanupPlan = runChatgpt([
+        'browser-cleanup',
+        '--repo', repoRoot,
+        '--status', 'dry_run',
+        '--older-than-days', '1',
+        '--limit', '1',
+        '--json',
+      ]);
       expect(cleanupPlan.status).toBe(0);
-      expect(JSON.parse(cleanupPlan.stdout).dryRun).toBe(true);
+      expect(JSON.parse(cleanupPlan.stdout)).toMatchObject({
+        dryRun: true,
+        candidates: [payload.sessionId],
+      });
     });
   });
 

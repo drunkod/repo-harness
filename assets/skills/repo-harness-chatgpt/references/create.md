@@ -33,8 +33,8 @@ base ref. The target branch must start with `agent/` and differ from the actual
 default branch.
 
 Before any write, the GitHub app is instructed to read repository metadata,
-confirm the actual default branch, and fetch the exact base commit. Any
-reported identity mismatch fails closed.
+confirm the actual default branch, fetch the exact base commit, and prove the
+target branch does not already exist. Any reported mismatch fails closed.
 
 ## Dry run
 
@@ -64,7 +64,7 @@ containing repository, default branch, exact base commit, and target branch.
 Create instructs the app to:
 
 - operate only on the exact `owner/name`;
-- create the `agent/*` branch directly from the exact base SHA;
+- prove the `agent/*` branch is absent, then create it directly from the exact base SHA;
 - read before writing;
 - stay inside the approved plan and contract;
 - never modify the plan or contract;
@@ -83,18 +83,18 @@ Require exactly one `repo-harness-create-result` JSON block containing:
 - exact repository;
 - exact default branch;
 - exact base commit;
-- exact target branch;
+- exact target branch plus `targetBranchExisted: false`;
 - a different full implementation commit SHA;
-- safe non-empty changed files;
-- reported tool events containing at least one recognized GitHub write action;
-- when requested, a draft PR with matching URL, base, head, and head SHA.
+- safe non-empty changed files excluding the protected plan and contract;
+- the complete recognized repository/base/branch/create/commit/ref action sequence;
+- when requested, a draft PR with matching URL, base, head, head SHA, and create action.
 
 Store accepted data under `meta.create.reportedGitHub` with
 `trust: "assistant_reported"`. Reject repository/default/base/branch/app
-mismatches, an implementation SHA equal to the base, unsafe or empty changed
-files, missing write evidence, a mismatched requested draft PR, an unrequested
-PR object, and reported merge, auto-merge, ready, thread-resolution, or CI-rerun
-actions as `CREATE_SURFACE_BLOCKED`.
+mismatches, a pre-existing target branch, an implementation SHA equal to the
+base, unsafe/protected/empty changed files, missing or unknown action evidence,
+a mismatched requested draft PR, and an unrequested PR object as
+`CREATE_SURFACE_BLOCKED`.
 
 The prompt asks for repository/base reads and a bounded branch/commit/ref
 sequence, but current Oracle output does not provider-attest individual ChatGPT
@@ -127,9 +127,10 @@ Compare the read-back result with the frozen Create context and
 `reportedGitHub`. Store it separately under `meta.create.readBack` with
 `trust: "assistant_reported_readback"`.
 
-A match requires the exact identity and commit, comparison status `ahead`, the
-same changed-file set, the required read actions, matching PR state when a PR
-was reported, and no reported write action. `mismatch` or malformed output
+A match requires the exact identity and commit, comparison status `ahead` with
+`aheadBy >= 1` and `behindBy === 0`, the same safe changed-file set, the complete
+recognized read sequence, an explicit PR lookup whether present or absent,
+matching PR state when reported, and no unrecognized or write action. `mismatch` or malformed output
 fails closed without erasing the original Create report.
 
 Oracle does not export provider-attested app-selection or GitHub tool telemetry,
