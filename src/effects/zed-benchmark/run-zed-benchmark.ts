@@ -71,6 +71,95 @@ function diagnostic(result: ProcessRunResult): string {
     .slice(0, MAX_DIAGNOSTIC_CHARS);
 }
 
+function uniqueLaunchField(
+  stdout: string,
+  label: string,
+): string | null {
+  const prefix = `${label}:`;
+
+  const values = stdout
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith(prefix))
+    .map((line) => line.slice(prefix.length).trim())
+    .filter((value) => value.length > 0);
+
+  return values.length === 1
+    ? values[0]!
+    : null;
+}
+
+/**
+ * Validate only launch identity/evidence from the pinned upstream prose.
+ *
+ * Remote lifecycle is NOT parsed from this output. Lifecycle continues to come
+ * exclusively from the JSON returned by `zed-eval status`.
+ */
+function launchAcceptanceIssue(
+  stdout: string,
+  request: ZedBenchmarkSubmitRequest,
+  runId: string,
+): string | null {
+  const namespace = uniqueLaunchField(
+    stdout,
+    'Namespace',
+  );
+
+  if (namespace !== request.namespace) {
+    return 'zed-eval successful exit did not prove the expected namespace';
+  }
+
+  const experiment = uniqueLaunchField(
+    stdout,
+    'Experiment',
+  );
+
+  if (experiment !== request.benchmark) {
+    return 'zed-eval successful exit did not prove the expected experiment';
+  }
+
+  const acceptedRunId = uniqueLaunchField(
+    stdout,
+    'Run id',
+  );
+
+  if (acceptedRunId !== runId) {
+    return 'zed-eval successful exit did not prove the generated run id';
+  }
+
+  const controller = uniqueLaunchField(
+    stdout,
+    'Spawned controller',
+  );
+
+  if (controller === null) {
+    return 'zed-eval successful exit did not prove controller spawn';
+  }
+
+  return null;
+}
+
+function uncertainFromSchema(
+  repoRoot: string,
+  runId: string,
+  diagnosticText: string,
+  deps: ZedBenchmarkDependencies,
+): ZedBenchmarkSubmitOutcome {
+  return {
+    kind: 'submission-uncertain',
+    receipt: transitionZedBenchmarkReceipt(
+      repoRoot,
+      runId,
+      'submission-uncertain',
+      now(deps),
+      'schema',
+    ),
+    diagnostic: diagnosticText.slice(
+      0,
+      MAX_DIAGNOSTIC_CHARS,
+    ),
+  };
+}
+
 function verifyCheckoutPin(
   repoRoot: string,
   checkout: string,
@@ -79,7 +168,7 @@ function verifyCheckoutPin(
 ): void {
   const result = runOrDefault(deps)(
     'git',
-    ['-C', checkout, 'rev-parse', 'HEAD'], 
+    ['-C', checkout, 'rev-parse', 'HEAD'],
     {
       cwd: repoRoot,
       stdio: 'pipe',
@@ -215,10 +304,43 @@ export function submitZedBenchmark(
     };
   }
 
-  if (!result.ok) return uncertainFromResult(request.repoRoot, runId, result, deps);
+  if (!result.ok) {
+    return uncertainFromResult(
+      request.repoRoot,
+      runId,
+      result,
+      deps,
+    );
+  }
+
+  const acceptanceIssue = launchAcceptanceIssue(
+    result.stdout,
+    request,
+    runId,
+  );
+
+  if (acceptanceIssue !== null) {
+    /*
+     * A clean local exit with malformed/mismatched acceptance evidence is
+     * ambiguous. The remote record may exist, so preserve the known ID and
+     * reconcile with status. Never submit another run automatically.
+     */
+    return uncertainFromSchema(
+      request.repoRoot,
+      runId,
+      acceptanceIssue,
+      deps,
+    );
+  }
+
   return {
     kind: 'submitted',
-    receipt: transitionZedBenchmarkReceipt(request.repoRoot, runId, 'pending', now(deps)),
+    receipt: transitionZedBenchmarkReceipt(
+      request.repoRoot,
+      runId,
+      'pending',
+      now(deps),
+    ),
   };
 }
 
