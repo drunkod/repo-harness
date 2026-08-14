@@ -135,14 +135,77 @@ describe('zed benchmark receipt store', () => {
   });
 
   test('rejects prototype phases and tampered admission policy on read', () => {
-    const mutations: Array<(raw: Record<string, unknown>) => void> = [
-      (raw) => { raw.phase = 'constructor'; },
-      (raw) => { raw.namespace = 'INVALID NAMESPACE'; },
-      (raw) => { raw.model = 'bad model'; },
-      (raw) => { raw.integrationPin = 'f'.repeat(40); },
-      (raw) => { raw.nTasks = 11; },
-      (raw) => { raw.nConcurrent = 3; },
-      (raw) => { raw.resourcePolicy = { ...ZED_BENCHMARK_POLICY, extra: true }; },
+    const mutations: Array<
+      (raw: Record<string, unknown>) => void
+    > = [
+      (raw) => {
+        raw.phase = 'constructor';
+      },
+
+      (raw) => {
+        raw.namespace = 'INVALID NAMESPACE';
+      },
+
+      (raw) => {
+        raw.model = 'bad model';
+      },
+
+      (raw) => {
+        raw.integrationPin = 'f'.repeat(40);
+      },
+
+      (raw) => {
+        raw.sourceSha = 'main';
+      },
+
+      (raw) => {
+        raw.sourceSha =
+          '0123456789ABCDEF0123456789ABCDEF01234567';
+      },
+
+      (raw) => {
+        raw.nTasks = 11;
+      },
+
+      (raw) => {
+        raw.nConcurrent = 3;
+      },
+
+      (raw) => {
+        raw.benchmark = 'qna';
+        // experimentName remains rf.
+      },
+
+      (raw) => {
+        raw.resourcePolicy = {
+          ...ZED_BENCHMARK_POLICY,
+          extra: true,
+        };
+      },
+
+      (raw) => {
+        raw.resourcePolicy = {
+          ...ZED_BENCHMARK_POLICY,
+          overrideCpus:
+            ZED_BENCHMARK_POLICY.overrideCpus + 1,
+        };
+      },
+
+      (raw) => {
+        raw.createdAt = 'not-a-timestamp';
+      },
+
+      (raw) => {
+        raw.updatedAt = '2026-08-14';
+      },
+
+      (raw) => {
+        raw.createdAt =
+          '2026-08-14T12:00:05.000Z';
+
+        raw.updatedAt =
+          '2026-08-14T12:00:04.000Z';
+      },
     ];
     for (const mutate of mutations) {
       const root = repoRoot();
@@ -153,6 +216,34 @@ describe('zed benchmark receipt store', () => {
       writeFileSync(path, `${JSON.stringify(raw)}\n`, 'utf8');
       expect(() => loadZedBenchmarkReceipt(root, RUN_ID)).toThrow(ZedBenchmarkReceiptError);
     }
+  });
+
+  test('rejects a noncanonical transition timestamp without corrupting the receipt', () => {
+    const root = repoRoot();
+
+    createZedBenchmarkReceipt(
+      root,
+      receipt(root),
+    );
+
+    expect(() =>
+      transitionZedBenchmarkReceipt(
+        root,
+        RUN_ID,
+        'pending',
+        'not-a-timestamp',
+      ),
+    ).toThrow(ZedBenchmarkReceiptError);
+
+    const stored = loadZedBenchmarkReceipt(
+      root,
+      RUN_ID,
+    );
+
+    expect(stored.phase).toBe('submitting');
+
+    expect(stored.updatedAt)
+      .toBe('2026-08-14T12:00:00.000Z');
   });
 
   test('fails closed when a receipt transition lock is held', () => {

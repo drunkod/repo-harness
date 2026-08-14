@@ -1,15 +1,18 @@
 # Implementation and Testing Tutorial: Zed Eval MVP 3
 
-> The benchmark-only implementation now exists. This document describes
-> validation and acceptance of that implementation. It does not authorize a
-> paid canary, deployment, cancellation, or generic fleet/writer capability.
+> The benchmark-only implementation exists. This document is now an
+> acceptance/maintenance walkthrough, not an implementation proposal.
 >
-> Production source and tests are authoritative for executable behavior. The
-> audit and plan documents remain authoritative for scope and stop conditions.
+> Production source and tests are authoritative for executable behavior.
+> The audit and task package remain authoritative for product boundary,
+> stop conditions, and definition of done.
+>
+> Nothing in this document authorizes a paid canary, deployment,
+> cancellation, generic fleet runtime, or writer capability.
 
-## 1. Understand the product before touching files
+## 1. Understand the implemented product
 
-The future command is a remote benchmark controller:
+The implemented command is a remote benchmark controller:
 
 ```bash
 repo-harness zed-benchmark submit \
@@ -25,127 +28,59 @@ repo-harness zed-benchmark submit \
 
 It is not:
 
-- a way to run a prompt against the current repo-harness checkout;
 - an arbitrary-repository remote worker;
+- a prompt runner against the current repo-harness checkout;
 - a mergeable-patch producer;
-- a generic `fleet` runtime;
+- a generic fleet runtime;
+- a writer lease;
 - a sandbox attestation;
-- a repo-harness writer lease;
-- a Zed editor host integration;
-- a Claude/Codex-compatible provider/reviewer;
+- a provider/reviewer integration;
 - a deployment manager; or
 - a cancellable job API.
 
-The source passed to `--source-sha` is **Zed source used to build `eval-cli`**.
-The benchmark harness supplies its own benchmark task repository/data.
+`--source-sha` identifies the Zed source used to build `eval-cli`. It is not the
+repository currently containing repo-harness.
 
-If the actual requirement is “run this repo-harness task remotely and return a
-patch,” stop. `zed-eval` is the wrong upstream API for that product.
+## 2. Verify the frozen upstream contract
 
-## 2. Freeze the upstream contract
-
-### 2.1 Choose one immutable Zed commit
-
-The planning audit used:
+The currently supported integration pin is:
 
 ```text
 24e25552b1259d56a6fdd7956a419ed9e8a1a25e
 ```
 
-Before implementation, choose the supported commit and record it in the active
-plan and task notes. Do not use `main`, an unpinned editable install, or “latest.”
+Before changing behavior, re-read the pinned upstream implementation and verify:
 
-### 2.2 Verify the exact files
+1. benchmark selectors;
+2. explicit `run --run-id`;
+3. source resolution and `--require-clean`;
+4. state JSON values;
+5. namespace/experiment lookup semantics;
+6. fetch `--jobs-dir`;
+7. report `--job-dir --json`;
+8. deployment behavior; and
+9. cancellation availability.
 
-Read at the selected commit:
+If any of these change, treat the change as contract drift and update the
+approved plan before changing production code.
 
-```text
-crates/eval_cli/zed_eval/README.md
-crates/eval_cli/zed_eval/cli.py
-crates/eval_cli/zed_eval/launch.py
-crates/eval_cli/zed_eval/run_index.py
-crates/eval_cli/zed_eval/volume.py
-crates/eval_cli/zed_eval/report.py
-crates/eval_cli/zed_eval/tests/
-```
+## 3. Verify repository workflow ownership
 
-Record evidence for:
-
-1. supported benchmark selectors;
-2. `run --run-id` behavior;
-3. one-benchmark ID behavior;
-4. source SHA/clean-source behavior;
-5. state JSON shape and values;
-6. namespace/experiment lookup options;
-7. fetch `--jobs-dir` behavior;
-8. report `--job-dir --json` behavior;
-9. local run-index semantics;
-10. deployment side effects; and
-11. absence or presence of a real per-run cancel API.
-
-Any drift changes the contract. Update the plan before code.
-
-### 2.3 Understand the two pins
-
-The revised design uses two distinct commits:
-
-| Pin | Meaning |
-|---|---|
-| integration pin | checkout commit containing the reviewed Python orchestrator |
-| source SHA | clean Zed source commit built into `eval-cli` for the benchmark |
-
-The wrapper executes the one-off script from the integration-pin checkout and
-passes the source SHA to `--from`.
-
-## 3. Complete repository workflow preflight
-
-From the repository root:
+From repository root:
 
 ```bash
 git status --short --branch
-git branch --show-current
+git rev-parse HEAD
+git diff --check
 ```
 
-Capture an approved work-package plan and promote it through
-`repo-harness run plan-to-todo --plan <approved-plan>`. Use the policy-required
-contract worktree. Do not implement directly on the documentation branch.
+Review changed paths against the execution boundary. MVP 3 must not add or
+modify generic fleet/writer/provider/deployment authority merely to complete
+the benchmark wrapper.
 
-The active contract must include an `EXECUTION_BOUNDARY` that forbids:
+## 4. Verify architecture ownership
 
-```text
-src/core/fleet/**
-src/effects/fleet/**
-src/cli/commands/fleet.ts
-src/cli/installer/**
-src/cli/hook/route-registry.ts
-src/core/review/**
-src/effects/review/**
-assets/templates/helpers/install-agent-fleet.sh
-assets/workflow-contract.v1.json
-.ai/harness/workflow-contract.json
-```
-
-It must also forbid cancellation, deploy automation, multi-benchmark suites,
-rejudge, baseline, cleanup, arbitrary pass-through args, moving source refs, and
-custom secret/repository overrides.
-
-## 4. Bind architecture ownership first
-
-The current ArchContext model claims:
-
-- `tests/**` under `capability.verification.evals-checks`; and
-- `src/cli/index.ts` under
-  `capability.runtime-harness.global-runtime-reconciliation`.
-
-The new core/effect/command paths need explicit ownership.
-
-Edit the appropriate capability source of truth, likely:
-
-```text
-.archcontext/model/nodes/capability.verification.evals-checks.yaml
-```
-
-Add responsibility and exact includes for:
+The ArchContext source model must own:
 
 ```text
 src/core/zed-benchmark/**
@@ -155,27 +90,33 @@ docs/reference-configs/external-tooling.md
 assets/reference-configs/external-tooling.md
 ```
 
-Preserve existing fields. If the corresponding component node needs changes,
-include them in the contract.
+The source of truth is:
 
-Plan the projection:
-
-```bash
-archctx docs plan --json
+```text
+.archcontext/model/nodes/capability.verification.evals-checks.yaml
 ```
 
-Record every generated path reported by the plan. Apply through the configured
-projection provider; do not hand-edit generated architecture modules.
+Run the provider-native plan and repository projection workflow. Never hand-edit
+generated architecture Markdown.
 
-## 5. Add the core contracts
+## 5. Review the existing core contracts
 
-Create:
+Authoritative production files:
 
 ```text
 src/core/zed-benchmark/types.ts
 src/core/zed-benchmark/admission.ts
 src/core/zed-benchmark/state-schema.ts
+src/effects/zed-benchmark/receipt-store.ts
+src/effects/zed-benchmark/run-zed-benchmark.ts
+src/cli/commands/zed-benchmark.ts
 ```
+
+Admission must remain pure and fail before external effects.
+
+Lifecycle continues to come from machine-readable `status` JSON. Successful
+submit prose is used only to prove launch identity for the generated run ID;
+it must never become lifecycle authority.
 
 ### 5.1 Types
 
@@ -238,9 +179,9 @@ through.
 
 Report parsing is separate. Report metrics do not determine remote lifecycle.
 
-## 6. Implement safe local receipts
+## 6. Review safe local receipts
 
-Create:
+Authoritative file:
 
 ```text
 src/effects/zed-benchmark/receipt-store.ts
@@ -292,15 +233,15 @@ The correct order is:
 generate exact upstream run id
   -> persist phase=submitting
   -> invoke zed-eval run --run-id <same id>
-  -> clean exit: phase=pending
+  -> validated launch acceptance: phase=pending
   -> ambiguous failure: phase=submission-uncertain
 ```
 
 Never allocate an ID after the remote call and never parse it from output.
 
-## 7. Implement external effects
+## 7. Review external effects
 
-Create:
+Authoritative file:
 
 ```text
 src/effects/zed-benchmark/run-zed-benchmark.ts
@@ -365,23 +306,33 @@ Assert forbidden options are absent in tests.
 
 ### 7.3 Classify submission
 
-A clean exit means the submit command returned successfully; store `pending`.
+A clean process exit alone is not enough to promote the local receipt to
+`pending`.
 
-Timeout, signal, nonzero exit, or an inconsistent wrapper failure after the
-receipt exists means:
+A successful launch must also prove the expected:
+
+- namespace;
+- experiment;
+- generated run ID; and
+- controller spawn acknowledgement.
+
+These values are identity evidence only. Remote lifecycle continues to come
+from `status` JSON.
+
+Timeout, signal, nonzero exit, thrown wrapper failure, or malformed/mismatched
+launch acceptance becomes:
 
 ```text
 submission-uncertain
 ```
 
-The user-facing instruction is:
+The operator instruction remains:
 
 ```text
 do not retry submit; run status with this run ID
 ```
 
-Do not say “failed to submit” unless the implementation can prove failure
-occurred before remote record creation. MVP need not make that narrower proof.
+Automatic resubmission is never allowed.
 
 ### 7.4 Status
 
@@ -455,9 +406,9 @@ zed-eval baseline
 zed-eval suite
 ```
 
-## 8. Add the command module
+## 8. Review the command module
 
-Create:
+Authoritative file:
 
 ```text
 src/cli/commands/zed-benchmark.ts
@@ -547,7 +498,7 @@ The command should appear once and install help should remain Claude/Codex only.
 
 ### 10.1 Admission tests
 
-Create:
+Authoritative file:
 
 ```text
 tests/zed-benchmark-admission.test.ts
@@ -566,7 +517,7 @@ source:      full sha, short sha, uppercase, local, main, tag, path
 
 ### 10.2 Schema tests
 
-Create:
+Authoritative file:
 
 ```text
 tests/zed-benchmark-state-schema.test.ts
@@ -577,7 +528,7 @@ malformed/prose/unknown cases. Keep report fixtures separate.
 
 ### 10.3 Receipt tests
 
-Create:
+Authoritative file:
 
 ```text
 tests/zed-benchmark-receipt-store.test.ts
@@ -599,7 +550,7 @@ Test:
 
 ### 10.4 Runner tests
 
-Create:
+Authoritative file:
 
 ```text
 tests/zed-benchmark-runner.test.ts
@@ -615,7 +566,8 @@ Failure matrix:
 
 | Fake result | Required receipt | Retry? |
 |---|---|---|
-| clean exit | `pending` | no |
+| validated clean exit | `pending` | no |
+| malformed/mismatched clean-exit acceptance | `submission-uncertain` | never |
 | timeout | `submission-uncertain` | never |
 | signal | `submission-uncertain` | never |
 | nonzero | `submission-uncertain` | never |
@@ -625,7 +577,7 @@ Then test status reconciliation using the same ID.
 
 ### 10.5 CLI integration tests
 
-Create:
+Authoritative file:
 
 ```text
 tests/cli/zed-benchmark.test.ts
@@ -637,10 +589,10 @@ Use a temporary fake checkout containing:
 crates/eval_cli/script/zed-eval
 ```
 
-Use fake executables/scripts to capture argv and synthesize state, logs, fetch
-output, extracted directories, and report JSON. Run the real CLI entrypoint with
-`spawnSync('bun', [CLI, ...])` only inside tests; production execution still uses
-`runProcess`.
+Use fake executables/scripts to capture argv and synthesize launch acceptance,
+state, logs, fetch output, extracted directories, and report JSON. Run the real
+CLI entrypoint with `spawnSync('bun', [CLI, ...])` only inside tests; production
+execution still uses `runProcess`.
 
 Assert:
 
@@ -708,20 +660,25 @@ bun test tests/zed-benchmark-state-schema.test.ts
 bun test tests/zed-benchmark-receipt-store.test.ts
 bun test tests/zed-benchmark-runner.test.ts
 bun test tests/cli/zed-benchmark.test.ts
+bun test tests/live/zed-benchmark.live.test.ts
 bun run check:type
 bun run check:reference-configs
 ```
 
-Then run architecture and root gates:
+The paid-canary test must skip unless the explicit live gate is present.
+
+Then run architecture and root gates. T13 requires all of them to succeed; a
+nonzero root suite is not a pass merely because failures look unrelated:
 
 ```bash
-bash scripts/check-architecture-sync.sh
+bun src/cli/index.ts architecture-projection status --json
+bash scripts/check-architecture-sync.sh --mode strict
+bun test
 bash scripts/check-deploy-sql-order.sh
 bash scripts/check-task-sync.sh
-repo-harness run check-task-workflow --strict
+bun src/cli/index.ts run check-task-workflow --strict
 bun scripts/inspect-project-state.ts --repo . --format text
 bun src/cli/index.ts init --repo . --dry-run
-bun test
 ```
 
 Review:
@@ -855,7 +812,7 @@ Rollback of the code integration is local and does not control remote jobs.
 
 ### 15.1 Remove the product surface
 
-Revert/delete the new future implementation files:
+Revert/delete the implementation files:
 
 ```text
 src/core/zed-benchmark/

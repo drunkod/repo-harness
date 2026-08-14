@@ -45,44 +45,46 @@ extract shared components only after observed reuse or a cross-module invariant.
 
 ## Revised product boundary
 
-The only coherent MVP 3 supported by current evidence is a narrow command:
+The implemented MVP 3 surface is intentionally narrow:
 
 ```text
 repo-harness zed-benchmark submit/status/logs/fetch/report
 ```
 
-It would:
+It:
 
-1. run only pinned, supported Zed benchmark selectors;
-2. execute an explicitly pinned Zed checkout's one-off `zed-eval` script;
-3. require a full Zed source commit SHA and reject `--from local`/`main`;
-4. generate and pass the exact upstream `--run-id` rather than parse stdout;
-5. persist a repo-harness receipt before submission so timeout is represented as
-   `submission-uncertain`, not silently retried;
-6. pass explicit namespace, experiment, and artifact paths on every operation;
-7. parse and validate upstream `state.json` and report JSON;
-8. place fetched artifacts under ignored `.ai/harness/runs/zed-benchmark/`;
-9. require an explicit cost/data acknowledgement; and
-10. expose no generic writable-worker, lease, reviewer, provider, scheduler,
-    registry, or cancellation claim.
+1. runs only pinned supported Zed benchmark selectors;
+2. executes the one-off `zed-eval` script from the approved integration checkout;
+3. requires a full lowercase Zed source commit SHA and rejects moving/local refs;
+4. generates and supplies the exact upstream run ID rather than scraping it;
+5. persists a local receipt before submission so ambiguous results become
+   `submission-uncertain`;
+6. reconciles ambiguous submission by the same run ID without resubmission;
+7. uses explicit namespace, experiment, and artifact paths;
+8. validates upstream lifecycle and report JSON;
+9. places fetched evidence under ignored
+   `.ai/harness/runs/zed-benchmark/`;
+10. requires explicit remote cost/data acknowledgement; and
+11. exposes no fleet, writer, provider, deployment, cancellation, scheduler, or
+    generic remote-agent authority.
 
-This is evaluation tooling. It does **not** run a free-form task against the
-current repository, return a mergeable patch, or make Zed equivalent to Claude
-or Codex in repo-harness compatibility metadata.
+This is evaluation tooling. It does not execute arbitrary repository tasks,
+produce mergeable patches, or make Zed equivalent to the repository's
+Claude/Codex integration surfaces.
 
 ## Package index
 
-1. [`audit-and-revised-plan.md`](./audit-and-revised-plan.md) — evidence,
-   severity-ranked findings, rejected assumptions, revised architecture, file
-   list, and approval gates.
-2. [`tasks-and-subtasks.md`](./tasks-and-subtasks.md) — decision-complete future
-   task graph with objectives, subtasks, stop conditions, and acceptance
-   criteria.
-3. [`proposed-code-snippets.md`](./proposed-code-snippets.md) — detailed future
-   TypeScript and YAML sketches. They are illustrative and not source files.
+1. [`audit-and-revised-plan.md`](./audit-and-revised-plan.md) — historical
+   evidence and the security/product boundary that authorized the narrow
+   benchmark wrapper.
+2. [`tasks-and-subtasks.md`](./tasks-and-subtasks.md) — active acceptance graph,
+   validation gates, stop conditions, and definition of done.
+3. [`proposed-code-snippets.md`](./proposed-code-snippets.md) — superseded design
+   artifact that points to authoritative production source and tests.
 4. [`implementation-and-testing-tutorial.md`](./implementation-and-testing-tutorial.md)
-   — future operator/developer tutorial covering preflight, implementation,
-   fixtures, canary, rollback, security, cost, and validation.
+   — implementation-state and acceptance-validation walkthrough.
+5. [`../researches/20260814-zed-eval-mvp3-remote-benchmark-audit.md`](../researches/20260814-zed-eval-mvp3-remote-benchmark-audit.md)
+   — durable upstream research/audit basis.
 
 ## Reviewed source pin
 
@@ -104,18 +106,20 @@ Primary sources:
 Any implementation must repin and repeat the contract audit. An editable or
 moving upstream checkout is not an acceptable production dependency.
 
-## Approval checklist
+## Remaining acceptance checklist
 
-Do not promote this package into an active plan until all are true:
+Implementation presence is not acceptance evidence. Do not declare MVP 3 done
+until all of the following are true:
 
-- [ ] The user confirms the goal is **benchmark orchestration**, not a general
-      remote agent for arbitrary repositories.
-- [ ] The absence of cancellation is accepted, or a newer pinned upstream
-      contract with a tested cancel API is supplied.
-- [ ] Remote cost, credential, source-patch, task-data, log, and artifact sharing
-      are accepted.
-- [ ] Initial task/concurrency/resource limits are approved.
-- [ ] Architecture ownership is accepted and projected from ArchContext.
-- [ ] The exact upstream commit and supported benchmark list are frozen.
-- [ ] A work-package plan and contract are captured through the normal
-      repo-harness workflow before implementation.
+- [ ] Benchmark-only product intent remains approved.
+- [ ] The reviewed upstream Zed pin remains exact and supported.
+- [ ] The absence of cancellation remains accepted.
+- [ ] Cost, credential, task-data, log, artifact, and retention risks remain
+      accepted.
+- [ ] Resource limits remain explicitly approved.
+- [ ] ArchContext ownership is projected from its source model and strict sync
+      passes.
+- [ ] All T13 gates pass from the final candidate diff.
+- [ ] One T14 paid canary has separately received fresh operator approval and
+      completes without automatic resubmission.
+- [ ] T15 review and closeout are complete.
