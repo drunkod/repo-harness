@@ -260,6 +260,37 @@ describe('zed benchmark runner', () => {
     expect(reportArgs).not.toContain('--fetch');
   });
 
+  test('rejects tracked and non-ignored untracked checkout dirt before launch', () => {
+    for (const dirty of [' M tracked.py\\n', '?? injected.py\\n']) {
+      const { repoRoot, request } = fixture();
+      let remoteCalls = 0;
+      const run: RunZedBenchmarkProcess = (command, args) => {
+        if (command === 'git') {
+          if (args[2] === 'rev-parse') return result({ stdout: `${PINNED_ZED_EVAL_COMMIT}\n` });
+          expect(args).not.toContain('--ignored');
+          return result({ stdout: dirty });
+        }
+        remoteCalls += 1;
+        return result();
+      };
+      expect(() => submitZedBenchmark(request, submitDeps(run))).toThrow(/approved Zed checkout/);
+      expect(remoteCalls).toBe(0);
+      expect(() => loadZedBenchmarkReceipt(repoRoot, RUN_ID)).toThrow();
+    }
+  });
+
+  test('accepts clean checkout status while ignored uv runtime state exists', () => {
+    const { request } = fixture();
+    const run: RunZedBenchmarkProcess = (command, args) => {
+      if (command === 'git') {
+        expect(args).not.toContain('--ignored');
+        return result({ stdout: args[2] === 'rev-parse' ? `${PINNED_ZED_EVAL_COMMIT}\n` : '' });
+      }
+      return result();
+    };
+    expect(submitZedBenchmark(request, submitDeps(run)).kind).toBe('submitted');
+  });
+
   test('pin mismatch stops before any remote invocation or receipt', () => {
     const { repoRoot, request } = fixture();
     let remoteCalls = 0;

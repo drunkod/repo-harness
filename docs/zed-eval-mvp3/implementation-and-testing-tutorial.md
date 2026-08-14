@@ -1,9 +1,11 @@
 # Implementation and Testing Tutorial: Zed Eval MVP 3
 
-> **Future tutorial only.** The current branch implements none of these steps.
-> Do not execute the implementation or paid live canary until the revised
-> benchmark-only decision is approved, an exact upstream pin is frozen, and a
-> repo-harness work-package contract owns the change.
+> The benchmark-only implementation now exists. This document describes
+> validation and acceptance of that implementation. It does not authorize a
+> paid canary, deployment, cancellation, or generic fleet/writer capability.
+>
+> Production source and tests are authoritative for executable behavior. The
+> audit and plan documents remain authoritative for scope and stop conditions.
 
 ## 1. Understand the product before touching files
 

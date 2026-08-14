@@ -49,6 +49,32 @@ export function isZedBenchmarkSelector(
   return (ZED_BENCHMARK_SELECTORS as readonly string[]).includes(value);
 }
 
+export function isFullLowercaseGitSha(value: string): boolean {
+  return FULL_SHA.test(value);
+}
+
+export function isZedBenchmarkNamespace(value: string): boolean {
+  return NAMESPACE.test(value);
+}
+
+export function isZedBenchmarkModel(value: string): boolean {
+  return MODEL.test(value);
+}
+
+export function isPinnedZedEvalCommit(value: string): boolean {
+  return value === PINNED_ZED_EVAL_COMMIT;
+}
+
+export function isExactZedBenchmarkResourcePolicy(value: unknown): boolean {
+  if (value === null || Array.isArray(value) || typeof value !== 'object') return false;
+  const policy = value as Record<string, unknown>;
+  return Object.keys(policy).length === 4
+    && policy.overrideCpus === ZED_BENCHMARK_POLICY.overrideCpus
+    && policy.overrideMemoryMb === ZED_BENCHMARK_POLICY.overrideMemoryMb
+    && policy.sandboxTimeoutSecs === ZED_BENCHMARK_POLICY.sandboxTimeoutSecs
+    && policy.sandboxIdleTimeoutSecs === ZED_BENCHMARK_POLICY.sandboxIdleTimeoutSecs;
+}
+
 export function assertZedBenchmarkRunId(runId: string): void {
   if (!RUN_ID.test(runId)) {
     throw new ZedBenchmarkAdmissionError('invalid repo-harness Zed benchmark run id');
@@ -70,12 +96,12 @@ export function admitZedBenchmarkSubmit(
   if (!isAbsolute(request.zedCheckout)) {
     throw new ZedBenchmarkAdmissionError('zedCheckout must be absolute');
   }
-  if (request.integrationPin !== PINNED_ZED_EVAL_COMMIT) {
+  if (!isPinnedZedEvalCommit(request.integrationPin)) {
     throw new ZedBenchmarkAdmissionError(
       `integration pin must equal ${PINNED_ZED_EVAL_COMMIT}`,
     );
   }
-  if (!FULL_SHA.test(request.sourceSha)) {
+  if (!isFullLowercaseGitSha(request.sourceSha)) {
     throw new ZedBenchmarkAdmissionError(
       'sourceSha must be a full lowercase 40-hex Zed commit SHA',
     );

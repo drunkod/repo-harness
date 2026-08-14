@@ -25,7 +25,15 @@ function fixture() {
   mkdirSync(join(checkout, 'crates', 'eval_cli', 'script'), { recursive: true });
 
   const git = join(bin, 'git');
-  writeFileSync(git, `#!/usr/bin/env bash\nif [[ "$3" == "rev-parse" && "$4" == "HEAD" ]]; then printf '%s\\n' '${PINNED_ZED_EVAL_COMMIT}'; fi\n`, { mode: 0o755 });
+  writeFileSync(git, `#!/usr/bin/env bash
+  set -euo pipefail
+  if [[ "$3" == "rev-parse" && "$4" == "HEAD" ]]; then printf '%s\\n' '${PINNED_ZED_EVAL_COMMIT}'; exit 0; fi
+  if [[ "$3" == "status" ]]; then
+    for arg in "$@"; do [[ "$arg" == "--ignored" ]] && exit 97; done
+    exit 0
+  fi
+  exit 98
+  `, { mode: 0o755 });
   chmodSync(git, 0o755);
 
   const zedEval = join(checkout, 'crates', 'eval_cli', 'script', 'zed-eval');

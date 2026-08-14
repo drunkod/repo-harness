@@ -13,18 +13,23 @@ import {
 } from 'fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'path';
 import {
+  PINNED_ZED_EVAL_COMMIT,
+  ZED_BENCHMARK_MAX_CONCURRENT,
+  ZED_BENCHMARK_MAX_TASKS,
   assertZedBenchmarkRunId,
+  isExactZedBenchmarkResourcePolicy,
+  isFullLowercaseGitSha,
+  isZedBenchmarkModel,
+  isZedBenchmarkNamespace,
   isZedBenchmarkSelector,
-  ZED_BENCHMARK_POLICY,
 } from '../../core/zed-benchmark/admission';
 import type {
   ZedBenchmarkReceipt,
   ZedBenchmarkReceiptPhase,
-  ZedBenchmarkResourcePolicy,
 } from '../../core/zed-benchmark/types';
 
 const SCHEMA = 'repo-harness-zed-benchmark-run.v1' as const;
-const FULL_SHA = /^[0-9a-f]{40}$/;
+
 const FAILURE_KINDS = new Set(['transport', 'timeout', 'exit', 'schema']);
 
 const LEGAL_TRANSITIONS: Readonly<Record<ZedBenchmarkReceiptPhase, readonly ZedBenchmarkReceiptPhase[]>> = {
@@ -69,13 +74,10 @@ function isPositiveSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) > 0;
 }
 
-function isResourcePolicy(value: unknown): value is ZedBenchmarkResourcePolicy {
-  if (value === null || Array.isArray(value) || typeof value !== 'object') return false;
-  const policy = value as Partial<ZedBenchmarkResourcePolicy>;
-  return isPositiveSafeInteger(policy.overrideCpus)
-    && isPositiveSafeInteger(policy.overrideMemoryMb)
-    && isPositiveSafeInteger(policy.sandboxTimeoutSecs)
-    && isPositiveSafeInteger(policy.sandboxIdleTimeoutSecs);
+function isCanonicalTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 
 export function zedBenchmarkStoreRoot(repoRoot: string): string {
@@ -119,22 +121,22 @@ function parseReceipt(text: string): ZedBenchmarkReceipt {
     typeof receipt.phase !== 'string'
     || !Object.hasOwn(LEGAL_TRANSITIONS, receipt.phase)
     || typeof receipt.namespace !== 'string'
-    || receipt.namespace.length === 0
+    || !isZedBenchmarkNamespace(receipt.namespace)
     || typeof receipt.experimentName !== 'string'
     || !isZedBenchmarkSelector(receipt.experimentName)
     || receipt.benchmark !== receipt.experimentName
     || typeof receipt.zedCheckout !== 'string'
     || !isAbsolute(receipt.zedCheckout)
     || typeof receipt.integrationPin !== 'string'
-    || !FULL_SHA.test(receipt.integrationPin)
+    || receipt.integrationPin !== PINNED_ZED_EVAL_COMMIT
     || typeof receipt.sourceSha !== 'string'
-    || !FULL_SHA.test(receipt.sourceSha)
+    || !isFullLowercaseGitSha(receipt.sourceSha)
     || typeof receipt.model !== 'string'
-    || receipt.model.length === 0
+    || !isZedBenchmarkModel(receipt.model)
     || !isPositiveSafeInteger(receipt.nTasks)
-    || receipt.nTasks > 10
+    || receipt.nTasks > ZED_BENCHMARK_MAX_TASKS
     || !isPositiveSafeInteger(receipt.nConcurrent)
-    || receipt.nConcurrent > 2
+    || receipt.nConcurrent > ZED_BENCHMARK_MAX_CONCURRENT
     || receipt.nConcurrent > receipt.nTasks
     || typeof receipt.runDir !== 'string'
     || isAbsolute(receipt.runDir)
@@ -144,11 +146,16 @@ function parseReceipt(text: string): ZedBenchmarkReceipt {
     || receipt.createdAt.length === 0
     || typeof receipt.updatedAt !== 'string'
     || receipt.updatedAt.length === 0
-    || !isResourcePolicy(receipt.resourcePolicy)
-    || JSON.stringify(receipt.resourcePolicy) !== JSON.stringify(ZED_BENCHMARK_POLICY)
+    || !isExactZedBenchmarkResourcePolicy(receipt.resourcePolicy)
     || !validFailureKind
   ) {
     throw new ZedBenchmarkReceiptError('corrupt', 'receipt fields are invalid');
+  }
+  if (!isCanonicalTimestamp(receipt.createdAt) || !isCanonicalTimestamp(receipt.updatedAt)) {
+    throw new ZedBenchmarkReceiptError('corrupt', 'receipt timestamps are invalid');
+  }
+  if (Date.parse(receipt.updatedAt) < Date.parse(receipt.createdAt)) {
+    throw new ZedBenchmarkReceiptError('corrupt', 'receipt updatedAt precedes createdAt');
   }
   return receipt as ZedBenchmarkReceipt;
 }

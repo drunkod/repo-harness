@@ -91,7 +91,7 @@ function verifyCheckoutPin(
   if (!result.ok || result.stdout.trim() !== integrationPin) {
     throw new Error('Zed checkout does not match the approved zed-eval integration pin');
   }
-  const cleanliness = runOrDefault(deps)('git', ['-C', checkout, 'status', '--porcelain=v1', '--untracked-files=all', '--ignored'], {
+  const cleanliness = runOrDefault(deps)('git', ['-C', checkout, 'status', '--porcelain=v1', '--untracked-files=all'], {
     cwd: repoRoot,
     stdio: 'pipe',
     timeoutMs: PIN_CHECK_TIMEOUT_MS,
@@ -99,7 +99,7 @@ function verifyCheckoutPin(
     maxOutputBytes: 4 * 1024,
   });
   if (!cleanliness.ok || cleanliness.stdout.trim() !== '') {
-    throw new Error('approved Zed checkout must be clean, including tracked, untracked, and ignored files');
+    throw new Error('approved Zed checkout must have no tracked changes or non-ignored untracked files');
   }
 }
 

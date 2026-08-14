@@ -1,13 +1,20 @@
 # Zed Eval MVP 3: Remote Benchmark Orchestration
 
-**Status:** implementation applied; acceptance validation in progress  
-**Draft verdict:** **REJECT AS A GENERIC FLEET MVP**  
+**Status:** implementation present; acceptance validation incomplete
+**Draft verdict:** **REJECT AS A GENERIC FLEET MVP**
 **Revised direction:** **CONDITIONAL APPROVAL** for a narrow `zed-benchmark`
 wrapper after the gates in this package are accepted
 
-> The original audit was documentation-only. The implementation now exists on
-> `feat/zed-benchmark-mvp3`; see the active task note and review artifacts for
-> validation status and remaining acceptance gates.
+> This package began as a documentation-only audit. Production implementation
+> now exists under `src/core/zed-benchmark/`,
+> `src/effects/zed-benchmark/`, and `src/cli/commands/zed-benchmark.ts`.
+>
+> Production source and focused tests are authoritative for implementation
+> behavior. These planning documents remain authoritative for product boundary,
+> stop conditions, validation gates, and definition of done.
+>
+> Branch names are working-location metadata, not immutable acceptance evidence;
+> use reviewed commit SHAs and the active task note.
 
 ## Why the original MVP 3 must change
 

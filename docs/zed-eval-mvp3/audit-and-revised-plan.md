@@ -1,11 +1,16 @@
 # Audit and Revised Plan: Zed Eval MVP 3
 
-**Status:** audit baseline; implementation applied separately and under validation  
-**Draft verdict:** **REJECT AS A GENERIC FLEET MVP**  
-**Revised verdict:** **CONDITIONAL APPROVAL** for a benchmark-only wrapper  
+**Status:** historical audit baseline; implementation exists; acceptance incomplete
+**Draft verdict:** **REJECT AS A GENERIC FLEET MVP**
+**Revised verdict:** **CONDITIONAL APPROVAL** for a benchmark-only wrapper
 **Repository baseline:** `main` at `41671fdb`  
 **Upstream pin:** Zed `24e25552b1259d56a6fdd7956a419ed9e8a1a25e`  
-**Scope:** historical audit and future-plan definition; implementation status is tracked separately
+**Scope:** product boundary, security invariants, and acceptance authority
+
+> This document preserves the design audit that authorized the narrow
+> benchmark-only direction. Production source and tests are authoritative for
+> implementation details; this document remains authoritative for exclusions,
+> safety constraints, stop conditions, and acceptance gates.
 
 ## 1. Executive decision
 

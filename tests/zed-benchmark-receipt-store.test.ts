@@ -134,6 +134,40 @@ describe('zed benchmark receipt store', () => {
     expect(() => createZedBenchmarkReceipt(root, receipt(root))).toThrow();
   });
 
+  test('rejects prototype phases and tampered admission policy on read', () => {
+    const mutations: Array<(raw: Record<string, unknown>) => void> = [
+      (raw) => { raw.phase = 'constructor'; },
+      (raw) => { raw.namespace = 'INVALID NAMESPACE'; },
+      (raw) => { raw.model = 'bad model'; },
+      (raw) => { raw.integrationPin = 'f'.repeat(40); },
+      (raw) => { raw.nTasks = 11; },
+      (raw) => { raw.nConcurrent = 3; },
+      (raw) => { raw.resourcePolicy = { ...ZED_BENCHMARK_POLICY, extra: true }; },
+    ];
+    for (const mutate of mutations) {
+      const root = repoRoot();
+      createZedBenchmarkReceipt(root, receipt(root));
+      const path = zedBenchmarkReceiptPath(root, RUN_ID);
+      const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+      mutate(raw);
+      writeFileSync(path, `${JSON.stringify(raw)}\n`, 'utf8');
+      expect(() => loadZedBenchmarkReceipt(root, RUN_ID)).toThrow(ZedBenchmarkReceiptError);
+    }
+  });
+
+  test('fails closed when a receipt transition lock is held', () => {
+    const root = repoRoot();
+    createZedBenchmarkReceipt(root, receipt(root));
+    const lock = join(zedBenchmarkRunDir(root, RUN_ID), '.transition.lock');
+    mkdirSync(lock);
+    try {
+      expect(() => transitionZedBenchmarkReceipt(root, RUN_ID, 'pending', '2026-08-14T12:00:01.000Z'))
+        .toThrow(ZedBenchmarkReceiptError);
+    } finally {
+      rmSync(lock, { recursive: true, force: true });
+    }
+  });
+
   test('uses restrictive permissions where POSIX mode bits are available', () => {
     const root = repoRoot();
     createZedBenchmarkReceipt(root, receipt(root));

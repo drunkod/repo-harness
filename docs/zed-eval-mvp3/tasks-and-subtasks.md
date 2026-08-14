@@ -1,9 +1,12 @@
 # Tasks and Subtasks: Zed Eval MVP 3
 
-> This is a detailed future work checklist, not an active task contract. The
-> branch contains documentation only. Promote the checklist through the normal
-> work-package and contract-worktree workflow only after the revised
-> benchmark-only direction is explicitly approved.
+> This is the active acceptance checklist for the implemented MVP 3 slice.
+> Source presence does not imply a task is complete: each task is complete only
+> when its required evidence has been produced and reviewed.
+>
+> The implementation remains benchmark-only. Requirements for arbitrary
+> repository execution, cancellation, writer admission, deployment automation,
+> or a generic fleet runtime stop this work package.
 
 ## Task metadata
 

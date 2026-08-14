@@ -4,6 +4,11 @@
 **Detailed work package:** [`../zed-eval-mvp3/README.md`](../zed-eval-mvp3/README.md)  
 **Upstream source pin:** Zed `24e25552b1259d56a6fdd7956a419ed9e8a1a25e`
 
+> **Status note:** this is the durable research/audit basis for MVP 3. The
+> benchmark-only implementation now exists. Production source is authoritative
+> for executable details; this document remains authoritative for the upstream
+> findings and product-boundary conclusions recorded at the pinned Zed commit.
+
 ## Durable conclusion
 
 Zed's Python `zed-eval` package is a remote **benchmark orchestrator**, not a

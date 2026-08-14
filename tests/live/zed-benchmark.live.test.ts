@@ -12,6 +12,14 @@ function requiredEnv(name: string): string {
   return value;
 }
 
+function parseJson<T>(label: string, text: string): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`${label} did not emit valid JSON`);
+  }
+}
+
 function cli(args: string[]): { status: number; stdout: string; stderr: string } {
   const result = spawnSync('bun', [CLI, ...args], {
     encoding: 'utf8',
@@ -44,7 +52,7 @@ async function runPaidCanary(): Promise<void> {
     '--acknowledge-remote-cost-and-data',
     '--json',
   ]);
-  const submitPayload = JSON.parse(submitted.stdout) as { runId: string; outcome: string };
+  const submitPayload = parseJson<{ runId: string; outcome: string }>('zed-benchmark submit', submitted.stdout);
   expect(['submitted', 'submission-uncertain']).toContain(submitPayload.outcome);
   expect(typeof submitPayload.runId).toBe('string');
   const runId = submitPayload.runId;
@@ -56,29 +64,43 @@ async function runPaidCanary(): Promise<void> {
   }
 
   let phase = 'pending';
+  let observedState = false;
   const deadline = Date.now() + 45 * 60_000;
   while (Date.now() < deadline) {
     const status = cli(['zed-benchmark', '--repo', repo, 'status', '--run-id', runId, '--json']);
-    expect(status.status).toBe(0);
-    const state = JSON.parse(status.stdout) as { status: string };
+    if (status.status !== 0) {
+      await Bun.sleep(15_000);
+      continue;
+    }
+    const state = parseJson<{ status: string; run_id?: string }>('zed-benchmark status', status.stdout);
+    observedState = true;
+    expect(['pending', 'running', 'completed', 'failed']).toContain(state.status);
+    if (state.run_id !== undefined) expect(state.run_id).toBe(runId);
     phase = state.status;
     if (phase === 'completed' || phase === 'failed') break;
     expect(['pending', 'running']).toContain(phase);
     await Bun.sleep(15_000);
   }
-  expect(['completed', 'failed']).toContain(phase);
+  if (!observedState || !['completed', 'failed'].includes(phase)) {
+    throw new Error(`paid canary ${runId} did not reach a terminal state; do not resubmit it`);
+  }
 
   // Logs are intentionally requested only here; the test does not persist them.
   const logs = cli(['zed-benchmark', '--repo', repo, 'logs', '--run-id', runId]);
   expect(logs.status).toBe(0);
 
+  if (phase === 'failed') {
+    throw new Error(`paid canary ${runId} reached remote failed state; inspect evidence and do not resubmit automatically`);
+  }
+
   const fetched = cli(['zed-benchmark', '--repo', repo, 'fetch', '--run-id', runId]);
   expect(fetched.status).toBe(0);
   const report = cli(['zed-benchmark', '--repo', repo, 'report', '--run-id', runId, '--json']);
   expect(report.status).toBe(0);
-  const metrics = JSON.parse(report.stdout) as { n_trials?: unknown; n_scored?: unknown };
+  const metrics = parseJson<{ n_trials?: unknown; n_scored?: unknown; job_dir?: unknown }>('zed-benchmark report', report.stdout);
   expect(typeof metrics.n_trials).toBe('number');
   expect(typeof metrics.n_scored).toBe('number');
+  expect(typeof metrics.job_dir).toBe('string');
 }
 
 if (enabled) {
