@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import {
   PINNED_ZED_EVAL_COMMIT,
   ZED_BENCHMARK_POLICY,
@@ -76,6 +76,21 @@ function result(overrides: Partial<ProcessRunResult> = {}): ProcessRunResult {
   };
 }
 
+function acceptedSubmitOutput(
+  request: ZedBenchmarkSubmitRequest,
+  runId = RUN_ID,
+): string {
+  return [
+    `Namespace:  ${request.namespace}`,
+    `Experiment: ${request.benchmark}`,
+    `Run id:     ${runId}`,
+    'Run state:  pending',
+    'Model:      sonnet-4.6',
+    'Spawned controller: fc-test-controller',
+    '',
+  ].join('\n');
+}
+
 function pinAwareRun(
   repoRoot: string,
   invocations: Invocation[],
@@ -130,7 +145,11 @@ describe('zed benchmark runner', () => {
   test('persists submitting before exactly one upstream launch and transitions to pending', () => {
     const { repoRoot, request } = fixture();
     const invocations: Invocation[] = [];
-    const run = pinAwareRun(repoRoot, invocations, () => result());
+    const run = pinAwareRun(
+      repoRoot,
+      invocations,
+      () => result({ stdout: acceptedSubmitOutput(request) }),
+    );
 
     const outcome = submitZedBenchmark(request, submitDeps(run));
 
@@ -157,6 +176,75 @@ describe('zed benchmark runner', () => {
       expect(invocations.filter((item) => item.command !== 'git')).toHaveLength(1);
     });
   }
+
+  test('clean exit with malformed acceptance becomes uncertain and is never resubmitted', () => {
+    const malformedOutputs = [
+      '',
+      'Namespace:  repo-harness-evals\n',
+      [
+        'Namespace:  repo-harness-evals',
+        'Experiment: rf',
+        `Run id:     ${'f'.repeat(40)}`,
+        'Spawned controller: fc-test',
+        '',
+      ].join('\n'),
+      [
+        'Namespace:  wrong-namespace',
+        'Experiment: rf',
+        `Run id:     ${RUN_ID}`,
+        'Spawned controller: fc-test',
+        '',
+      ].join('\n'),
+      [
+        'Namespace:  repo-harness-evals',
+        'Experiment: rf',
+        `Run id:     ${RUN_ID}`,
+        '',
+      ].join('\n'),
+    ];
+
+    for (const stdout of malformedOutputs) {
+      const { repoRoot, request } = fixture();
+
+      let remoteCalls = 0;
+
+      const run: RunZedBenchmarkProcess = (
+        command,
+        args,
+      ) => {
+        if (command === 'git') {
+          return result({
+            stdout: args.includes('rev-parse')
+              ? `${PINNED_ZED_EVAL_COMMIT}\n`
+              : '',
+          });
+        }
+
+        remoteCalls += 1;
+
+        return result({ stdout });
+      };
+
+      const outcome = submitZedBenchmark(
+        request,
+        submitDeps(run),
+      );
+
+      expect(outcome.kind)
+        .toBe('submission-uncertain');
+
+      expect(outcome.receipt.runId)
+        .toBe(RUN_ID);
+
+      expect(outcome.receipt.phase)
+        .toBe('submission-uncertain');
+
+      expect(outcome.receipt.lastFailureKind)
+        .toBe('schema');
+
+      expect(remoteCalls).toBe(1);
+    }
+  });
 
   test('thrown wrapper error after receipt preserves the known id as uncertain', () => {
     const { repoRoot, request } = fixture();
@@ -206,7 +294,7 @@ describe('zed benchmark runner', () => {
     const { repoRoot, request } = fixture();
     const submitRun: RunZedBenchmarkProcess = (command, args) => command === 'git'
       ? result({ stdout: args.includes('rev-parse') ? `${PINNED_ZED_EVAL_COMMIT}\n` : '' })
-      : result();
+      : result({ stdout: acceptedSubmitOutput(request) });
     submitZedBenchmark(request, submitDeps(submitRun));
 
     const calls: Invocation[] = [];
@@ -260,6 +348,105 @@ describe('zed benchmark runner', () => {
     expect(reportArgs).not.toContain('--fetch');
   });
 
+  test('rejects report JSON for a different job directory', () => {
+    const {
+      repoRoot,
+      request,
+    } = fixture();
+
+    const submitRun: RunZedBenchmarkProcess = (
+      command,
+      args,
+    ) => {
+      if (command === 'git') {
+        return result({
+          stdout: args.includes('rev-parse')
+            ? `${PINNED_ZED_EVAL_COMMIT}\n`
+            : '',
+        });
+      }
+
+      return result({
+        stdout: acceptedSubmitOutput(request),
+      });
+    };
+
+    submitZedBenchmark(
+      request,
+      submitDeps(submitRun),
+    );
+
+    const receipt = loadZedBenchmarkReceipt(
+      repoRoot,
+      RUN_ID,
+    );
+
+    const jobsDir = resolve(
+      repoRoot,
+      receipt.jobsDir,
+    );
+
+    const jobDir = resolve(
+      jobsDir,
+      RUN_ID,
+    );
+
+    mkdirSync(
+      jobDir,
+      { recursive: true },
+    );
+
+    const reportRun: RunZedBenchmarkProcess = (
+      command,
+      args,
+    ) => {
+      if (command === 'git') {
+        return result({
+          stdout: args.includes('rev-parse')
+            ? `${PINNED_ZED_EVAL_COMMIT}\n`
+            : '',
+        });
+      }
+
+      expect(args).toContain('report');
+
+      return result({
+        stdout: JSON.stringify({
+          label: RUN_ID,
+          job_dir: resolve(
+            jobsDir,
+            'different-run',
+          ),
+          n_trials: 1,
+          n_scored: 1,
+          n_passed: 1,
+          n_failed: 0,
+          n_errored: 0,
+          n_attempts: 1,
+          pass_rate: 1,
+          pass_sem: null,
+          resolved_models: {
+            'sonnet-4.6': 1,
+          },
+          agent_statuses: {
+            completed: 1,
+          },
+          on_success: {},
+          overall: {},
+          errored_trials: [],
+        }),
+      });
+    };
+
+    expect(() =>
+      reportZedBenchmark(
+        repoRoot,
+        RUN_ID,
+        { run: reportRun },
+      ),
+    ).toThrow(/job_dir/);
+  });
+
   test('rejects tracked and non-ignored untracked checkout dirt before launch', () => {
     for (const dirty of [' M tracked.py\\n', '?? injected.py\\n']) {
       const { repoRoot, request } = fixture();
@@ -286,7 +473,7 @@ describe('zed benchmark runner', () => {
         expect(args).not.toContain('--ignored');
         return result({ stdout: args[2] === 'rev-parse' ? `${PINNED_ZED_EVAL_COMMIT}\n` : '' });
       }
-      return result();
+      return result({ stdout: acceptedSubmitOutput(request) });
     };
     expect(submitZedBenchmark(request, submitDeps(run)).kind).toBe('submitted');
   });
