@@ -965,10 +965,9 @@ repo-harness run sync-brain-docs --check
 ## Zed Interactive Agent Hand-off
 
 `repo-harness zed-agent "<prompt>"` is an optional local convenience command.
-It asks the local `zed` CLI to open a `zed://agent?prompt=...` URI. On the
-manually verified supported Zed release, that route is expected to prefill the
-Agent Panel composer; repo-harness cannot observe whether the editor displayed
-it.
+It asks the local `zed` CLI to open a `zed://agent?prompt=...` URI. That route is
+intended to prefill the Agent Panel composer; repo-harness cannot observe
+whether the editor displayed it.
 
 This path is **interactive only**:
 
