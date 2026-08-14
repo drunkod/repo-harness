@@ -46,15 +46,45 @@ jobs_dir=""
 report_job_dir=""
 prev=""
 for arg in "$@"; do
-  if [[ "$prev" == "fetch" || "$prev" == "status" || "$prev" == "logs" || "$prev" == "report" ]]; then run_id="$arg"; fi
-  if [[ "$prev" == "--jobs-dir" ]]; then jobs_dir="$arg"; fi
-  if [[ "$prev" == "--job-dir" ]]; then report_job_dir="$arg"; fi
-  case "$arg" in run|status|logs|fetch|report) mode="$arg" ;; esac
+  if [[ "$prev" == "fetch" \\
+     || "$prev" == "status" \\
+     || "$prev" == "logs" \\
+     || "$prev" == "report" \\
+     || "$prev" == "--run-id" ]]; then
+    run_id="$arg"
+  fi
+
+  if [[ "$prev" == "--jobs-dir" ]]; then
+    jobs_dir="$arg"
+  fi
+
+  if [[ "$prev" == "--job-dir" ]]; then
+    report_job_dir="$arg"
+  fi
+
+  case "$arg" in
+    run|status|logs|fetch|report)
+      mode="$arg"
+      ;;
+  esac
+
   prev="$arg"
 done
 case "$mode" in
   run)
-    if [[ "\${ZED_EVAL_FAIL_RUN:-0}" == "1" ]]; then echo 'ambiguous submit' >&2; exit 9; fi
+    if [[ "\${ZED_EVAL_FAIL_RUN:-0}" == "1" ]]; then
+      echo 'ambiguous submit' >&2
+      exit 9
+    fi
+
+    printf '%s\\n' \\
+      'Namespace:  repo-harness-evals' \\
+      'Experiment: rf' \\
+      "Run id:     $run_id" \\
+      'Run state:  pending' \\
+      'Model:      sonnet-4.6' \\
+      'Spawned controller: fc-test-controller'
+
     exit 0
     ;;
   status)
