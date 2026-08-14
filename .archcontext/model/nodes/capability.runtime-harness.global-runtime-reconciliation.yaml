@@ -3,11 +3,12 @@ id: capability.runtime-harness.global-runtime-reconciliation
 kind: capability
 name: Global Runtime Reconciliation
 status: active
-summary: Reconciles the installed repo-harness runtime, its mandatory ArchContext closure, and profile-owned external tooling.
+summary: Reconciles the installed repo-harness runtime, its mandatory ArchContext closure, profile-owned external tooling, and explicit non-installing editor hand-offs.
 responsibilities:
   - Install and read back the exact repo-harness, archctx, archctx-contracts, and package-local CodeGraph versions.
   - Require a compatible ArchContext Node runtime and a successful package-local capability handshake.
   - Refresh mutable Waza and Mermaid skills only when explicitly requested, plus the exact global CodeGraph CLI and MCP registration.
+  - Expose explicit editor hand-offs without admitting those editors as hook-runtime compatibility targets.
   - Fail closed before later host mutations when the mandatory runtime closure cannot be reconciled.
 source:
   include:
@@ -15,11 +16,15 @@ source:
     - "bun.lock"
     - "src/cli/index.ts"
     - "src/cli/commands/global-runtime.ts"
+    - "src/cli/commands/zed-agent.ts"
     - "scripts/check-managed-runtime.ts"
     - "scripts/sync-codex-installed-copies.sh"
     - "src/effects/architecture/**"
+    - "src/effects/zed-agent-launcher.ts"
     - "tests/cli/global-runtime-init.test.ts"
     - "tests/cli/global-runtime.test.ts"
+    - "tests/cli/zed-agent.test.ts"
+    - "tests/effects/zed-agent-launcher.test.ts"
     - "tests/architecture-projection-provider.test.ts"
     - "tests/architecture-projection-orchestration.test.ts"
     - "assets/reference-configs/external-tooling.md"
@@ -49,5 +54,6 @@ extensions:
   lspProfile: "typescript-lsp"
   verification:
     - "bun test tests/cli/global-runtime-init.test.ts tests/cli/global-runtime.test.ts"
+    - "bun test tests/effects/zed-agent-launcher.test.ts tests/cli/zed-agent.test.ts"
     - "bun test tests/architecture-projection-provider.test.ts tests/architecture-projection-orchestration.test.ts"
     - "bun run check:release"
