@@ -1,20 +1,18 @@
 # Zed Agent Interactive Hand-off MVP 1
 
-> **Artifact type:** implementation plan plus active implementation status
-> **Decision:** launcher-only interactive hand-off; no installer target
-> **Recommended MVP:** standalone `repo-harness zed-agent` launcher
-> **Implementation branch:** `feat/zed-agent-mvp1`
+> **Artifact type:** documentation-only audit and implementation proposal
+> **Decision:** revise the supplied draft before implementation
+> **Recommended MVP:** standalone `repo-harness zed-agent` launcher, not an installer target
+> **Branch:** `docs/zed-agent-mvp1-plan`
 > **Prepared:** 2026-08-14
-> **Implementation started:** 2026-08-14
 
 ## Purpose
 
 This package audits the proposed Zed MVP 1 against the current `repo-harness`
-architecture and current Zed documentation. It contains the decision-complete
-launcher-only plan and now also records the implementation status on
-`feat/zed-agent-mvp1`.
+architecture and current Zed documentation. It provides a decision-complete,
+implementation-ready replacement without modifying production code.
 
-The user experience remains intentionally small:
+The proposed user experience remains intentionally small:
 
 ```bash
 repo-harness zed-agent "Review the current diff and suggest the smallest safe fix"
@@ -26,47 +24,12 @@ appears in the Agent Panel, review and submit it. The command does not observe
 editor state, run an agent turn, wait for completion, collect a result, install
 hooks, or declare Zed runtime compatibility.
 
-## Implementation status
-
-Source-level implementation is active on `feat/zed-agent-mvp1`, based on
-`feat/zed-bench-mvp3-v3`.
-
-Implemented in the branch:
-
-- `src/effects/zed-agent-launcher.ts` with deterministic URI construction,
-  bounded `zed` process invocation, injected process seam, and privacy-minimal
-  launch results;
-- `src/cli/commands/zed-agent.ts` with validation, truthful hand-off wording,
-  prompt-independent failures, optional variadic prompt input, and
-  `allowUnknownOption(true)` parser protection;
-- top-level `src/cli/index.ts` registration without changing installer target
-  parsing or `TARGET_HELP`;
-- focused effect tests for URI encoding, process invocation, missing binary,
-  non-zero exit, and signal failures;
-- command-domain and CLI integration tests for exit semantics, output privacy,
-  help registration, fake-`zed` URI capture, option-like prompts, literal known
-  option values after `--`, and missing binary behavior; and
-- explicit architecture ownership under
-  `capability.runtime-harness.global-runtime-reconciliation`.
-
-Still pending before merge/closeout:
-
-- run the focused and full repository test/check suites in a real checkout;
-- run `archctx docs plan --json` and apply the generated architecture
-  projection outputs;
-- update canonical `assets/reference-configs/external-tooling.md`, then run
-  `sync:reference-configs`/`check:reference-configs`;
-- perform the manual non-sensitive Zed compatibility smoke test and record the
-  supported Zed/platform evidence; and
-- complete the repository work-package/contract closeout evidence required by
-  `AGENTS.md`.
-
 ## Verdict
 
 **Do not implement the supplied draft as written.** Its installer-target design
 crosses an abstraction boundary and changes existing `--target both` behavior.
-The implementation branch follows the launcher-only revision described in this
-package instead.
+Implement the launcher-only revision described in this package if the
+interactive convenience command is still desired.
 
 The decisive repository fact is:
 
@@ -139,7 +102,7 @@ agent integration.
 
 ### Exact hand-authored files
 
-The launcher-only implementation hand-edits only:
+If this proposal is approved, the implementation should hand-edit only:
 
 ```text
 src/effects/zed-agent-launcher.ts                                      new
@@ -168,9 +131,9 @@ docs/architecture/.projection-manifest.json                           generated 
 
 `archctx docs plan --json` is authoritative for any additional generated
 architecture paths. Workflow artifacts required by repository policy should be
-created through the normal plan/contract workflow. Timestamped workflow files
-and generated projection outputs are not hard-coded as hand edits in this
-package.
+created through the normal plan/contract workflow when implementation is
+approved. Timestamped workflow files and generated projection outputs are not
+hard-coded as hand edits in this documentation-only audit.
 
 ## Files explicitly excluded from MVP 1
 
@@ -237,18 +200,15 @@ durable conclusions have been promoted into this package.
 - `wikeep-devin-session-drunkod_repo-harness-pleas e research how integrat-2026-08-13.md`
 - `wikeep-devin-drunkod_repo-harness-__full-wiki-2026-08-13 (2).md`
 
-## Approval and merge gate
+## Approval gate
 
-Before the implementation is merged, confirm all of the following:
+Before implementation begins, confirm all of the following:
 
-- [x] The desired product is a convenience hand-off, not first-class Zed runtime compatibility.
+- [ ] The desired product is a convenience hand-off, not first-class Zed runtime compatibility.
 - [ ] A manual smoke test confirms the supported Zed release still accepts `zed://agent?prompt=`.
-- [ ] The URI prefills rather than auto-submits the prompt on the supported release.
-- [x] The implementation preserves the launcher-only file/subsystem boundary.
-- [ ] Focused and full repository checks pass in a real checkout.
-- [ ] Canonical reference-config and ArchContext generated projections are current.
-- [ ] Prompt-in-URI privacy limitations are accepted for the supported use case.
+- [ ] The URI prefills rather than auto-submits the prompt.
+- [ ] The lack of structured result and completion tracking is acceptable.
+- [ ] Prompt-in-URI privacy limitations are acceptable.
+- [ ] The launcher-only hand-authored file set and generated projection surfaces are approved.
 
-If the compatibility smoke fails, the prompt auto-submits, or requirements grow
-to structured lifecycle/results, stop and choose an ACP or headless-runtime
-design instead.
+If any item is false, stop and choose an ACP or headless-runtime design instead.
