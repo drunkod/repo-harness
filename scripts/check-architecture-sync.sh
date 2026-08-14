@@ -319,14 +319,89 @@ if [[ "$mode" == "off" ]]; then
   exit 0
 fi
 
-if ! run_capability_resolver list --format json >/dev/null 2>&1; then
+capability_resolver_path="$(
+  helper_sibling capability-resolver.ts || true
+)"
+
+if [[ -z "$capability_resolver_path" ]]; then
   if [[ "$mode" == "strict" ]]; then
-    echo "[ArchitectureSync] strict gate failed: missing capability-resolver helper" >&2
+    echo \
+      "[ArchitectureSync] strict gate failed: missing capability-resolver helper" \
+      >&2
     exit 1
   fi
-  echo "[ArchitectureSync] WARN: missing capability-resolver helper; skipping advisory freshness gate" >&2
+
+  echo \
+    "[ArchitectureSync] WARN: missing capability-resolver helper; skipping advisory freshness gate" \
+    >&2
   exit 0
 fi
+
+if ! command -v bun >/dev/null 2>&1; then
+  if [[ "$mode" == "strict" ]]; then
+    echo \
+      "[ArchitectureSync] strict gate failed: bun is unavailable for capability-resolver" \
+      >&2
+    exit 1
+  fi
+
+  echo \
+    "[ArchitectureSync] WARN: bun unavailable for capability-resolver; skipping advisory freshness gate" \
+    >&2
+  exit 0
+fi
+
+resolver_stderr="$(
+  mktemp "${TMPDIR:-/tmp}/repo-harness-capability-resolver.XXXXXX"
+)"
+
+resolver_status=0
+
+bun \
+  "$capability_resolver_path" \
+  list \
+  --format json \
+  >/dev/null \
+  2>"$resolver_stderr" \
+  || resolver_status=$?
+
+if [[ "$resolver_status" -ne 0 ]]; then
+  if [[ "$mode" == "strict" ]]; then
+    echo \
+      "[ArchitectureSync] strict gate failed: capability-resolver execution failed (exit=$resolver_status)" \
+      >&2
+
+    if [[ -s "$resolver_stderr" ]]; then
+      echo \
+        "[ArchitectureSync] capability-resolver stderr:" \
+        >&2
+
+      sed \
+        's/^/[ArchitectureSync]   /' \
+        "$resolver_stderr" \
+        >&2
+    fi
+
+    rm -f "$resolver_stderr"
+    exit 1
+  fi
+
+  echo \
+    "[ArchitectureSync] WARN: capability-resolver execution failed (exit=$resolver_status); skipping advisory freshness gate" \
+    >&2
+
+  if [[ -s "$resolver_stderr" ]]; then
+    sed \
+      's/^/[ArchitectureSync]   /' \
+      "$resolver_stderr" \
+      >&2
+  fi
+
+  rm -f "$resolver_stderr"
+  exit 0
+fi
+
+rm -f "$resolver_stderr"
 
 changed_files="$(collect_changed_files | sort -u)"
 if [[ -z "$changed_files" ]]; then
