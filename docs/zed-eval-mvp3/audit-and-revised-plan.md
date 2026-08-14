@@ -1,11 +1,11 @@
 # Audit and Revised Plan: Zed Eval MVP 3
 
-**Status:** audit complete; implementation not started  
+**Status:** audit baseline; implementation applied separately and under validation  
 **Draft verdict:** **REJECT AS A GENERIC FLEET MVP**  
 **Revised verdict:** **CONDITIONAL APPROVAL** for a benchmark-only wrapper  
 **Repository baseline:** `main` at `41671fdb`  
 **Upstream pin:** Zed `24e25552b1259d56a6fdd7956a419ed9e8a1a25e`  
-**Scope:** documentation and future-plan definition only
+**Scope:** historical audit and future-plan definition; implementation status is tracked separately
 
 ## 1. Executive decision
 

@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import type { AcceptedArchitectureChangeReferenceV1 } from 'archctx-contracts';
+type AcceptedArchitectureChangeReferenceV1 = {
+  changeSetId: string;
+  eventId: string;
+  reasonCodes: string[];
+  affectedNodeIds: string[];
+};
 import { canonicalize } from '../evidence/canonical-json';
 
 export const PROJECTION_REQUEST_VERSION = 'archcontext.projection-request/v1' as const;
@@ -212,7 +217,7 @@ export function projectionRequestIssues(input: ProjectionRequestV1): string[] {
     for (const reason of input.acceptedChange.reasonCodes) {
       if (!(ARCHITECTURE_MAJOR_CHANGE_REASONS as readonly string[]).includes(reason)) issues.push(`acceptedChange.reasonCodes contains unsupported reason: ${reason}`);
     }
-    if (input.acceptedChange.affectedNodeIds.some((nodeId) => nodeId.trim() === '')) issues.push('acceptedChange.affectedNodeIds must not contain empty node ids');
+    if (input.acceptedChange.affectedNodeIds.some((nodeId: string) => nodeId.trim() === '')) issues.push('acceptedChange.affectedNodeIds must not contain empty node ids');
   }
   return issues;
 }

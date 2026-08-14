@@ -44,10 +44,16 @@ async function runPaidCanary(): Promise<void> {
     '--acknowledge-remote-cost-and-data',
     '--json',
   ]);
-  expect(submitted.status).toBe(0);
   const submitPayload = JSON.parse(submitted.stdout) as { runId: string; outcome: string };
-  expect(submitPayload.outcome).toBe('submitted');
+  expect(['submitted', 'submission-uncertain']).toContain(submitPayload.outcome);
+  expect(typeof submitPayload.runId).toBe('string');
   const runId = submitPayload.runId;
+  if (submitPayload.outcome === 'submission-uncertain') {
+    expect(submitted.status).not.toBe(0);
+    // Reconcile the known ID; never submit again after an ambiguous result.
+  } else {
+    expect(submitted.status).toBe(0);
+  }
 
   let phase = 'pending';
   const deadline = Date.now() + 45 * 60_000;

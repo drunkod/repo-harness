@@ -83,7 +83,7 @@ function pinAwareRun(
 ): RunZedBenchmarkProcess {
   return (command, args, options) => {
     invocations.push({ command, args, options });
-    if (command === 'git') return result({ stdout: `${PINNED_ZED_EVAL_COMMIT}\n` });
+    if (command === 'git') return result({ stdout: args.includes('rev-parse') ? `${PINNED_ZED_EVAL_COMMIT}\n` : '' });
     const receipt = loadZedBenchmarkReceipt(repoRoot, RUN_ID);
     expect(receipt.phase).toBe('submitting');
     return zedResult(command, args, options);
@@ -136,9 +136,9 @@ describe('zed benchmark runner', () => {
 
     expect(outcome.kind).toBe('submitted');
     expect(outcome.receipt.phase).toBe('pending');
-    expect(invocations).toHaveLength(2); // git pin check + one zed-eval launch
+    expect(invocations).toHaveLength(3); // git pin, clean-check, and one zed-eval launch
     expect(invocations[0]!.command).toBe('git');
-    expectSubmitArgv(invocations[1]!);
+    expectSubmitArgv(invocations.find((item) => item.command !== 'git' && item.args.includes('run'))!);
     expect(JSON.parse(readFileSync(zedBenchmarkReceiptPath(repoRoot, RUN_ID), 'utf8')).phase).toBe('pending');
   });
 
@@ -161,8 +161,8 @@ describe('zed benchmark runner', () => {
   test('thrown wrapper error after receipt preserves the known id as uncertain', () => {
     const { repoRoot, request } = fixture();
     let zedCalls = 0;
-    const run: RunZedBenchmarkProcess = (command) => {
-      if (command === 'git') return result({ stdout: `${PINNED_ZED_EVAL_COMMIT}\n` });
+    const run: RunZedBenchmarkProcess = (command, args) => {
+      if (command === 'git') return result({ stdout: args.includes('rev-parse') ? `${PINNED_ZED_EVAL_COMMIT}\n` : '' });
       zedCalls += 1;
       expect(loadZedBenchmarkReceipt(repoRoot, RUN_ID).phase).toBe('submitting');
       throw new Error('local wrapper lost the child result');
@@ -176,15 +176,15 @@ describe('zed benchmark runner', () => {
 
   test('status reconciles an uncertain receipt with exact JSON and the same id', () => {
     const { repoRoot, request } = fixture();
-    const firstRun: RunZedBenchmarkProcess = (command) => command === 'git'
-      ? result({ stdout: `${PINNED_ZED_EVAL_COMMIT}\n` })
+    const firstRun: RunZedBenchmarkProcess = (command, args) => command === 'git'
+      ? result({ stdout: args.includes('rev-parse') ? `${PINNED_ZED_EVAL_COMMIT}\n` : '' })
       : result({ ok: false, status: 1, timedOut: true });
     submitZedBenchmark(request, submitDeps(firstRun));
 
     const calls: Invocation[] = [];
     const stateRun: RunZedBenchmarkProcess = (command, args, options) => {
       calls.push({ command, args, options });
-      if (command === 'git') return result({ stdout: `${PINNED_ZED_EVAL_COMMIT}\n` });
+      if (command === 'git') return result({ stdout: args.includes('rev-parse') ? `${PINNED_ZED_EVAL_COMMIT}\n` : '' });
       return result({ stdout: JSON.stringify({
         status: 'running',
         run_id: RUN_ID,
@@ -204,15 +204,15 @@ describe('zed benchmark runner', () => {
 
   test('fetch confines the jobs directory and report uses local job-dir JSON without --fetch', () => {
     const { repoRoot, request } = fixture();
-    const submitRun: RunZedBenchmarkProcess = (command) => command === 'git'
-      ? result({ stdout: `${PINNED_ZED_EVAL_COMMIT}\n` })
+    const submitRun: RunZedBenchmarkProcess = (command, args) => command === 'git'
+      ? result({ stdout: args.includes('rev-parse') ? `${PINNED_ZED_EVAL_COMMIT}\n` : '' })
       : result();
     submitZedBenchmark(request, submitDeps(submitRun));
 
     const calls: Invocation[] = [];
     const ioRun: RunZedBenchmarkProcess = (command, args, options) => {
       calls.push({ command, args, options });
-      if (command === 'git') return result({ stdout: `${PINNED_ZED_EVAL_COMMIT}\n` });
+      if (command === 'git') return result({ stdout: args.includes('rev-parse') ? `${PINNED_ZED_EVAL_COMMIT}\n` : '' });
       const subcommand = args.find((arg) => arg === 'fetch' || arg === 'report');
       if (subcommand === 'fetch') {
         const jobsIndex = args.indexOf('--jobs-dir');
@@ -222,9 +222,10 @@ describe('zed benchmark runner', () => {
         return result({ stdout: 'fetched\n' });
       }
       if (subcommand === 'report') {
+        const requestedJobDir = String(args[args.indexOf('--job-dir') + 1]);
         return result({ stdout: JSON.stringify({
           label: RUN_ID,
-          job_dir: '/ignored/in-parser',
+          job_dir: requestedJobDir,
           n_trials: 1,
           n_scored: 1,
           n_passed: 1,

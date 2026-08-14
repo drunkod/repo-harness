@@ -25,7 +25,7 @@ function fixture() {
   mkdirSync(join(checkout, 'crates', 'eval_cli', 'script'), { recursive: true });
 
   const git = join(bin, 'git');
-  writeFileSync(git, `#!/usr/bin/env bash\nprintf '%s\\n' '${PINNED_ZED_EVAL_COMMIT}'\n`, { mode: 0o755 });
+  writeFileSync(git, `#!/usr/bin/env bash\nif [[ "$3" == "rev-parse" && "$4" == "HEAD" ]]; then printf '%s\\n' '${PINNED_ZED_EVAL_COMMIT}'; fi\n`, { mode: 0o755 });
   chmodSync(git, 0o755);
 
   const zedEval = join(checkout, 'crates', 'eval_cli', 'script', 'zed-eval');
@@ -35,10 +35,12 @@ printf '%s\\n' "$*" >> "${capture}"
 mode=""
 run_id=""
 jobs_dir=""
+report_job_dir=""
 prev=""
 for arg in "$@"; do
   if [[ "$prev" == "fetch" || "$prev" == "status" || "$prev" == "logs" || "$prev" == "report" ]]; then run_id="$arg"; fi
   if [[ "$prev" == "--jobs-dir" ]]; then jobs_dir="$arg"; fi
+  if [[ "$prev" == "--job-dir" ]]; then report_job_dir="$arg"; fi
   case "$arg" in run|status|logs|fetch|report) mode="$arg" ;; esac
   prev="$arg"
 done
@@ -58,7 +60,7 @@ case "$mode" in
     printf 'fetched\\n'
     ;;
   report)
-    printf '{"label":"%s","job_dir":"fixture","n_trials":1,"n_scored":1,"n_passed":1,"n_failed":0,"n_errored":0,"n_attempts":1,"pass_rate":1,"pass_sem":null,"resolved_models":{"sonnet-4.6":1},"agent_statuses":{"completed":1},"on_success":{},"overall":{},"errored_trials":[]}\\n' "$run_id"
+    printf '{"label":"%s","job_dir":"%s","n_trials":1,"n_scored":1,"n_passed":1,"n_failed":0,"n_errored":0,"n_attempts":1,"pass_rate":1,"pass_sem":null,"resolved_models":{"sonnet-4.6":1},"agent_statuses":{"completed":1},"on_success":{},"overall":{},"errored_trials":[]}\\n' "$run_id" "$report_job_dir"
     ;;
   *) echo "unexpected mode: $mode" >&2; exit 2 ;;
 esac

@@ -15,6 +15,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'path';
 import {
   assertZedBenchmarkRunId,
   isZedBenchmarkSelector,
+  ZED_BENCHMARK_POLICY,
 } from '../../core/zed-benchmark/admission';
 import type {
   ZedBenchmarkReceipt,
@@ -116,7 +117,7 @@ function parseReceipt(text: string): ZedBenchmarkReceipt {
     || (typeof receipt.lastFailureKind === 'string' && FAILURE_KINDS.has(receipt.lastFailureKind));
   if (
     typeof receipt.phase !== 'string'
-    || !(receipt.phase in LEGAL_TRANSITIONS)
+    || !Object.hasOwn(LEGAL_TRANSITIONS, receipt.phase)
     || typeof receipt.namespace !== 'string'
     || receipt.namespace.length === 0
     || typeof receipt.experimentName !== 'string'
@@ -131,7 +132,9 @@ function parseReceipt(text: string): ZedBenchmarkReceipt {
     || typeof receipt.model !== 'string'
     || receipt.model.length === 0
     || !isPositiveSafeInteger(receipt.nTasks)
+    || receipt.nTasks > 10
     || !isPositiveSafeInteger(receipt.nConcurrent)
+    || receipt.nConcurrent > 2
     || receipt.nConcurrent > receipt.nTasks
     || typeof receipt.runDir !== 'string'
     || isAbsolute(receipt.runDir)
@@ -142,6 +145,7 @@ function parseReceipt(text: string): ZedBenchmarkReceipt {
     || typeof receipt.updatedAt !== 'string'
     || receipt.updatedAt.length === 0
     || !isResourcePolicy(receipt.resourcePolicy)
+    || JSON.stringify(receipt.resourcePolicy) !== JSON.stringify(ZED_BENCHMARK_POLICY)
     || !validFailureKind
   ) {
     throw new ZedBenchmarkReceiptError('corrupt', 'receipt fields are invalid');
@@ -237,14 +241,25 @@ export function transitionZedBenchmarkReceipt(
   now: string,
   lastFailureKind?: ZedBenchmarkReceipt['lastFailureKind'],
 ): ZedBenchmarkReceipt {
-  const current = loadZedBenchmarkReceipt(repoRoot, runId);
-  if (!LEGAL_TRANSITIONS[current.phase].includes(next)) {
+  const root = resolve(repoRoot);
+  const lock = join(dirname(zedBenchmarkReceiptPath(root, runId)), '.transition.lock');
+  let acquired = false;
+  for (let attempt = 0; attempt < 100 && !acquired; attempt += 1) {
+    try { mkdirSync(lock); acquired = true; } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    }
+  }
+  if (!acquired) throw new ZedBenchmarkReceiptError('conflict', 'receipt transition is busy');
+  try {
+    const current = loadZedBenchmarkReceipt(root, runId);
+    if (!LEGAL_TRANSITIONS[current.phase].includes(next)) {
     throw new ZedBenchmarkReceiptError(
       'transition',
       `illegal receipt transition ${current.phase} -> ${next}`,
     );
   }
-  const updated: ZedBenchmarkReceipt = {
+    const updated: ZedBenchmarkReceipt = {
     ...current,
     phase: next,
     updatedAt: now,
@@ -252,6 +267,9 @@ export function transitionZedBenchmarkReceipt(
   };
   const path = zedBenchmarkReceiptPath(repoRoot, runId);
   assertExistingComponentsAreNotSymlinks(resolve(repoRoot), dirname(path));
-  atomicReplace(path, `${JSON.stringify(updated, null, 2)}\n`);
-  return updated;
+    atomicReplace(path, `${JSON.stringify(updated, null, 2)}\n`);
+    return updated;
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
 }

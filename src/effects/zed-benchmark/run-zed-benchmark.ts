@@ -79,7 +79,7 @@ function verifyCheckoutPin(
 ): void {
   const result = runOrDefault(deps)(
     'git',
-    ['-C', checkout, 'rev-parse', 'HEAD'],
+    ['-C', checkout, 'rev-parse', 'HEAD'], 
     {
       cwd: repoRoot,
       stdio: 'pipe',
@@ -90,6 +90,16 @@ function verifyCheckoutPin(
   );
   if (!result.ok || result.stdout.trim() !== integrationPin) {
     throw new Error('Zed checkout does not match the approved zed-eval integration pin');
+  }
+  const cleanliness = runOrDefault(deps)('git', ['-C', checkout, 'status', '--porcelain=v1', '--untracked-files=all', '--ignored'], {
+    cwd: repoRoot,
+    stdio: 'pipe',
+    timeoutMs: PIN_CHECK_TIMEOUT_MS,
+    processGroup: true,
+    maxOutputBytes: 4 * 1024,
+  });
+  if (!cleanliness.ok || cleanliness.stdout.trim() !== '') {
+    throw new Error('approved Zed checkout must be clean, including tracked, untracked, and ignored files');
   }
 }
 
@@ -368,5 +378,10 @@ export function reportZedBenchmark(
     FETCH_TIMEOUT_MS,
   );
   if (!result.ok) throw new Error(`zed-eval report failed: ${diagnostic(result)}`);
-  return parseZedBenchmarkReport(result.stdout);
+  const report = parseZedBenchmarkReport(result.stdout);
+  const reportedJobDir = report.raw.job_dir;
+  if (reportedJobDir !== undefined && resolve(String(reportedJobDir)) !== jobDir) {
+    throw new Error('remote report job_dir does not match the requested confined job directory');
+  }
+  return report;
 }
