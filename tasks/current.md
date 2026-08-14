@@ -1,16 +1,16 @@
 # Current Status Snapshot
 
 <!-- generated-by: repo-harness refresh-current-status v1 -->
-<!-- updated_at: 2026-08-12T23:29:59+0800 -->
+<!-- updated_at: 2026-08-14T14:48:23+0500 -->
 <!-- stale_after: 24h -->
 
 > **Status**: Idle
-> **Updated At**: 2026-08-12T23:29:59+0800
+> **Updated At**: 2026-08-14T14:48:23+0500
 > **Source Branch**: main
-> **Source Commit**: c30f08fc
+> **Source Commit**: 96535dd6
 > **Target Branch**: main
 > **Stale After**: 24h
-> **Reason**: release-closeout
+> **Reason**: upstream-branch-structure
 > **Derived From**: active-plan, active-sprint, workstreams, handoff, checks, git status
 
 This file is a tracked mainline snapshot derived from repo artifacts. It is not a live lock, not a kanban board, and not an implementation gate. If it is stale, read the source artifacts below.
@@ -51,18 +51,14 @@ This file is a tracked mainline snapshot derived from repo artifacts. It is not 
 
 ## Checks
 
-- status=(none), source=(none), exit_code=(none), file=.ai/harness/checks/latest.json
+- status=(none), source=(none), file=.ai/harness/checks/latest.json
 
 ## Git Status
 
-- Summary: 5 changed/untracked path(s)
+- Summary: 1 changed/untracked path(s)
 
 ```
- M deploy/release-checklists/260812-repo-harness-0.15.0.md
- M docs/architecture/.projection-manifest.json
- M docs/architecture/modules/runtime-harness/global-runtime-reconciliation.md
- M docs/architecture/modules/verification/evals-checks.md
- M docs/architecture/modules/workflow-engine/contract-assets.md
+?? docs/upstream-maintenance-workflow.md
 ```
 
 ## Source Artifacts
