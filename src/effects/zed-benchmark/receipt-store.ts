@@ -252,7 +252,10 @@ export function transitionZedBenchmarkReceipt(
   const lock = join(dirname(zedBenchmarkReceiptPath(root, runId)), '.transition.lock');
   let acquired = false;
   for (let attempt = 0; attempt < 100 && !acquired; attempt += 1) {
-    try { mkdirSync(lock); acquired = true; } catch (error) {
+    try {
+      mkdirSync(lock);
+      acquired = true;
+    } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
     }
@@ -261,21 +264,42 @@ export function transitionZedBenchmarkReceipt(
   try {
     const current = loadZedBenchmarkReceipt(root, runId);
     if (!LEGAL_TRANSITIONS[current.phase].includes(next)) {
-    throw new ZedBenchmarkReceiptError(
-      'transition',
-      `illegal receipt transition ${current.phase} -> ${next}`,
-    );
-  }
+      throw new ZedBenchmarkReceiptError(
+        'transition',
+        `illegal receipt transition ${current.phase} -> ${next}`,
+      );
+    }
     const updated: ZedBenchmarkReceipt = {
-    ...current,
-    phase: next,
-    updatedAt: now,
-    ...(lastFailureKind ? { lastFailureKind } : {}),
-  };
-  const path = zedBenchmarkReceiptPath(repoRoot, runId);
-  assertExistingComponentsAreNotSymlinks(resolve(repoRoot), dirname(path));
-    atomicReplace(path, `${JSON.stringify(updated, null, 2)}\n`);
-    return updated;
+      ...current,
+      phase: next,
+      updatedAt: now,
+      ...(lastFailureKind ? { lastFailureKind } : {}),
+    };
+
+    /*
+     * A transition must never write a receipt that the normal read path would
+     * subsequently reject.
+     */
+    const validated = parseReceipt(
+      JSON.stringify(updated),
+    );
+
+    const path = zedBenchmarkReceiptPath(
+      repoRoot,
+      runId,
+    );
+
+    assertExistingComponentsAreNotSymlinks(
+      resolve(repoRoot),
+      dirname(path),
+    );
+
+    atomicReplace(
+      path,
+      `${JSON.stringify(validated, null, 2)}\n`,
+    );
+
+    return validated;
   } finally {
     rmSync(lock, { recursive: true, force: true });
   }
