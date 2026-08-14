@@ -6,10 +6,16 @@ status: active
 summary: Runs repository verification, contract gates, benchmarks, and evaluation suites.
 responsibilities:
   - Own machine-verifiable checks, bounded verifier execution, and evaluation evidence.
+  - Own pinned remote benchmark orchestration evidence without claiming generic fleet or writer authority.
 source:
   include:
     - "tests/**"
     - "evals/**"
+    - "src/core/zed-benchmark/**"
+    - "src/effects/zed-benchmark/**"
+    - "src/cli/commands/zed-benchmark.ts"
+    - "docs/reference-configs/external-tooling.md"
+    - "assets/reference-configs/external-tooling.md"
     - "scripts/run-skill-evals.ts"
     - "scripts/run-harness-profile-benchmark.ts"
     - "scripts/validate-harness-profile-benchmark.ts"
@@ -36,6 +42,12 @@ extensions:
     claude: "CLAUDE.md"
   lspProfile: "typescript-lsp"
   verification:
+    - "bun test tests/zed-benchmark-admission.test.ts"
+    - "bun test tests/zed-benchmark-state-schema.test.ts"
+    - "bun test tests/zed-benchmark-receipt-store.test.ts"
+    - "bun test tests/zed-benchmark-runner.test.ts"
+    - "bun test tests/cli/zed-benchmark.test.ts"
+    - "bun run check:reference-configs"
     - "bun test"
     - "bash scripts/check-task-sync.sh"
     - "bash scripts/check-task-workflow.sh --strict"

@@ -30,6 +30,7 @@ import { buildChatgptCommand } from './commands/chatgpt';
 import { buildRunCommand } from './commands/run';
 import { buildStateCommand } from './commands/state';
 import { buildArchitectureProjectionCommand } from './commands/architecture-projection';
+import { buildZedBenchmarkCommand } from './commands/zed-benchmark';
 import { formatSecurityScan, runSecurityScan } from './commands/security';
 import { runGlobalRuntimeSetup, type GlobalRuntimeOptions, type GlobalRuntimeResult } from './commands/global-runtime';
 import {
@@ -91,6 +92,7 @@ export const SUBCOMMANDS = [
   'chatgpt',
   'state',
   'architecture-projection',
+  'zed-benchmark',
 ] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
@@ -722,6 +724,7 @@ export function buildProgram(): Command {
   program.addCommand(buildRunCommand());
   program.addCommand(buildStateCommand());
   program.addCommand(buildArchitectureProjectionCommand());
+  program.addCommand(buildZedBenchmarkCommand());
   program
     .command('circuit-breaker-record', { hidden: true })
     .description('Internal persistent workflow circuit breaker')

@@ -3,6 +3,45 @@
 Generated repos route external tooling by host/runtime shape. Task-level
 skill routing lives in `docs/reference-configs/agentic-development-flow.md`.
 
+## Zed Remote Benchmarks
+
+`repo-harness zed-benchmark` is an opt-in wrapper around a separately managed,
+pinned Zed checkout's Python `zed-eval` benchmark controller. It launches only
+supported benchmark datasets. It is not a free-form remote agent, repository
+writer, hook host, provider, reviewer, sandbox attestation, or generic fleet
+runtime.
+
+The supported integration pin is
+`24e25552b1259d56a6fdd7956a419ed9e8a1a25e`. Repinning requires re-reading the
+pinned `zed_eval` README, parser, launch, run-index, volume/fetch, report, and
+tests before changing fixtures or accepted state/report schemas. The Zed
+checkout is operator-managed; repo-harness neither installs nor redistributes
+Zed, Modal, Harbor/Pier, or model-provider tooling. Review upstream licensing
+again before any future redistribution work.
+
+`--source-sha` is the clean full Zed source commit used to build `eval-cli`; it
+is not the repo-harness checkout and not an arbitrary repository to edit. MVP 3
+permits exactly one selector (`qna`, `rf`, `tw`, `terminal-bench-2.1`, or
+`deepswe`), `1..10` tasks, `1..2` concurrent sandboxes (never more than the task
+count), 4 CPUs, 16384 MiB memory, a 3600-second sandbox timeout, and a
+900-second idle timeout.
+
+Every submission requires `--acknowledge-remote-cost-and-data`. Remote runs can
+incur Modal and model-provider cost. Manifests, benchmark/source data, logs,
+model/tool output, patches, and archives may be visible to members with access
+to the configured Modal workspace/volume and to configured providers. Volume
+namespaces prevent collisions; they are not access control.
+
+Local receipts and fetched evidence stay under
+`.ai/harness/runs/zed-benchmark/<run-id>/`, which is ignored runtime evidence.
+Submission timeout or another ambiguous local failure becomes
+`submission-uncertain`: do **not** resubmit automatically. Reconcile the same
+explicit run ID with `zed-benchmark status`.
+
+There is no MVP cancellation operation. The wrapper never runs `zed-eval
+deploy`; deployment is a separately authorized operator prerequisite and may
+disrupt in-flight work.
+
 - `Waza` supplies `/think`, `/hunt`, and `/check` for daily small/medium work
 - `reverse-skill-router` is an explicit-only recommended router for independently authorized reverse-engineering and security work
 - `hai-stack` supplies `geju` for live, pre-contract exploration; only its frozen output enters a contract
