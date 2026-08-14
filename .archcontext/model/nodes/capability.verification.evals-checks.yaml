@@ -7,6 +7,7 @@ summary: Runs repository verification, contract gates, benchmarks, and evaluatio
 responsibilities:
   - Own machine-verifiable checks, bounded verifier execution, and evaluation evidence.
   - Own pinned remote benchmark orchestration evidence without claiming generic fleet or writer authority.
+  - Own the pinned local Zed eval-cli wrapper as one synchronous evaluation operation without claiming editor-host or generic runtime authority.
 source:
   include:
     - "tests/**"
@@ -14,6 +15,9 @@ source:
     - "src/core/zed-benchmark/**"
     - "src/effects/zed-benchmark/**"
     - "src/cli/commands/zed-benchmark.ts"
+    - "src/core/zed-eval/**"
+    - "src/effects/zed-eval/**"
+    - "src/cli/commands/zed-eval.ts"
     - "scripts/run-skill-evals.ts"
     - "scripts/run-harness-profile-benchmark.ts"
     - "scripts/validate-harness-profile-benchmark.ts"
@@ -45,6 +49,11 @@ extensions:
     - "bun test tests/zed-benchmark-receipt-store.test.ts"
     - "bun test tests/zed-benchmark-runner.test.ts"
     - "bun test tests/cli/zed-benchmark.test.ts"
+    - "bun test tests/zed-eval-result-schema.test.ts"
+    - "bun test tests/zed-eval-admission.test.ts"
+    - "bun test tests/zed-eval-runner.test.ts"
+    - "bun test tests/cli/zed-eval.test.ts"
+    - "bun test tests/process-runner.test.ts"
     - "bun run check:reference-configs"
     - "bun test"
     - "bash scripts/check-task-sync.sh"

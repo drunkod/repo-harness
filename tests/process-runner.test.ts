@@ -18,6 +18,35 @@ describe("process runner", () => {
     expect(result.command.join(" ")).not.toContain("hidden");
   });
 
+  test("additional redactions preserve shared defaults", () => {
+    const result = runProcess(
+      process.execPath,
+      [
+        "-e",
+        "console.log(process.argv.slice(1).join(' ')); console.error('authorization=secret-token'); setTimeout(() => {}, 1000)",
+        "PROMPT_SENTINEL",
+        "token=hidden",
+      ],
+      {
+        timeoutMs: 20,
+        maxOutputBytes: 1024,
+        additionalRedactions: [
+          { pattern: /PROMPT_SENTINEL/g, replacement: "[instruction redacted]" },
+        ],
+      },
+    );
+
+    const command = result.command.join(" ");
+    expect(command).toContain("[instruction redacted]");
+    expect(command).not.toContain("PROMPT_SENTINEL");
+    expect(command).toContain("token=[redacted]");
+    expect(command).not.toContain("hidden");
+    expect(result.stdout).not.toContain("PROMPT_SENTINEL");
+    expect(result.stderr).not.toContain("secret-token");
+    expect(result.error).not.toContain("PROMPT_SENTINEL");
+    expect(result.error).not.toContain("hidden");
+  });
+
   test("caps output with an explicit truncation marker", () => {
     expect(capProcessOutput("0123456789", 5)).toBe("01234\n[output truncated after 5 bytes]");
   });
