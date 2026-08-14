@@ -168,34 +168,43 @@ rules before any remote call.
 
 ### Objective
 
-Make new production paths resolve to an explicit capability instead of
-unmatched/root context.
+Make every MVP 3 path resolve to exactly one explicit capability without duplicate ownership.
 
-### Candidate files
+### Required ownership split
 
-- `.archcontext/model/nodes/capability.verification.evals-checks.yaml`
-- generated projection files reported by `archctx docs plan --json`
+`capability.verification.evals-checks` owns:
+
+```text
+tests/**
+src/core/zed-benchmark/**
+src/effects/zed-benchmark/**
+src/cli/commands/zed-benchmark.ts
+```
+
+`capability.runtime-harness.global-runtime-reconciliation` owns:
+
+```text
+src/cli/index.ts
+assets/reference-configs/external-tooling.md
+docs/reference-configs/external-tooling.md
+```
+
+The external-tooling paths must not appear in the evals capability.
 
 ### Subtasks
 
-- [ ] T3.1 Run the capability resolver for every proposed source/test/doc path.
-- [ ] T3.2 Confirm `tests/**` already resolves to verification/evals-checks.
-- [ ] T3.3 Confirm `src/cli/index.ts` remains owned by global runtime
-      reconciliation.
-- [ ] T3.4 Extend verification/evals-checks responsibility to remote benchmark
-      orchestration evidence.
-- [ ] T3.5 Add exact new core/effect/command/doc paths to `source.include`.
-- [ ] T3.6 Add focused verification commands.
-- [ ] T3.7 Update the corresponding component node if ArchContext requires it.
-- [ ] T3.8 Run `archctx docs plan --json`.
-- [ ] T3.9 Record every generated output path in the contract.
-- [ ] T3.10 Apply the projection; never hand-edit generated architecture docs.
-- [ ] T3.11 Run architecture sync checks.
+- [ ] T3.1–T3.11 Resolve every changed path and confirm one owner.
+- [ ] T3.12 Run `archctx docs plan --json`.
+- [ ] T3.13 Review every generated output path.
+- [ ] T3.14 Apply provider-native projection; never hand-edit generated Markdown.
+- [ ] T3.15 Run `bash scripts/check-architecture-sync.sh`.
+- [ ] T3.16 Run `bun run check:reference-configs`.
+- [ ] T3.17 Run `bun run check:helpers`.
 
 ### Exit criteria
 
-- Every new production path has one unambiguous longest-prefix owner.
-- Generated architecture surfaces are current.
+- Every MVP 3 production path has one unambiguous longest-prefix owner.
+- Generated architecture, helper, and reference-config surfaces are current.
 
 ## T4 — Implement narrow types and admission
 

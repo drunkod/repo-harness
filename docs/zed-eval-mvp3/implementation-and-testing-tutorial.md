@@ -80,24 +80,40 @@ the benchmark wrapper.
 
 ## 4. Verify architecture ownership
 
-The ArchContext source model must own:
+MVP 3 intentionally uses split ArchContext ownership.
 
-```text
-src/core/zed-benchmark/**
-src/effects/zed-benchmark/**
-src/cli/commands/zed-benchmark.ts
-docs/reference-configs/external-tooling.md
-assets/reference-configs/external-tooling.md
-```
-
-The source of truth is:
+The benchmark implementation is owned by:
 
 ```text
 .archcontext/model/nodes/capability.verification.evals-checks.yaml
 ```
 
-Run the provider-native plan and repository projection workflow. Never hand-edit
-generated architecture Markdown.
+That capability owns:
+
+```text
+tests/**
+src/core/zed-benchmark/**
+src/effects/zed-benchmark/**
+src/cli/commands/zed-benchmark.ts
+```
+
+The synchronized external-tooling documentation remains owned by:
+
+```text
+.archcontext/model/nodes/capability.runtime-harness.global-runtime-reconciliation.yaml
+```
+
+That capability owns:
+
+```text
+src/cli/index.ts
+assets/reference-configs/external-tooling.md
+docs/reference-configs/external-tooling.md
+```
+
+No exact path may be claimed by both capabilities. Run the capability resolver,
+`archctx docs plan --json`, provider-native projection, and architecture sync;
+never hand-edit generated architecture Markdown.
 
 ## 5. Review the existing core contracts
 

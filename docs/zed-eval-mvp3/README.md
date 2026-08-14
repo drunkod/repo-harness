@@ -1,6 +1,6 @@
 # Zed Eval MVP 3: Remote Benchmark Orchestration
 
-**Status:** implementation present; acceptance validation incomplete
+**Status:** implementation present; static/T13 validation green; opt-in paid T14 canary and T15 final closeout pending
 **Draft verdict:** **REJECT AS A GENERIC FLEET MVP**
 **Revised direction:** **CONDITIONAL APPROVAL** for a narrow `zed-benchmark`
 wrapper after the gates in this package are accepted

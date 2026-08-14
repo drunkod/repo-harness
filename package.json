@@ -61,6 +61,8 @@
     "check:architecture-sync": "repo-harness run check-architecture-sync",
     "check:task-sync": "repo-harness run check-task-sync",
     "check:task-workflow": "repo-harness run check-task-workflow --strict",
+        "canary:zed-benchmark-mvp3": "bash scripts/run-zed-benchmark-mvp3-canary.sh",
+        "check:zed-benchmark-mvp3-closeout": "bash scripts/check-zed-benchmark-mvp3-closeout.sh",
     "build:hook-bundle": "bun build src/cli/hook-entry.ts --target=bun --outfile dist/hook-entry.js --define REPO_HARNESS_BUNDLED_CLI_VERSION=\"\\\"$npm_package_version\\\"\" && head -1 dist/hook-entry.js | grep -q '^#!/usr/bin/env bun' && ! grep -q REPO_HARNESS_BUNDLED_CLI_VERSION dist/hook-entry.js",
     "prepack": "bun run build:hook-bundle 1>&2",
     "prepublishOnly": "bash scripts/check-npm-release.sh --prepublish",
