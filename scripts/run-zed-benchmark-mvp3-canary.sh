@@ -152,6 +152,8 @@ zed_eval="$checkout/crates/eval_cli/script/zed-eval"
   || die "checkout has tracked or non-ignored untracked changes"
 
 before_status="$(git -C "$repo" status --porcelain=v1 --untracked-files=all)"
+[[ -z "$before_status" ]] \
+  || die "repo-harness worktree must be clean so reviewedCommit identifies the executed code"
 
 cat <<EOF
 
@@ -197,7 +199,7 @@ run_id="$(printf '%s' "$submit_json" | json_get runId)" \
 outcome="$(printf '%s' "$submit_json" | json_get outcome)" \
   || die "submit returned malformed local outcome JSON"
 
-[[ "$run_id" =~ ^rh-zb-[0-9a-f-]{36}$ ]] \
+[[ "$run_id" =~ ^rh-zb-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
   || die "unexpected run ID: $run_id"
 
 case "$outcome:$submit_rc" in

@@ -31,6 +31,9 @@ repo="$(cd "$repo" && pwd)"
 cd "$repo"
 
 head_sha="$(git rev-parse HEAD)"
+[[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]] \
+  || die "repo-harness worktree must be clean before closeout"
+
 run_id="$(
   node -e '
 const fs = require("fs");
@@ -40,7 +43,7 @@ process.stdout.write(e.run.runId);
 ' "$evidence"
 )" || die "canary evidence does not contain a run ID"
 
-[[ "$run_id" =~ ^rh-zb-[0-9a-f-]{36}$ ]] \
+[[ "$run_id" =~ ^rh-zb-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
   || die "canary evidence has invalid run ID"
 
 canonical_evidence="$repo/.ai/harness/runs/zed-benchmark/$run_id/acceptance/canary-evidence.json"
@@ -48,6 +51,12 @@ canonical_evidence="$repo/.ai/harness/runs/zed-benchmark/$run_id/acceptance/cana
   || die "canary evidence must be the canonical run-scoped ignored file"
 git check-ignore -q -- "${canonical_evidence#$repo/}" \
   || die "raw canary evidence is not ignored by git"
+
+canonical_review="$repo/.ai/harness/runs/zed-benchmark/$run_id/acceptance/closeout-review.json"
+[[ "$review" == "$canonical_review" ]] \
+  || die "closeout review must be the canonical run-scoped ignored file"
+git check-ignore -q -- "${canonical_review#$repo/}" \
+  || die "closeout review is not ignored by git"
 
 node - "$evidence" "$review" "$head_sha" "$PINNED_ZED_EVAL_COMMIT" <<'NODE'
 const fs = require("fs");
