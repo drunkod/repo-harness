@@ -14,8 +14,6 @@ source:
     - "src/core/zed-benchmark/**"
     - "src/effects/zed-benchmark/**"
     - "src/cli/commands/zed-benchmark.ts"
-    - "docs/reference-configs/external-tooling.md"
-    - "assets/reference-configs/external-tooling.md"
     - "scripts/run-skill-evals.ts"
     - "scripts/run-harness-profile-benchmark.ts"
     - "scripts/validate-harness-profile-benchmark.ts"

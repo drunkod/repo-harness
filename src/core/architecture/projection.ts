@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
-import type {
-  AcceptedArchitectureChangeReferenceV1,
-} from 'archctx-contracts';
+type AcceptedArchitectureChangeReferenceV1 = {
+  changeSetId: string;
+  eventId: string;
+  reasonCodes: string[];
+  affectedNodeIds: string[];
+};
 import { canonicalize } from '../evidence/canonical-json';
 
 export const PROJECTION_REQUEST_VERSION = 'archcontext.projection-request/v1' as const;
