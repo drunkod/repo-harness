@@ -486,6 +486,7 @@ export function runZedEval(
   const processResult = runOrDefault(deps)(prepared.binary, args, {
     cwd: prepared.workdir,
     env,
+    inheritEnv: true,
     stdio: 'pipe',
     processGroup: true,
     timeoutMs: outerTimeoutMs,

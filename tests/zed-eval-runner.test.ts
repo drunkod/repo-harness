@@ -153,9 +153,9 @@ if (!['missing-result', 'malformed-result', 'error-pre-thread'].includes(mode)) 
     writeFileSync(outside, 'outside');
     symlinkSync(outside, join(outputDir, 'thread.md'));
   } else {
-    writeFileSync(join(outputDir, 'thread.md'), '# fixture\n');
+    writeFileSync(join(outputDir, 'thread.md'), '# fixture\\n');
   }
-  writeFileSync(join(outputDir, 'thread.json'), '{}\n');
+  writeFileSync(join(outputDir, 'thread.json'), '{}\\n');
 }
 
 process.exit(selected.exit);
@@ -283,6 +283,7 @@ describe('zed eval runner', () => {
     let capturedResult: ProcessRunResult | undefined;
     const receipt = withMode('secret-output', () => runZedEval(request(f), {
       run: (command, args, options) => {
+        if (command === f.binary) expect(options.inheritEnv).toBe(true);
         const result = runProcess(command, args, options);
         capturedResult = result;
         return result;
