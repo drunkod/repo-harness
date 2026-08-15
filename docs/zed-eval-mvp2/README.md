@@ -102,3 +102,7 @@ docs/researches/20260814-zed-eval-mvp2-implementation-continuation.md
 `src/cli/index.ts` is limited to the three required registration changes. No workflow-host compatibility, installer, hook/review routing, AcceptanceReceipt, Agent Fleet, or generic fleet/runtime surface is part of this implementation.
 
 Executable verification still must run in an environment with the repository dependencies and Bun available before the implementation is treated as accepted.
+
+## Manual validation
+
+- [Human MVP2 manual test runbook](./human-mvp2-manual-test-runbook.md)
