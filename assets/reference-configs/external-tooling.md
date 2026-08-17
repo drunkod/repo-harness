@@ -961,3 +961,29 @@ repo-harness run check-brain-manifest
 repo-harness run sync-brain-docs --all
 repo-harness run sync-brain-docs --check
 ```
+
+## Zed Interactive Agent Hand-off
+
+`repo-harness zed-agent "<prompt>"` is an optional local convenience command.
+It asks the local `zed` CLI to open a `zed://agent?prompt=...` URI. That route is
+intended to prefill the Agent Panel composer; repo-harness cannot observe
+whether the editor displayed it.
+
+This path is **interactive only**:
+
+- the user must check Zed and, if the prompt appears, review and submit it;
+- repo-harness does not observe editor state or start, wait for, or observe the
+  Agent turn;
+- no structured result or completion status is returned;
+- Zed is not a `repo-harness install --target` host;
+- Zed is not added to workflow `compatibility.agents`; and
+- the command is not a fleet writer, hook host, benchmark provider, or reviewer.
+
+The prompt is embedded in a URI process argument. URL encoding is not
+encryption: process listings, endpoint telemetry, URI-handler logs, or Zed
+application diagnostics may observe it. Do not pass credentials, secrets,
+personal data, or sensitive source text through this command.
+
+For first-class Zed thread and external-agent integration, use Zed's documented
+[Agent Client Protocol External Agent path](https://zed.dev/docs/ai/external-agents.md)
+rather than extending this interactive hand-off.

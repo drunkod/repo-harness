@@ -31,6 +31,7 @@ import { buildRunCommand } from './commands/run';
 import { buildStateCommand } from './commands/state';
 import { buildArchitectureProjectionCommand } from './commands/architecture-projection';
 import { buildZedBenchmarkCommand } from './commands/zed-benchmark';
+import { buildZedAgentCommand } from './commands/zed-agent';
 import { buildZedEvalCommand } from './commands/zed-eval';
 import { formatSecurityScan, runSecurityScan } from './commands/security';
 import { runGlobalRuntimeSetup, type GlobalRuntimeOptions, type GlobalRuntimeResult } from './commands/global-runtime';
@@ -94,6 +95,7 @@ export const SUBCOMMANDS = [
   'state',
   'architecture-projection',
   'zed-benchmark',
+  'zed-agent',
   'zed-eval',
 ] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
@@ -727,6 +729,7 @@ export function buildProgram(): Command {
   program.addCommand(buildStateCommand());
   program.addCommand(buildArchitectureProjectionCommand());
   program.addCommand(buildZedBenchmarkCommand());
+  program.addCommand(buildZedAgentCommand());
   program.addCommand(buildZedEvalCommand());
   program
     .command('circuit-breaker-record', { hidden: true })
