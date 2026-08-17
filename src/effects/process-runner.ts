@@ -16,7 +16,10 @@ export interface RunProcessOptions {
   readonly stdio?: "pipe" | "inherit" | "ignore";
   readonly timeoutMs?: number;
   readonly maxOutputBytes?: number;
+  /** Explicit replacement redactions retained for backwards compatibility. */
   readonly redactions?: readonly ProcessOutputRedaction[];
+  /** Additional rules composed with shared defaults when `redactions` is omitted. */
+  readonly additionalRedactions?: readonly ProcessOutputRedaction[];
   readonly processGroup?: boolean;
   readonly expensiveRunLock?: {
     readonly cwd: string;
@@ -123,6 +126,13 @@ export function capProcessOutput(value: string, maxBytes = DEFAULT_PROCESS_MAX_O
   return `${clipped}\n[output truncated after ${maxBytes} bytes]`;
 }
 
+function resolveRedactions(opts: RunProcessOptions): readonly ProcessOutputRedaction[] {
+  if (opts.redactions) {
+    return [...opts.redactions, ...(opts.additionalRedactions ?? [])];
+  }
+  return [...DEFAULT_REDACTIONS, ...(opts.additionalRedactions ?? [])];
+}
+
 function runSupervisedProcess(
   command: string,
   args: readonly string[],
@@ -220,7 +230,7 @@ function runSupervisedProcess(
 export function runProcess(command: string, args: readonly string[], opts: RunProcessOptions = {}): ProcessRunResult {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS;
   const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_PROCESS_MAX_OUTPUT_BYTES;
-  const redactions = opts.redactions ?? DEFAULT_REDACTIONS;
+  const redactions = resolveRedactions(opts);
   const redactedCommand = [command, ...args].map((part) => redactProcessOutput(part, redactions));
   const supervised = opts.processGroup
     ? runSupervisedProcess(command, args, opts, timeoutMs, maxOutputBytes)
