@@ -105,7 +105,6 @@ The first coding setup must include an explicit read-write grant:
 
 ```bash
 repo-harness mcp setup chatgpt \
-  --scope user \
   --repo "$REPO" \
   --profile coding \
   --grant-read-write "$REPO" \
@@ -117,7 +116,6 @@ repo-harness mcp setup chatgpt \
 
 The setup command fails when:
 
-- `--scope user` is missing;
 - the granted path is not repo-harness adopted;
 - the first coding setup has no `--grant-read-write`;
 - the endpoint is not a valid public HTTPS `/mcp` URL.
@@ -139,7 +137,6 @@ Inspect non-secret configuration:
 ```bash
 jq '{
   version,
-  scope,
   profile,
   server,
   chatgpt: {serverName: .chatgpt.serverName, endpoint: .chatgpt.endpoint},
@@ -641,7 +638,6 @@ To return the configured server to planner mode:
 
 ```bash
 repo-harness mcp setup chatgpt \
-  --scope user \
   --repo "$REPO" \
   --profile planner \
   --server-name repo-harness \
@@ -657,15 +653,9 @@ revoke write authorization.
 
 ## 19. Troubleshooting
 
-### `coding profile setup requires --scope user`
+### Coding state location
 
-Repeat setup with:
-
-```bash
---scope user
-```
-
-Coding authorization and grants must live in user-owned ignored state.
+Coding authorization and grants live in user-owned ignored state under `~/.repo-harness/`; current v3 setup does not accept or write a separate `--scope user` field.
 
 ### `coding profile setup requires at least one explicit --grant-read-write`
 

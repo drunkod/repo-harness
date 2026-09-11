@@ -159,7 +159,6 @@ Use the generated Quick Tunnel URL and explicitly grant the adopted repository:
 
 ```bash
 repo-harness mcp setup chatgpt \
-  --scope user \
   --repo "$REPO" \
   --profile coding \
   --grant-read-write "$REPO" \
@@ -169,8 +168,7 @@ repo-harness mcp setup chatgpt \
   --endpoint "$MCP_URL"
 ```
 
-The first coding setup must be user-scoped and must include an explicit
-`read_write` grant for an adopted repository.
+The first coding setup must include an explicit `read_write` grant for an adopted repository. MCP v3 state is user-owned under `~/.repo-harness/`.
 
 User-scoped state is stored under `~/.repo-harness/`, including:
 
@@ -187,7 +185,6 @@ Inspect only non-secret configuration:
 
 ```bash
 jq '{
-  scope,
   profile,
   chatgpt: {
     serverName: .chatgpt.serverName,
@@ -198,8 +195,7 @@ jq '{
 }' ~/.repo-harness/mcp.local.json
 ```
 
-Expected fundamentals are `scope: user`, `profile: coding`,
-`coding.enabled: true`, and an HTTPS `chatgpt.endpoint` ending in `/mcp`.
+Expected fundamentals are `version: 3`, `profile: coding`, `coding.enabled: true`, and an HTTPS `chatgpt.endpoint` ending in `/mcp`.
 
 ## 4. Resolve the exact coding `repo_id`
 

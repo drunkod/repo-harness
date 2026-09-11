@@ -31,7 +31,6 @@ The profile is fail-closed until all of these are true:
 
 ```bash
 repo-harness mcp setup chatgpt \
-  --scope user \
   --profile coding \
   --grant-read-write "$HOME/Projects/my-repo" \
   --endpoint https://mcp.example.com/mcp
