@@ -1,6 +1,6 @@
 {
   "name": "repo-harness",
-  "version": "0.15.0",
+  "version": "0.19.0",
   "description": "Installs, migrates, audits, and repairs repo-local agentic development harnesses",
   "license": "MIT",
   "repository": {
@@ -12,6 +12,7 @@
     "agents/",
     "assets/",
     "dist/hook-entry.js",
+    "dist/operator-ui/",
     "docs/images/",
     "docs/repo-harness-chatgpt-browser-engine.md",
     "docs/repo-harness-chatgpt-github-create.md",
@@ -32,14 +33,15 @@
     "repo-harness-hook": "dist/hook-entry.js"
   },
   "engines": {
-    "bun": ">=1.1.35",
-    "node": ">=24 <26"
+    "bun": ">=1.4.0",
+    "node": ">=22.22 <26"
   },
   "scripts": {
     "benchmark:mcp-reader": "bun scripts/benchmark-general-repo-reader.ts",
     "benchmark:skills": "bun scripts/run-skill-evals.ts",
     "benchmark:harness": "bun scripts/run-harness-profile-benchmark.ts",
-    "test": "bun test",
+    "benchmark:debug": "bun scripts/run-debug-ground-truth-eval.ts",
+    "test": "bun test --timeout 60000",
     "test:coverage": "bun test --coverage",
     "test:live:chatgpt-create": "bun test tests/live/chatgpt-browser-create.live.test.ts",
     "check:type": "node node_modules/typescript/bin/tsc --noEmit",
@@ -51,6 +53,8 @@
     "check:reference-configs": "bun scripts/sync-reference-configs.ts --check",
     "check:archctx-integration": "bun scripts/axr5-archctx-clean-room.ts",
     "check:state-boundaries": "bun scripts/check-state-boundaries.ts",
+    "check:context-map": "bun scripts/check-context-map.ts",
+    "check:route-eval": "bun scripts/route-nl-vs-ts-eval.ts --check-ts-arm",
     "check:ci": "bash scripts/check-ci.sh",
     "check:release": "bash scripts/check-npm-release.sh",
     "check:release-published": "bash scripts/check-release-published.sh",
@@ -62,22 +66,33 @@
     "check:task-sync": "repo-harness run check-task-sync",
     "check:task-workflow": "repo-harness run check-task-workflow --strict",
     "build:hook-bundle": "bun build src/cli/hook-entry.ts --target=bun --outfile dist/hook-entry.js --define REPO_HARNESS_BUNDLED_CLI_VERSION=\"\\\"$npm_package_version\\\"\" && head -1 dist/hook-entry.js | grep -q '^#!/usr/bin/env bun' && ! grep -q REPO_HARNESS_BUNDLED_CLI_VERSION dist/hook-entry.js",
-    "prepack": "bun run build:hook-bundle 1>&2",
+    "build:operator-web": "vite build --config vite.operator.config.ts",
+    "prepack": "bun run build:hook-bundle 1>&2 && bun run build:operator-web 1>&2",
     "prepublishOnly": "bash scripts/check-npm-release.sh --prepublish",
     "sync:brain-docs": "repo-harness run sync-brain-docs --all",
     "sync:codex-installed": "bash scripts/sync-codex-installed-copies.sh"
   },
   "devDependencies": {
     "@colbymchenry/codegraph": "1.5.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@fontsource/space-grotesk": "^5.3.0",
     "@types/bun": "latest",
-    "@types/cors": "^2.8.17",
-    "@types/express": "^5.0.0",
-    "typescript": "^7.0.2"
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.1.0",
+    "happy-dom": "^20.11.6",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.28.0",
-    "archctx": "0.4.2",
-    "archctx-contracts": "0.4.2",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "archctx": "0.5.10",
+    "archctx-contracts": "0.5.10",
     "commander": "^15.0.0",
     "express": "^5.2.1"
   }

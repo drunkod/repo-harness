@@ -21,10 +21,11 @@
  * are different data, not two authorities for one.
  */
 import { execFileSync } from 'child_process';
-import { createHash } from 'crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
-import { dirname, join } from 'path';
+import { createHash, randomUUID } from 'crypto';
+import { readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'fs';
+import { join, posix, win32 } from 'path';
 import { canonicalRepoRelativePath } from '../../effects/state/collect-state-inputs';
+import { withExclusiveDirectoryLock } from '../../effects/locking/exclusive-directory-lock';
 import type { ArchitectureProjectionSourceEvent } from '../../effects/architecture/projection-orchestrator';
 
 const CURSOR_RELATIVE_PATH = '.ai/harness/state/architecture-drift-cursor.json';
@@ -51,6 +52,13 @@ export interface ArchitectureDriftChangedSet {
   readonly paths: readonly string[];
   /** Advisory lines for the caller's existing stderr channel. */
   readonly warnings: readonly string[];
+}
+
+export interface ArchitectureProjectionPublicationAcknowledgement {
+  readonly schemaVersion: 'repo-harness.architecture-projection-publication-ack/v1';
+  readonly publicationSha: string;
+  readonly manifestDigest: `sha256:${string}`;
+  readonly cursorSha: string;
 }
 
 function git(repoRoot: string, args: readonly string[]): string | null {
@@ -82,14 +90,177 @@ export function readArchitectureDriftCursor(repoRoot: string): ArchitectureDrift
   }
 }
 
-/** Called only on an acknowledged drain/cascade outcome -- see module doc. */
-export function advanceArchitectureDriftCursor(repoRoot: string, headSha: string, now: Date = new Date()): void {
+const CURSOR_LOCK_PATH = '.ai/harness/state/architecture-drift-cascade.lock';
+const CURSOR_LOCK_OPTIONS = { waitTimeoutMs: 50, reclaimStaleOwner: true, reclaimStaleEmptyDirectory: true } as const;
+
+/** All cursor writers share the cascade transaction and its observed cursor. */
+export function advanceArchitectureDriftCursor(
+  repoRoot: string, headSha: string, expectedCursorSha: string | null, now: Date = new Date(),
+): void {
+  withExclusiveDirectoryLock(realpathSync(repoRoot), CURSOR_LOCK_PATH, () => {
+    writeArchitectureDriftCursorLocked(repoRoot, headSha, expectedCursorSha, now);
+  }, CURSOR_LOCK_OPTIONS);
+}
+
+function writeArchitectureDriftCursorLocked(
+  repoRoot: string, headSha: string, expectedCursorSha: string | null, now: Date,
+): void {
+  if ((readArchitectureDriftCursor(repoRoot)?.head_sha ?? null) !== expectedCursorSha) {
+    throw new Error('architecture drift cursor changed; refusing stale acknowledgement');
+  }
   const target = join(repoRoot, CURSOR_RELATIVE_PATH);
-  mkdirSync(dirname(target), { recursive: true });
-  const temp = `${target}.tmp-${process.pid}-${Date.now()}`;
+  const temp = `${target}.tmp-${randomUUID()}`;
   const state: ArchitectureDriftCursorState = { version: 1, head_sha: headSha, updated_at: now.toISOString() };
-  writeFileSync(temp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temp, target);
+  writeFileSync(temp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+  try { renameSync(temp, target); } finally {
+    try { unlinkSync(temp); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+}
+
+interface ArchitectureCascadeBatch {
+  readonly version: 1;
+  readonly cursorSha: string | null;
+  readonly headSha: string | null;
+  readonly paths: readonly string[];
+  readonly completed: number;
+}
+
+const CASCADE_BATCH_PATH = '.ai/harness/state/architecture-drift-cascade.json';
+
+function readCascadeBatch(repoRoot: string): ArchitectureCascadeBatch | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(join(repoRoot, CASCADE_BATCH_PATH), 'utf8'));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+  const batch = value as Partial<ArchitectureCascadeBatch> | null;
+  const sha = (value: unknown) => value === null || (typeof value === 'string' && /^[0-9a-f]{40,64}$/.test(value));
+  if (!batch || batch.version !== 1 || !sha(batch.cursorSha) || !sha(batch.headSha)
+    || !Array.isArray(batch.paths) || !batch.paths.every((path) => typeof path === 'string'
+      && path.length > 0 && !/[\0\r\n\\]/.test(path) && !posix.isAbsolute(path)
+      && win32.parse(path).root === '' && path.split('/').every((part) => part !== '' && part !== '.' && part !== '..'))
+    || !Number.isSafeInteger(batch.completed) || batch.completed! < 0 || batch.completed! > batch.paths.length) {
+    throw new Error('invalid architecture drift cascade batch; retained for operator repair');
+  }
+  return batch as ArchitectureCascadeBatch;
+}
+
+/**
+ * Freeze a range before delivery and persist each complete path acknowledgement.
+ * A timeout can repeat the interrupted path, but never starves the tail by
+ * replaying its acknowledged prefix. Later commits are left for the next range.
+ */
+export function drainArchitectureDriftCascade(
+  repoRoot: string,
+  changedSet: ArchitectureDriftChangedSet,
+  processPath: (path: string) => void,
+  budget: { readonly deadlineMs: number; readonly nowMs: () => number },
+  now: Date = new Date(),
+): void {
+  const remaining = budget.deadlineMs - budget.nowMs();
+  if (remaining <= 0) throw new Error('legacy architecture cascade deadline exhausted; drift retained for retry');
+  withExclusiveDirectoryLock(realpathSync(repoRoot), CURSOR_LOCK_PATH, () => {
+    const cursorSha = readArchitectureDriftCursor(repoRoot)?.head_sha ?? null;
+    if (cursorSha !== changedSet.cursorSha) throw new Error('architecture drift cursor changed before cascade; retry with a fresh changed set');
+    const previous = readCascadeBatch(repoRoot);
+    // A cursor acknowledgement is not proof that the old suffix was consumed.
+    // Finish the frozen batch first, without rewinding an externally advanced cursor.
+    let batch: ArchitectureCascadeBatch = previous ?? {
+      version: 1, cursorSha, headSha: changedSet.headSha, paths: changedSet.paths, completed: 0,
+    };
+    const target = join(repoRoot, CASCADE_BATCH_PATH);
+    const save = () => {
+      const temporary = `${target}.tmp-${randomUUID()}`;
+      writeFileSync(temporary, `${JSON.stringify(batch)}\n`, { mode: 0o600, flag: 'wx' });
+      try { renameSync(temporary, target); } finally {
+        try { unlinkSync(temporary); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
+    };
+    save();
+    for (let index = batch.completed; index < batch.paths.length; index += 1) {
+      if (budget.nowMs() >= budget.deadlineMs) throw new Error(`legacy architecture cascade deadline exhausted before ${batch.paths[index]}; drift retained for retry`);
+      const path = batch.paths[index]!;
+      if (canonicalRepoRelativePath(repoRoot, path) !== path) {
+        throw new Error(`unsafe or retargeted architecture drift path: ${path}; drift retained for retry`);
+      }
+      processPath(path);
+      batch = { ...batch, completed: index + 1 };
+      save();
+    }
+    if ((readArchitectureDriftCursor(repoRoot)?.head_sha ?? null) !== cursorSha) {
+      throw new Error('architecture drift cursor changed during cascade; refusing stale acknowledgement');
+    }
+    if (batch.cursorSha === cursorSha && batch.headSha !== null) {
+      writeArchitectureDriftCursorLocked(repoRoot, batch.headSha, cursorSha, now);
+    }
+    unlinkSync(target);
+  }, { ...CURSOR_LOCK_OPTIONS, waitTimeoutMs: Math.max(1, Math.min(remaining, 50)) });
+}
+
+/**
+ * A synthesized contract publication whose exact accepted tree already carries
+ * the projection manifest is the delivery acknowledgement for that source
+ * delta. Advancing the Stop cursor here prevents the same publication from
+ * being delivered again merely because its commit SHA changed after the
+ * provider stamped `verifiedAgainst.commit` in the source worktree.
+ *
+ * Every proof is local and fail-closed: the requested SHA must be the clean
+ * checked-out HEAD, must be a synthesized contract publication, and must have
+ * changed the tracked manifest in that commit. No caller can acknowledge an
+ * arbitrary range or a manifest that differs from the published blob.
+ */
+export function acknowledgeArchitectureProjectionPublication(
+  repoRoot: string,
+  publicationSha: string,
+  now: Date = new Date(),
+): ArchitectureProjectionPublicationAcknowledgement {
+  return withExclusiveDirectoryLock(realpathSync(repoRoot), CURSOR_LOCK_PATH, () => {
+    const expectedCursorSha = readArchitectureDriftCursor(repoRoot)?.head_sha ?? null;
+    if (!/^[0-9a-f]{40,64}$/.test(publicationSha)) throw new Error('architecture projection publication SHA is invalid');
+
+    const headSha = git(repoRoot, ['rev-parse', 'HEAD'])?.trim() ?? '';
+    if (headSha !== publicationSha) throw new Error(`architecture projection publication is not checked-out HEAD: expected ${publicationSha}, got ${headSha || '(unavailable)'}`);
+
+    const status = git(repoRoot, ['status', '--porcelain=v1', '--untracked-files=no']);
+    if (status === null) throw new Error('architecture projection publication worktree status is unavailable');
+    if (status.trim() !== '') throw new Error('architecture projection publication worktree has tracked changes');
+
+    const message = git(repoRoot, ['log', '-1', '--format=%B', publicationSha]);
+    if (message === null || !/^Source-Worktree-Head: [0-9a-f]{40,64}$/m.test(message)) {
+      throw new Error('architecture projection publication lacks the Source-Worktree-Head proof');
+    }
+
+    const manifestPath = 'docs/architecture/.projection-manifest.json';
+    const changedPaths = git(repoRoot, ['diff-tree', '--no-commit-id', '--name-only', '-r', `${publicationSha}^`, publicationSha]);
+    if (changedPaths === null || !changedPaths.split('\n').includes(manifestPath)) {
+      throw new Error('architecture projection publication did not change the projection manifest');
+    }
+
+    let worktreeManifest: string;
+    try {
+      worktreeManifest = readFileSync(join(repoRoot, manifestPath), 'utf8');
+    } catch {
+      throw new Error('architecture projection publication manifest is unavailable');
+    }
+    const publishedManifest = git(repoRoot, ['show', `${publicationSha}:${manifestPath}`]);
+    if (publishedManifest === null || publishedManifest !== worktreeManifest) {
+      throw new Error('architecture projection publication manifest differs from the published blob');
+    }
+
+    writeArchitectureDriftCursorLocked(repoRoot, publicationSha, expectedCursorSha, now);
+    return {
+      schemaVersion: 'repo-harness.architecture-projection-publication-ack/v1',
+      publicationSha,
+      manifestDigest: `sha256:${createHash('sha256').update(worktreeManifest).digest('hex')}`,
+      cursorSha: publicationSha,
+    };
+  }, CURSOR_LOCK_OPTIONS);
 }
 
 /**

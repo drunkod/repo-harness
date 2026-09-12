@@ -1,5 +1,5 @@
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "fs";
-import { homedir, tmpdir } from "os";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "fs";
+import { homedir, tmpdir, userInfo } from "os";
 import { delimiter, dirname, join, relative, resolve, sep } from "path";
 import { fileURLToPath } from "url";
 import { ARCHCONTEXT_NODE_RANGE, productVersionManifest } from "archctx-contracts";
@@ -13,13 +13,33 @@ import { compareVersions, readLatestPackageVersion } from "./doctor";
 import { configureCodegraph } from "../tools/codegraph";
 import { runProcess as runBoundedProcess } from "../../effects/process-runner";
 import { commitVerifiedSkillTree, skillTreeSha256 } from "../../effects/skill-tree-integrity";
-import { PROFILE_COMPONENTS, readInstalledProfile, type InstallProfile } from "../installer/install-profile";
+import { PROFILE_COMPONENTS, managedInstallSurfaceIsCurrent, readInstalledProfile, type InstallProfile } from "../installer/install-profile";
 import {
   parseSkillSurfaceCatalog,
+  requiredExplicitExternalDependencyInstallGroups,
   requiredExplicitExternalSkillInstallGroup,
   type SkillSurfaceCatalog,
 } from "../../core/skill-surface/catalog";
 import { archctxCapabilities } from "../../effects/architecture/archctx-provider";
+import {
+  discoverWindowsProtectedHelperContract,
+  resolveProtectedHelperPlatform,
+  writeWindowsProtectedHelperContract,
+} from "../../effects/runtime/protected-helper-platform";
+import {
+  CANDIDATE_RECONCILIATION_PROTOCOL,
+  candidatePackageIdentity,
+  encodeCandidateRequest,
+  parseCandidateReceipt,
+  type CandidateReconciliationRequest,
+} from '../runtime/candidate-reconciliation';
+
+export interface CandidateHandoffContext {
+  /** Created by the parent transaction; never accepted from the public CLI. */
+  readonly transactionId: string;
+  readonly transactionBackupRoot: string;
+  readonly parentToken: string;
+}
 
 export interface GlobalRuntimeOptions {
   sourceRoot?: string;
@@ -31,11 +51,14 @@ export interface GlobalRuntimeOptions {
   syncSkill?: boolean;
   hostAdapters?: boolean;
   externalSkills?: boolean;
+  obsidianSkills?: boolean;
   reverseSkill?: boolean;
   codegraph?: boolean;
   brainRoot?: string;
   profile?: InstallProfile;
   updateMode?: boolean;
+  /** Internal-only capability proving that the caller owns the outer transaction. */
+  candidateHandoff?: CandidateHandoffContext;
 }
 
 export interface GlobalRuntimeStep {
@@ -56,11 +79,17 @@ export interface GlobalRuntimeResult {
 }
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const MIN_BUN_VERSION = "1.1.35";
+export const MIN_BUN_VERSION = "1.4.0";
 const CODEGRAPH_VERSION = productVersionManifest().runtime.codeGraph.requiredVersion;
 const CODEGRAPH_PACKAGE = `@colbymchenry/codegraph@${CODEGRAPH_VERSION}`;
 const ARCHCTX_PACKAGES = ["archctx", "archctx-contracts"] as const;
 const WAZA_SHARED_RULES = ["anti-patterns.md", "chinese.md", "durable-context.md", "english.md"] as const;
+
+export function bunVersionIsSupported(version: string | undefined): boolean {
+  if (!version) return false;
+  const comparison = compareVersions(version, MIN_BUN_VERSION);
+  return comparison !== null && comparison >= 0;
+}
 
 /**
  * Reads and parses sourceRoot's skill-surface manifest. Parameterized by
@@ -97,8 +126,14 @@ function defaultSourceRoot(): string {
   return join(SCRIPT_DIR, "..", "..", "..");
 }
 
-function runProcess(command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): GlobalRuntimeStep {
-  const result = runBoundedProcess(command, args, { cwd, env });
+function runProcess(
+  command: string,
+  args: string[],
+  cwd: string,
+  env?: NodeJS.ProcessEnv,
+  inheritEnv = true,
+): GlobalRuntimeStep {
+  const result = runBoundedProcess(command, args, { cwd, env, inheritEnv });
 
   return {
     step: "",
@@ -175,7 +210,7 @@ function ensureSupportedBunRuntime(
   const current = runProcess(bunExecutable, ["--version"], cwd, env);
   const currentVersion = current.stdout?.trim().split(/\s+/)[0] ?? "";
   const comparison = compareVersions(currentVersion, MIN_BUN_VERSION);
-  if (current.status === "ok" && comparison !== null && comparison >= 0) {
+  if (current.status === "ok" && bunVersionIsSupported(currentVersion)) {
     return {
       ...current,
       step: "ensure Bun runtime",
@@ -628,6 +663,106 @@ function installHostAdapters(target: InstallTargetSpec, profile: InstallProfile,
   };
 }
 
+function reconcileWithInstalledCandidate(
+  opts: GlobalRuntimeOptions,
+  cwd: string,
+  bunExecutable: string,
+  env: NodeJS.ProcessEnv,
+  target: InstallTargetSpec,
+  profile: InstallProfile,
+): GlobalRuntimeStep {
+  const handoff = opts.candidateHandoff;
+  if (!handoff) {
+    return {
+      step: 'reconcile installed candidate runtime',
+      status: 'failed',
+      detail: 'candidate reconciliation requires an active parent runtime transaction',
+    };
+  }
+  const candidateRoot = bunGlobalPackageRoot(env);
+  if (candidateRoot === null) {
+    return { step: 'reconcile installed candidate runtime', status: 'failed', detail: 'unable to resolve candidate package root' };
+  }
+  let candidate;
+  try {
+    candidate = candidatePackageIdentity(candidateRoot);
+  } catch (error) {
+    return {
+      step: 'reconcile installed candidate runtime',
+      status: 'failed',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  const candidateEntrypoint = join(candidate.root, 'src', 'cli', 'index.ts');
+  if (!existsSync(candidateEntrypoint)) {
+    return {
+      step: 'reconcile installed candidate runtime',
+      status: 'failed',
+      detail: `candidate entrypoint is missing: ${candidateEntrypoint}`,
+    };
+  }
+  const request: CandidateReconciliationRequest = {
+    protocol: CANDIDATE_RECONCILIATION_PROTOCOL,
+    transaction_id: handoff.transactionId,
+    transaction_backup_root: handoff.transactionBackupRoot,
+    parent_token: handoff.parentToken,
+    candidate,
+    cwd,
+    target,
+    profile,
+    sync_skill: opts.syncSkill !== false,
+    host_adapters: opts.hostAdapters !== false,
+    external_skills: opts.externalSkills === true,
+    reverse_skill: opts.reverseSkill === true,
+    obsidian_skills: opts.obsidianSkills === true,
+    codegraph: opts.codegraph ?? true,
+    brain_root: opts.brainRoot,
+  };
+  const child = runProcess(
+    bunExecutable,
+    [candidateEntrypoint, '__reconcile-installed-runtime', '--request', encodeCandidateRequest(request)],
+    cwd,
+    {
+      ...env,
+      REPO_HARNESS_RUNTIME_RECONCILIATION_PARENT: '1',
+      REPO_HARNESS_RUNTIME_RECONCILIATION_TOKEN: handoff.parentToken,
+    },
+  );
+  if (child.status === 'failed') return withStepName(child, 'reconcile installed candidate runtime', `candidate=${candidate.version}`);
+  try {
+    const receipt = parseCandidateReceipt(child.stdout ?? '');
+    if (
+      receipt.transaction_id !== handoff.transactionId
+      || receipt.candidate_package_root !== candidate.root
+      || receipt.candidate_version !== candidate.version
+      || receipt.candidate_package_digest !== candidate.package_digest
+      || receipt.selected_target !== target
+    ) {
+      throw new Error('candidate receipt binding mismatch');
+    }
+    const completeRequired = request.sync_skill && request.host_adapters;
+    if (completeRequired && receipt.reconciliation_scope !== 'complete') {
+      throw new Error('candidate receipt is partial while full reconciliation was requested');
+    }
+    if (completeRequired && receipt.ownership_manifest_digest === null) {
+      throw new Error('candidate receipt omitted the ownership ledger digest');
+    }
+    return {
+      step: 'reconcile installed candidate runtime',
+      status: 'ok',
+      detail: `candidate=${receipt.candidate_version}; scope=${receipt.reconciliation_scope}; receipt=${receipt.route_registry_digest}`,
+    };
+  } catch (error) {
+    return {
+      step: 'reconcile installed candidate runtime',
+      status: 'failed',
+      detail: error instanceof Error ? error.message : String(error),
+      stdout: child.stdout,
+      stderr: child.stderr,
+    };
+  }
+}
+
 function installAgentFleet(sourceRoot: string, env?: NodeJS.ProcessEnv): GlobalRuntimeStep {
   const script = join(sourceRoot, 'scripts', 'install-agent-fleet.sh');
   if (!existsSync(script)) {
@@ -640,6 +775,7 @@ function externalSkillStepName(provider: string): string {
   if (provider === "tw93/Waza") return "configure Waza skills";
   if (provider === "BfdCampos/dotfiles") return "configure Mermaid skill";
   if (provider.startsWith("zhaoxuya520/reverse-skill@")) return "configure Reverse Skill";
+  if (provider.startsWith("kepano/obsidian-skills@")) return "configure Obsidian companion Skills";
   return `configure external skills ${provider}`;
 }
 
@@ -650,16 +786,40 @@ function installExternalSkillGroup(
   skills: readonly string[],
   integrityBySkill: Readonly<Record<string, string | null>>,
   env?: NodeJS.ProcessEnv,
+  refresh = false,
 ): GlobalRuntimeStep {
   const stepName = externalSkillStepName(provider);
   const home = homeDir(env);
   const skillsRoot = join(home, '.agents', 'skills');
   const canonicalSkillsRoot = join(realpathSync(home), '.agents', 'skills');
   const committedIntegritySkills = new Set<string>();
+  const replacementBackupRoot = mkdtempSync(join(tmpdir(), "repo-harness-skill-replace-"));
+  const replacedIntegritySkills = new Set<string>();
+  const restoreReplacedSkills = (): void => {
+    for (const skill of replacedIntegritySkills) {
+      const installed = join(skillsRoot, skill);
+      rmSync(installed, { recursive: true, force: true });
+      cpSync(join(replacementBackupRoot, skill), installed, {
+        recursive: true,
+        force: false,
+        errorOnExist: true,
+        verbatimSymlinks: true,
+      });
+    }
+  };
+  const fail = (result: GlobalRuntimeStep): GlobalRuntimeStep => {
+    for (const skill of committedIntegritySkills) {
+      rmSync(join(skillsRoot, skill), { recursive: true, force: true });
+    }
+    restoreReplacedSkills();
+    rmSync(replacementBackupRoot, { recursive: true, force: true });
+    return result;
+  };
   const preflight = preflightStagedSkillProjection(skills, target, env, stepName);
-  if (preflight) return preflight;
+  if (preflight) return fail(preflight);
   const missing = skills.filter((skill) => !existsSync(join(skillsRoot, skill, 'SKILL.md')));
-  const ordinaryMissing = missing.filter((skill) => integrityBySkill[skill] == null);
+  const selected = refresh ? skills : missing;
+  const ordinaryMissing = selected.filter((skill) => integrityBySkill[skill] == null);
   if (ordinaryMissing.length > 0) {
     const agents = hostAgents(target);
     const step = runProcess(
@@ -679,11 +839,11 @@ function installExternalSkillGroup(
       env,
     );
     if (step.status === 'failed') {
-      return withStepName(step, stepName, `target=${target}; missing=${ordinaryMissing.join(',')}`);
+      return fail(withStepName(step, stepName, `target=${target}; missing=${ordinaryMissing.join(',')}`));
     }
   }
 
-  const integrityMissing = missing.filter((skill) => integrityBySkill[skill] != null);
+  const integrityMissing = selected.filter((skill) => integrityBySkill[skill] != null);
   if (integrityMissing.length > 0) {
     const isolatedHome = mkdtempSync(join(tmpdir(), "repo-harness-skill-stage-"));
     const isolatedEnv: NodeJS.ProcessEnv = {
@@ -720,7 +880,7 @@ function installExternalSkillGroup(
         isolatedEnv,
       );
       if (step.status === "failed") {
-        return withStepName(step, stepName, `isolated target=${target}; missing=${integrityMissing.join(',')}`);
+        return fail(withStepName(step, stepName, `isolated target=${target}; missing=${integrityMissing.join(',')}`));
       }
 
       for (const skill of integrityMissing) {
@@ -730,22 +890,42 @@ function installExternalSkillGroup(
         try {
           actual = skillTreeSha256(isolatedSkill);
         } catch (error) {
-          return {
+          return fail({
             step: stepName,
             status: "failed",
             detail: `cannot verify isolated staging integrity for ${skill}: ${(error as Error).message}`,
-          };
+          });
         }
         if (actual !== expected) {
-          return {
+          return fail({
             step: stepName,
             status: "failed",
             detail: `isolated staging integrity mismatch for ${skill}: expected=${expected}; actual=${actual}`,
-          };
+          });
         }
       }
 
       for (const skill of integrityMissing) {
+        const installed = join(skillsRoot, skill);
+        if (existsSync(installed)) {
+          const state = readInstalledProfile(env);
+          const receipt = state?.ownership_manifest.find((surface) => surface.path === installed);
+          if (!state || receipt === undefined || !managedInstallSurfaceIsCurrent(receipt)) {
+            return fail({
+              step: stepName,
+              status: "failed",
+              detail: `refusing to refresh unowned or drifted staging skill ${installed}`,
+            });
+          }
+          cpSync(installed, join(replacementBackupRoot, skill), {
+            recursive: true,
+            force: false,
+            errorOnExist: true,
+            verbatimSymlinks: true,
+          });
+          rmSync(installed, { recursive: true, force: true });
+          replacedIntegritySkills.add(skill);
+        }
         const committed = commitVerifiedSkillTree(
           join(isolatedHome, ".agents", "skills", skill),
           join(skillsRoot, skill),
@@ -753,7 +933,7 @@ function installExternalSkillGroup(
           { expectedCanonicalParent: canonicalSkillsRoot },
         );
         if (committed.status === "failed") {
-          return { step: stepName, status: "failed", detail: committed.detail };
+          return fail({ step: stepName, status: "failed", detail: committed.detail });
         }
         committedIntegritySkills.add(skill);
       }
@@ -774,37 +954,31 @@ function installExternalSkillGroup(
         || stat.isSymbolicLink()
         || realpathSync(installed) !== join(canonicalRoot, skill)
       ) {
-        if (committedIntegritySkills.has(skill)) rmSync(installed, { recursive: true, force: true });
-        return {
+        return fail({
           step: stepName,
           status: "failed",
           detail: `refusing non-canonical integrity staging root for ${skill}: ${installed}`,
-        };
+        });
       }
       const actual = skillTreeSha256(installed);
       if (actual !== expected) {
-        if (committedIntegritySkills.has(skill)) rmSync(installed, { recursive: true, force: true });
-        return {
+        return fail({
           step: stepName,
           status: "failed",
           detail: `staging integrity mismatch for ${skill}: expected=${expected}; actual=${actual}`,
-        };
+        });
       }
     } catch (error) {
-      if (committedIntegritySkills.has(skill)) rmSync(installed, { recursive: true, force: true });
-      return {
+      return fail({
         step: stepName,
         status: "failed",
         detail: `cannot verify staging integrity for ${skill}: ${(error as Error).message}`,
-      };
+      });
     }
   }
   const projection = projectStagedSkills(skills, target, env, stepName);
-  if (projection.status === "failed") {
-    for (const skill of committedIntegritySkills) {
-      rmSync(join(skillsRoot, skill), { recursive: true, force: true });
-    }
-  }
+  if (projection.status === "failed") return fail(projection);
+  rmSync(replacementBackupRoot, { recursive: true, force: true });
   return projection;
 }
 
@@ -1079,6 +1253,71 @@ function configureBrain(root: string | undefined, env?: NodeJS.ProcessEnv): Glob
   }
 }
 
+export function configureProtectedHelperPlatform(
+  cwd: string,
+  bunExecutable: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): GlobalRuntimeStep {
+  if (platform !== 'win32') {
+    return {
+      step: 'configure protected helper platform',
+      status: 'skipped',
+      detail: `native ${platform} system toolchain`,
+    };
+  }
+  try {
+    const account = userInfo();
+    const contract = discoverWindowsProtectedHelperContract({ env });
+    const runtime = resolveProtectedHelperPlatform({
+      platform,
+      accountHome: account.homedir,
+      accountUsername: account.username,
+      bunExecutable,
+      contract,
+    });
+    const probeEnv: NodeJS.ProcessEnv = {
+      HOME: runtime.accountHome,
+      USER: runtime.accountUsername,
+      LOGNAME: runtime.accountUsername,
+      OS: 'Windows_NT',
+      USERPROFILE: runtime.accountHome,
+      USERNAME: runtime.accountUsername,
+      SystemRoot: runtime.systemRoot,
+      WINDIR: runtime.systemRoot,
+      PATHEXT: '.COM;.EXE;.BAT;.CMD',
+      PATH: runtime.pathEntries.join(runtime.pathDelimiter),
+      TMPDIR: runtime.tempDir,
+      TEMP: runtime.tempDir,
+      TMP: runtime.tempDir,
+    };
+    const git = runProcess(contract.git_bin, ['--version'], cwd, probeEnv, false);
+    if (git.status !== 'ok') {
+      return { ...git, step: 'configure protected helper platform', detail: 'Git for Windows probe failed' };
+    }
+    const bash = runProcess(contract.bash_bin, ['--version'], cwd, probeEnv, false);
+    if (bash.status !== 'ok') {
+      return { ...bash, step: 'configure protected helper platform', detail: 'Git for Windows Bash probe failed' };
+    }
+    const taskkill = runProcess(runtime.taskkillBin!, ['/?'], cwd, probeEnv, false);
+    if (taskkill.status !== 'ok') {
+      return { ...taskkill, step: 'configure protected helper platform', detail: 'Windows taskkill probe failed' };
+    }
+    const written = writeWindowsProtectedHelperContract(contract, account.homedir);
+    return {
+      step: 'configure protected helper platform',
+      status: 'ok',
+      detail: `${written.changed ? 'pinned' : 'verified'} ${contract.distribution} at ${contract.git_root}`,
+    };
+  } catch (error) {
+    return {
+      step: 'configure protected helper platform',
+      status: 'failed',
+      stderr: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function ensureCodegraphCli(cwd: string, bunExecutable: string, env?: NodeJS.ProcessEnv, refresh = false): GlobalRuntimeStep {
   const check = runProcess("codegraph", ["--version"], cwd, env);
   if (!refresh && check.status === "ok") return withStepName(check, "ensure CodeGraph CLI", "present");
@@ -1157,6 +1396,10 @@ export function runGlobalRuntimeSetup(
     return finalizeRuntimeResult(steps);
   }
 
+  const protectedHelperPlatform = configureProtectedHelperPlatform(cwd, bunExecutable, env);
+  steps.push(protectedHelperPlatform);
+  if (protectedHelperPlatform.status === 'failed') return finalizeRuntimeResult(steps);
+
   if (opts.installCli !== false) {
     const install = installCli(sourceRoot, cwd, bunExecutable, env, opts.installSpec);
     steps.push(install);
@@ -1169,6 +1412,14 @@ export function runGlobalRuntimeSetup(
     steps.push({ step: "install repo-harness CLI", status: "skipped", detail: "disabled" });
     if (updateMode && opts.installSpec) steps.push(reconcileManagedRuntime(cwd, bunExecutable, env, opts.installSpec));
     if (updateMode && steps.some((step) => step.status === "failed")) return finalizeRuntimeResult(steps);
+  }
+
+  // The updater that installed the package has already loaded predecessor
+  // modules. Once dependency readback succeeds, only the candidate's absolute
+  // entrypoint may write managed runtime surfaces.
+  if (updateMode && opts.installCli !== false && opts.installSpec && opts.candidateHandoff) {
+    steps.push(reconcileWithInstalledCandidate(opts, cwd, bunExecutable, env, target, profile));
+    return finalizeRuntimeResult(steps);
   }
 
   if (opts.syncSkill !== false) steps.push(syncRuntimeSkill(sourceRoot, profile, env));
@@ -1231,6 +1482,45 @@ export function runGlobalRuntimeSetup(
       step: "configure Reverse Skill",
       status: "skipped",
       detail: "requires explicit --with-reverse-skill opt-in",
+    });
+  }
+
+  if (opts.obsidianSkills === true) {
+    const catalog = loadSkillSurfaceCatalog(sourceRoot);
+    const selection = requiredExplicitExternalDependencyInstallGroups(
+      catalog,
+      "obsidian-memory",
+      hostIds(target),
+    );
+    if (selection.status !== "selected") {
+      steps.push({
+        step: "configure Obsidian companion Skills",
+        status: "failed",
+        detail: selection.status === "missing"
+          ? `required Obsidian dependency ${selection.name} is missing for the selected host target`
+          : selection.status === "not_explicit_only"
+            ? `catalog package ${selection.name} must remain explicit-only`
+            : `catalog package ${selection.name} requires a pinned tree integrity digest`,
+      });
+    } else {
+      for (const { provider, hosts, skills, integrityBySkill } of selection.groups) {
+        steps.push(installExternalSkillGroup(
+          sourceRoot,
+          targetFromHostIds(hosts),
+          provider,
+          skills,
+          integrityBySkill,
+          env,
+          updateMode,
+        ));
+        if (steps.at(-1)?.status === "failed") break;
+      }
+    }
+  } else {
+    steps.push({
+      step: "configure Obsidian companion Skills",
+      status: "skipped",
+      detail: "requires explicit --with-obsidian-skills opt-in",
     });
   }
 

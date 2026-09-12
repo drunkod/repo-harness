@@ -25,18 +25,51 @@ function withTempHome(fn: (home: string) => void): void {
   }
 }
 
+function writeReadyOfficialCodexPluginCli(home: string): string {
+  const pluginRoot = path.join(home, '.claude', 'plugins', 'cache', 'openai-codex', 'codex', '1.0.6');
+  fs.mkdirSync(path.join(pluginRoot, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
+  fs.mkdirSync(path.join(pluginRoot, 'schemas'), { recursive: true });
+  fs.writeFileSync(path.join(pluginRoot, 'scripts', 'codex-companion.mjs'), '// fixture\n');
+  fs.writeFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({
+    name: 'codex',
+    version: '1.0.6',
+    author: { name: 'OpenAI' },
+  }));
+  fs.writeFileSync(path.join(pluginRoot, 'schemas', 'review-output.schema.json'), JSON.stringify({
+    required: ['verdict', 'summary', 'findings', 'next_steps'],
+    properties: {
+      verdict: { enum: ['approve', 'needs-attention'] },
+      findings: { items: { properties: { severity: { enum: ['critical', 'high', 'medium', 'low'] } } } },
+    },
+  }));
+  const claude = path.join(home, 'bin', 'claude');
+  fs.mkdirSync(path.dirname(claude), { recursive: true });
+  fs.writeFileSync(claude, [
+    '#!/bin/bash',
+    'if [[ "$*" == "plugin list --json" ]]; then',
+    `  printf '%s\\n' '${JSON.stringify([{ id: 'codex@openai-codex', version: '1.0.6', enabled: true, installPath: pluginRoot }])}'`,
+    '  exit 0',
+    'fi',
+    'exit 9',
+    '',
+  ].join('\n'));
+  fs.chmodSync(claude, 0o755);
+  return claude;
+}
+
 describe('install command (Phase 1B)', () => {
   test('install profiles bound host route inventory', () => {
     withTempHome((home) => {
       runInstall({ target: 'codex', location: 'global', profile: 'minimal' });
       let hooks = JSON.parse(fs.readFileSync(path.join(home, '.codex/hooks.json'), 'utf-8')).hooks;
-      expect(Object.values(hooks as Record<string, unknown[]>).flat()).toHaveLength(7);
-      expect(hooks.UserPromptSubmit).toHaveLength(1);
+      expect(Object.values(hooks as Record<string, unknown[]>).flat()).toHaveLength(8);
+      expect(hooks.UserPromptSubmit).toHaveLength(2);
       expect(hooks.SubagentStart).toBeUndefined();
 
       runInstall({ target: 'codex', location: 'global', profile: 'full' as never });
       hooks = JSON.parse(fs.readFileSync(path.join(home, '.codex/hooks.json'), 'utf-8')).hooks;
-      expect(Object.values(hooks as Record<string, unknown[]>).flat()).toHaveLength(11);
+      expect(Object.values(hooks as Record<string, unknown[]>).flat()).toHaveLength(12);
       expect(hooks.SubagentStart).toHaveLength(1);
     });
   });
@@ -101,7 +134,7 @@ describe('install command (Phase 1B)', () => {
     });
   });
 
-  test('codex --location global creates ~/.codex/hooks.json with 11 matcher-grouped entries', () => {
+  test('codex --location global creates ~/.codex/hooks.json with 12 matcher-grouped entries', () => {
     withTempHome((home) => {
       const result = runInstall({ target: 'codex', location: 'global' });
       expect(result.exitCode).toBe(0);
@@ -113,7 +146,7 @@ describe('install command (Phase 1B)', () => {
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       const entries = data.hooks;
       const total = Object.values(entries as Record<string, unknown[]>).flat().length;
-      expect(total).toBe(11);
+      expect(total).toBe(12);
 
       // PostToolUse must have 3 matcher-disjoint entries
       expect((entries.PostToolUse as { matcher?: string }[]).map((e) => e.matcher)).toEqual([
@@ -127,10 +160,10 @@ describe('install command (Phase 1B)', () => {
         'Task|Agent|SendUserMessage',
       ]);
       // SessionStart / Stop / SubagentStart / SubagentStop have 1 matcher-less entry each;
-      // UserPromptSubmit has default + delegation.
+      // UserPromptSubmit has default + inbox + delegation.
       expect(entries.SessionStart.length).toBe(1);
       expect(entries.Stop.length).toBe(1);
-      expect(entries.UserPromptSubmit.length).toBe(2);
+      expect(entries.UserPromptSubmit.length).toBe(3);
       expect(entries.SubagentStart.length).toBe(1);
       expect(entries.SubagentStop.length).toBe(1);
     });
@@ -197,7 +230,7 @@ describe('install command (Phase 1B)', () => {
     });
   });
 
-  test('claude --location global creates ~/.claude/settings.json with 8 shared hooks', () => {
+  test('claude --location global creates ~/.claude/settings.json with 9 shared hooks', () => {
     withTempHome((home) => {
       const result = runInstall({ target: 'claude', location: 'global' });
       expect(result.exitCode).toBe(0);
@@ -205,8 +238,8 @@ describe('install command (Phase 1B)', () => {
         fs.readFileSync(path.join(home, '.claude/settings.json'), 'utf-8'),
       );
       const total = Object.values(data.hooks as Record<string, unknown[]>).flat().length;
-      expect(total).toBe(8);
-      expect(data.hooks.UserPromptSubmit.length).toBe(1);
+      expect(total).toBe(9);
+      expect(data.hooks.UserPromptSubmit.length).toBe(2);
       expect(data.hooks.SubagentStart).toBeUndefined();
       expect(data.hooks.SubagentStop).toBeUndefined();
       for (const [event, entries] of Object.entries(data.hooks) as [string, { hooks: { command: string; timeout?: number }[] }[]][]) {
@@ -218,7 +251,7 @@ describe('install command (Phase 1B)', () => {
     });
   });
 
-  test('claude install self-heals legacy Codex-only managed entries back to 8 shared hooks', () => {
+  test('claude install self-heals legacy Codex-only managed entries back to 9 shared hooks', () => {
     withTempHome((home) => {
       const filePath = path.join(home, '.claude/settings.json');
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -243,8 +276,8 @@ describe('install command (Phase 1B)', () => {
       expect(result.exitCode).toBe(0);
       const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       const total = Object.values(data.hooks as Record<string, unknown[]>).flat().length;
-      expect(total).toBe(8);
-      expect(data.hooks.UserPromptSubmit.length).toBe(1);
+      expect(total).toBe(9);
+      expect(data.hooks.UserPromptSubmit.length).toBe(2);
       expect(data.hooks.SubagentStart).toBeUndefined();
       expect(data.hooks.SubagentStop).toBeUndefined();
     });
@@ -293,11 +326,11 @@ describe('install command (Phase 1B)', () => {
       runInstall({ target: 'claude', location: 'global' });
       const beforeUninstall = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       expect(beforeUninstall.theme).toBe('dark');
-      expect(beforeUninstall.hooks.UserPromptSubmit.length).toBe(2);
+      expect(beforeUninstall.hooks.UserPromptSubmit.length).toBe(3);
 
       const uninstall = runUninstall({ target: 'claude', location: 'global' });
       expect(uninstall.exitCode).toBe(0);
-      expect(uninstall.lines.some((l) => l.includes('[claude] removed'))).toBe(true);
+      expect(uninstall.lines.some((l) => l.includes('claude managed hooks'))).toBe(true);
       const afterUninstall = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       expect(afterUninstall.theme).toBe('dark');
       expect(afterUninstall.hooks.UserPromptSubmit).toEqual([
@@ -306,7 +339,7 @@ describe('install command (Phase 1B)', () => {
     });
   });
 
-  test('uninstall removes managed Codex entries and preserves trust TOML', () => {
+  test('uninstall removes managed Codex entries and reverses installer TOML', () => {
     withTempHome((home) => {
       const result = runInstall({ target: 'codex', location: 'global' });
       expect(result.exitCode).toBe(0);
@@ -317,12 +350,11 @@ describe('install command (Phase 1B)', () => {
 
       const uninstall = runUninstall({ target: 'codex', location: 'global' });
       expect(uninstall.exitCode).toBe(0);
-      expect(uninstall.lines.some((l) => l.includes('[codex] removed'))).toBe(true);
-      expect(uninstall.lines.some((l) => l.includes('[codex] note: ~/.codex/config.toml [hooks.state]'))).toBe(true);
+      expect(uninstall.lines.some((l) => l.includes('codex managed hooks'))).toBe(true);
 
-      const data = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
-      expect(data.hooks).toEqual({});
-      expect(fs.readFileSync(tomlPath, 'utf-8')).toContain('default_mode_request_user_input = true');
+
+      expect(fs.existsSync(hooksPath)).toBe(false);
+      expect(fs.existsSync(tomlPath)).toBe(false);
     });
   });
 
@@ -331,11 +363,11 @@ describe('install command (Phase 1B)', () => {
       runInstall({ target: 'both', location: 'global' });
       const first = runUninstall({ target: 'both', location: 'global' });
       expect(first.exitCode).toBe(0);
-      expect(first.lines.some((l) => l.includes('removed'))).toBe(true);
+      expect(first.lines.some((l) => l.includes('[remove]'))).toBe(true);
 
       const second = runUninstall({ target: 'both', location: 'global' });
       expect(second.exitCode).toBe(0);
-      expect(second.lines.filter((l) => l.includes('not-found')).length).toBeGreaterThanOrEqual(2);
+      expect(second.lines.some((l) => l.includes('[remove]'))).toBe(false);
     });
   });
 
@@ -366,12 +398,13 @@ describe('install command (Phase 1B)', () => {
         encoding: 'utf-8',
       });
       expect(uninstall.status).toBe(0);
-      expect(uninstall.stdout).toContain('[codex] removed');
+      expect(uninstall.stdout).toContain('codex managed hooks');
     });
   }, 30_000);
 
   test('CLI install without required profile components fails closed and compensates adapters', () => {
     withTempHome((home) => {
+      const claude = writeReadyOfficialCodexPluginCli(home);
       const install = spawnSync(
         'bun',
         [
@@ -386,7 +419,7 @@ describe('install command (Phase 1B)', () => {
         ],
         {
           cwd: ROOT,
-          env: { ...process.env, HOME: home },
+          env: { ...process.env, HOME: home, REPO_HARNESS_CLAUDE_EXECUTABLE: claude },
           encoding: 'utf-8',
         },
       );

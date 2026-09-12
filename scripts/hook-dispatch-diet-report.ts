@@ -11,6 +11,7 @@ import {
   isHookEventTelemetryRecord,
 } from "../src/cli/hook/event-telemetry";
 import type { HookEventTelemetryMetric, HookEventTelemetryRecord } from "../src/core/loop/loop-event-protocol";
+import { readHookEventLog } from "../src/effects/hook-event-log";
 
 export const DEFAULT_OUT = ".ai/harness/runs/loop-engine-08-hook-diet-report.json";
 export const DEFAULT_EVENT_LOG = HOOK_EVENT_TELEMETRY_PATH;
@@ -19,7 +20,10 @@ export const DIET_REPORT_PROTOCOL = "loop-engine-hook-diet-report/v3" as const;
 export const PREVIOUS_DISPATCH_COUNT = 13;
 export const CORE_DISPATCH_TARGET_MAX = 8;
 export const CODEX_SUBAGENT_LIFECYCLE_ROUTE_ALLOWANCE = 3;
-export const TARGET_DISPATCH_MAX = CORE_DISPATCH_TARGET_MAX + CODEX_SUBAGENT_LIFECYCLE_ROUTE_ALLOWANCE;
+export const TASK_INBOX_ROUTE_ALLOWANCE = 1;
+export const TARGET_DISPATCH_MAX = CORE_DISPATCH_TARGET_MAX
+  + CODEX_SUBAGENT_LIFECYCLE_ROUTE_ALLOWANCE
+  + TASK_INBOX_ROUTE_ALLOWANCE;
 export const DEFAULT_BASELINE_MS = 250;
 export const SESSION_START_CONTEXT_TOKEN_SLO = 1500;
 
@@ -231,15 +235,19 @@ function isValidHookEventRecord(value: unknown): value is HookEventRecord {
 
 export function readHookEventTelemetry(repo: string, eventsPath = DEFAULT_EVENT_LOG): EventLogReadResult {
   const path = resolveInRepo(resolve(repo), eventsPath);
-  if (!existsSync(path)) return { records: [], sampleCount: 0, invalidRecordCount: 0, malformedRecordCount: 0, mixedProtocol: false, duplicateEventIdCount: 0, missing: true };
-  const lines = readFileSync(path, "utf8").split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const lines = path === resolveInRepo(resolve(repo), DEFAULT_EVENT_LOG)
+    ? readHookEventLog(path, repo)
+    : existsSync(path) ? readFileSync(path, "utf8").split(/\r?\n/).filter(line => line.trim()) : null;
+  if (lines === null) return { records: [], sampleCount: 0, invalidRecordCount: 0, malformedRecordCount: 0, mixedProtocol: false, duplicateEventIdCount: 0, missing: true };
   const records: HookEventRecord[] = [];
   const protocols = new Set<string>();
   const eventIds = new Set<string>();
   let invalidRecordCount = 0;
   let malformedRecordCount = 0;
   let duplicateEventIdCount = 0;
+  let sampleCount = 0;
   for (const line of lines) {
+    sampleCount += 1;
     let parsed: unknown;
     try { parsed = JSON.parse(line); } catch { invalidRecordCount += 1; malformedRecordCount += 1; continue; }
     const protocol = parsed && typeof parsed === "object" && typeof (parsed as Record<string, unknown>).protocol === "string"
@@ -252,7 +260,7 @@ export function readHookEventTelemetry(repo: string, eventsPath = DEFAULT_EVENT_
   }
   return {
     records,
-    sampleCount: lines.length,
+    sampleCount,
     invalidRecordCount,
     malformedRecordCount,
     mixedProtocol: protocols.size > 1 || protocols.size === 1 && !protocols.has(EVENT_TELEMETRY_PROTOCOL),

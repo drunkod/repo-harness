@@ -20,6 +20,60 @@ The word "sprint" historically named a single execution slice in this harness. T
 - Legacy filenames: `verify-sprint.sh` and `new-sprint.sh` predate the program layer and are kept for downstream compatibility. Read them as task-contract verification helpers. New generated artifact headings and plan metadata should use **Task Contract** and **Task Review**.
 - Sprint lifecycle: `Draft -> Approved -> Executing -> Done -> Archived`, tracked in the sprint file's `> **Status**:` line. Use `repo-harness run sprint-backlog` for sprint operations; `.ai/harness/sprint/active-sprint` (runtime state, not committed) marks the single active sprint. Harness installs predating the sprint layer must upgrade the global/package runtime before invoking it. `repo-harness run check-task-workflow --strict` rejects Approved/Executing sprints whose PRD/source section is placeholder-only or whose backlog rows lack a concrete acceptance line.
 
+## Sprint Backlog Schema
+
+The `## Backlog` table has two schema versions, declared once in the sprint
+header as `> **Backlog Schema**: 2`. An absent marker means schema 1; any other
+declared value fails closed.
+
+| Schema | Row shape | Task identity |
+|---|---|---|
+| 1 (retired) | `\| # \| Status \| Task \| Mode \| Acceptance \| Plan \|` | derived: `digest(protocol + repo identity + sprint path + exact Task cell)` |
+| 2 | `\| # \| ID \| Status \| Task \| Mode \| Acceptance \| Plan \|` | read: the persisted `ID` cell, 64 lowercase hex characters |
+
+Schema 2 exists because display text and identity are two data. Under schema 1 a
+harmless title clarification produced a different `task_id`, which orphaned live
+Leases and claim-scoped messages, broke the Work Graph carrier's mapping, and
+made the renamed row freshly claimable. Under schema 2:
+
+- `task_id` is the `ID` cell verbatim, minted once when the row is created and
+  never edited, copied between rows, or regenerated;
+- `task_revision = digest(protocol-v2 + task_id + exact Task cell + Mode cell + Acceptance cell)`,
+  so a title, Mode, or Acceptance edit still drifts every offer and claim taken
+  before it while identity survives;
+- the Status and Plan cells stay out of both derivations, so a sibling row
+  completing cannot invalidate a live claim;
+- the row `#` index is not identity, so reordering rows changes nothing;
+- `WorkPackageDefinitionV1.task_id` is the Work Graph join key. `task_ref`
+  survives only as a derived display projection on the *projected* work package
+  and must never be joined on.
+
+A missing, malformed (not 64 lowercase hex), or duplicated `ID` cell fails
+closed in `projectCanonicalTasks`, in every claim/offer/board path built on it,
+and in `repo-harness run check-task-workflow --strict`.
+
+### Migrating a schema 1 sprint
+
+```bash
+repo-harness sprint migrate-schema --sprint <repo-relative sprint> --target-ref <ref>
+```
+
+The migration is one-shot and fail-closed. It reads the sprint at one canonical
+ref, derives each row's existing schema 1 identity, and refuses when: the
+working tree copy differs from that ref, two rows share a Task cell (their
+schema 1 identity is the same value, so no mapping preserves both), a row has an
+empty Task cell or a duplicate index, any affected row still holds a
+non-released Lease, or the same-commit Work Graph carrier names a `task_ref`
+that is not exactly one canonical row. On success it writes the `ID` column and
+the carrier's `task_id` join keys, re-reads the result, proves every persisted id
+equals its pre-migration derived id, and writes
+`<sprint stem>.schema-migration.v1.json` binding the old/new sprint bytes, the
+old/new Work Graph bytes, and the target commit.
+
+`src/core/state/sprint-schema-v1.ts` is the only surviving schema 1 identity
+derivation and is reachable exclusively from this command. Its compatibility
+owner and removal trigger are recorded in `tasks/todos.md`.
+
 ## Inventory First
 
 - Every execution-ready `plans/plan-*.md` should name the active plan, owning worktree, expected contract, review, notes file, deferred-goal ledger, `.ai/harness/checks/latest.json`, `.ai/harness/runs/`, scope authority, plan switching rule, and worktree isolation path. Checks latest files are runtime evidence pointers/cache, not commit surface.
@@ -74,7 +128,7 @@ As of this revision, `repo-harness run verify-contract` (and the equivalent `con
 For a `bugfix` contract, the gate requires all four `## Root Cause Evidence` fields to be filled in with concrete (non-template) content:
 
 - `root_cause` and `repro` must be non-empty and not the template placeholder text.
-- `regression_guard` must name a test path that also appears under `exit_criteria.tests_pass`.
+- `regression_guard` must name a test path that also appears as a `package_test` check in `Verification Plan`.
 - `pre_fix_failure_artifact` must point to a file that exists, contains a non-zero `PRE_FIX_EXIT=` line, and contains the `regression_guard` path string. Capture it on the unfixed code with `bun test <regression_guard> > <artifact> 2>&1; echo "PRE_FIX_EXIT=$?" >> <artifact>` (no pipes — a pipe swallows the exit status). A passing run (for example one that only prints `0 fail`) does not satisfy this gate; the artifact must show the pre-fix failure with a nonzero recorded exit code.
 
 Both `verify-contract.sh` and `contract-run.ts` implement this check independently against the same fixture expectations so that a `bugfix` contract cannot pass one gate while failing the other.
@@ -92,18 +146,100 @@ evidence_requirements:
 
 ## Acceptance Policy and Receipt
 
-Every new contract freezes one reviewer and the waiver rule in a strict `## Acceptance Policy` JSON block. `verify-sprint --prepare-acceptance` produces the final local evidence bundle; one semantic reviewer then returns `external_pass` or `reject`, or the named contract owner creates one typed UserWaiverGrant when the policy allows it. The grant binds the normalized contract and goal authorities, not a subject hash. Each user-waiver AcceptanceReceipt is then materialized from that grant and still binds the exact normalized implementation subject, verification and benchmark evidence, target revision, and reviewed paths. A semantic change invalidates the old receipt and requires fresh passing verification, but the same unchanged grant may materialize the new exact receipt without another owner prompt. Contract/goal authority changes or revocation invalidate the grant. Review Markdown is a deterministic projection, never authoring authority; user waiver never becomes external pass and never authorizes provider disclosure or merge.
+Every new contract freezes reviewer, source, and waiver rule in a strict protocol-2 `## Acceptance Policy` JSON block. Claude hosts use `reviewer=Codex, source=codex-review`; Codex hosts use `reviewer=Codex, source=codex-plugin`, backed by OpenAI's official Claude Code Codex plugin app-server runtime. Protocol 1 remains readable only for historical receipts. `verify-sprint --prepare-acceptance` produces the final local evidence bundle; one semantic reviewer then returns `external_pass` or `reject`, or the named contract owner creates one typed UserWaiverGrant when the policy allows it. The grant binds the normalized contract and goal authorities, not a subject hash. Each user-waiver AcceptanceReceipt is then materialized from that grant and still binds the exact normalized implementation subject, verification and benchmark evidence, target revision, and reviewed paths. A semantic change invalidates the old receipt and requires fresh passing verification, but the same unchanged grant may materialize the new exact receipt without another owner prompt. Contract/goal authority changes or revocation invalidate the grant. Review Markdown is a deterministic projection, never authoring authority; user waiver never becomes external pass and never authorizes provider disclosure or merge.
+
+Every new contract also carries exactly one strict `## Change Assessment` JSON
+block. Its v1 shape is `{"protocol":1,"oracles":[...]}`; every oracle has a
+stable id, one of `deterministic_test`, `runtime_readback`, or
+`manual_acceptance`, and literal subject paths or `*`. Empty oracles are valid
+only for a final subject that routes no risk. For every routed reason, an
+allowed oracle kind must cover every selected path (or declare `*`); covering
+one path in a multi-path reason leaves the other path in `oracle_gap`.
+`manual_acceptance` is a legal declaration for human-facing acceptance context,
+but it does not satisfy the machine-verifiable oracle required by
+`authority_change`, `pattern_novelty`, or `irreversible_effect`. Change Assessment is recomputed
+at `verify-sprint --prepare-acceptance`, never from a Hook journal or model
+judgment. It binds a `ReviewSelectionPacket` to the exact final subject hash,
+policy review base, target revision, selected paths, reasons, and declared
+oracles. Its closed reason set is `authority_change`, `irreversible_effect`,
+`pattern_novelty`, `reviewer_disagreement`, and `oracle_gap`; an unmet oracle
+blocks. `pattern_novelty` routes only additions in a rename-aware whole diff
+relative to the policy base, not a token already present in final content or a
+pure rename destination; untracked files are wholly new. Reviewer disagreement
+is an append-only post-review escalation on the same packet, never a new
+diff/base authority. After escalation, rerun `verify-sprint --prepare-acceptance`:
+it revalidates the packet against a freshly recomputed base and puts the overlay
+in canonical evidence. Finalization rejects a checks file whose assessment no
+longer equals the current packet, so the prior evidence and receipt are stale.
+The v1 cutover is intentionally fail-closed: an in-flight contract created
+before this block existed must add and review its explicit declaration before
+running the upgraded verifier; no compatibility oracle is inferred.
+
+`AcceptanceReceipt` remains protocol 2 and the sole merge authority. It strictly
+recomputes the active policy/contract base assessment from the exact final
+subject before accepting an envelope; a self-hashed declared assessment or
+packet is not sufficient. It binds
+the packet through the canonical verification-evidence hash rather than adding
+duplicate receipt fields. Historical receipt verification recomputes the packet against its frozen target
+revision. Current publication separately requires an exact current-base
+integration decision; target movement does not erase historical test facts.
 
 - `not_applicable` preserves any existing benchmark report on disk and excludes it from this contract's acceptance and checks binding: the coupled review's `Benchmark Evidence SHA256` must read literally `not-applicable`, `.ai/harness/checks/latest.json`'s `benchmark_evidence.status` must read `not_applicable`, and report presence no longer fails the checks match.
 - `required` keeps byte-exact strictness: the current authoritative report's fingerprint and benchmark subject hash must resolve, and both the review's `Benchmark Evidence SHA256` and the recorded checks fingerprint/subject must match that current evidence exactly; a missing or drifted report fails.
 
 ## Verification Execution Boundary
 
-`verify-contract.sh --read-only` is read-only for contract state writes only: it does not rewrite the contract `> **Status**:` line. It executes `tests_pass` with Bun and `commands_succeed` in a non-login Bash with `BASH_ENV` unset. One fixed absolute 600-second budget covers the whole invocation; each command records duration, exit status, signal, and timeout state, and expiry terminates the command's process group before the verifier returns. The budget is not a policy or environment knob.
+`Verification Plan` JSON is the only executable contract authority. `verify-contract --read-only` suppresses contract header writes and delegates execution to `verification-plan execute`; `verification-plan evaluate`, automatic done/Stop hooks, receipt verification, and merge seals only consume evidence. Explicit preflight checks run before verification checks, and a failing preflight prevents expensive execution. Command checks use non-login Bash with `BASH_ENV` unset; package tests use the nearest package test script. The existing process supervisor owns timeout, process-group cleanup, and command-level expensive-run locking.
 
-Verification is an evidence consumer. `commands_succeed` must not launch profile benchmarks/providers, `init`, evidence-producer scripts, or substantive installs; the verifier rejects those command shapes before execution. Produce expensive evidence explicitly, validate its subject/provenance/bytes, then let `verify-sprint` consume that frozen artifact through `verify-contract --read-only`.
+Execution identity binds a complete Git-visible tree, the descriptor, cwd, toolchain, and declared environment. A changed tree may require `baseline_with_delta`: the author names an immutable successful baseline and current delta checks. It never means the new tree passed the old full suite. An expensive miss returns `needs_verification_plan` unless the operator supplies an explicit rerun reason. Legacy executable YAML is rejected; use `migrate-verification-plan --contract <path> --mapping <json> --write` for the one-shot, author-mapped migration.
 
-A verifier consumes already-produced evidence; it must not become the producer of expensive, runtime-heavy evidence (for example, a full multi-provider/multi-profile benchmark matrix). An authoritative matrix or similarly expensive one-time evidence run belongs outside `commands_succeed`: the author runs it once on a clean checkout before merge and commits the resulting tracked report (for example `evals/harness/reports/profile-comparison.json`/`.md`); the contract then verifies that report's bytes and provenance, not a live re-run.
+### Long Gate Commands Belong to the Orchestrator
+
+The same 600-second ceiling applies to the host stream watchdog that kills a
+delegated agent after 600 seconds of silence. Any gate command expected to
+exceed roughly five minutes (`verify-sprint`, a full `bun test`) is run by the
+orchestrator's main loop in the background, not foreground-waited inside a
+dispatched worker. An agent handed such a command names the command and returns
+BLOCKED on its role's machine-readable first line (`RESULT:` / `VERDICT:` /
+`RECOMMENDATION:`), handing control back; it does not stand watch. The
+standing advisory is injected at SubagentStart under the
+`[repo-harness:long-command-guardrail]` marker.
+
+Verification commands consume previously produced external evidence. Command checks must not launch profile benchmarks/providers, `init`, evidence-producer scripts, or substantive installs; the verifier rejects those command shapes before execution. Produce expensive evidence explicitly, validate its subject/provenance/bytes, then let `verify-sprint` consume that frozen artifact through `verify-contract --read-only`.
+
+A verifier consumes already-produced evidence; it must not become the producer of expensive, runtime-heavy evidence (for example, a full multi-provider/multi-profile benchmark matrix). An authoritative matrix or similarly expensive one-time evidence run belongs outside command checks: the author runs it once on a clean checkout before merge and commits the resulting tracked report (for example `evals/harness/reports/profile-comparison.json`/`.md`); the contract then verifies that report's bytes and provenance, not a live re-run.
+
+## Profile Snapshots and Scope Changes
+
+SessionStart's workflow profile describes the state observed at that time.
+PreEdit resolves the proposed edit together with the current implementation diff;
+additional paths, capabilities, or an explicit raised profile may require a
+standard/strict workflow even when the earlier snapshot was lite. Current edit
+authority supersedes historical ceremony guidance. Lite requires no plan but
+allows user-requested planning. A missing-plan guard reports its current profile,
+reasons, and state revision; standard needs one approved plan, while strict
+retains the contract/worktree requirements. Do not resolve this transition by
+disabling guards or treating a cached lite profile as permission to edit.
+
+## Verification Scope and Follow-up Changes
+
+The parent selects final acceptance checks from the observed behavior and the
+project's risk-scoped required checks. A full suite needs an explicit acceptance
+or release requirement, or a named integration risk that focused checks cannot
+cover. Do not duplicate the same coverage in package-test checks and command checks.
+Each check declares its evidence policy and environment inputs before execution;
+mutable external inputs must be represented explicitly or verified by their owning producer. The canonical producer is
+`verify-sprint --prepare-acceptance`; workers and reviewers consume its evidence.
+
+After a full pass, a bounded follow-up edit uses baseline evidence plus focused
+delta checks. The parent records the baseline run/subject, changed paths, affected
+checks, and remaining risk in Acceptance Notes, then revises final criteria to
+those checks when no full-suite trigger remains. This is an explicit contract
+scope decision, not reuse of a stale exact-context cache entry. Do not relabel
+the baseline full pass as a full pass for the new subject, and do not remove an
+explicit user/release requirement. An unknown impact or uncovered integration
+risk justifies a broader check; changed metadata, a new hash, or a cache miss
+alone does not. Freeze the revised scope before preparing new acceptance.
 
 ## Cutover Package Discipline
 
@@ -120,10 +256,13 @@ authority.
 2. **Falsifier first.** Port the two smallest units first and byte-diff them
    against the base SHA before touching the main body; if they need a
    subprocess or shell-only semantics to stay observable-identical, stop.
-3. **Full suite before reporting.** Scoped test groups are for iteration
-   only. The worker runs the complete `bun test` plus projection/type/
-   boundary checks before claiming RESULT; scoped-green with full-suite-red
-   is a known CI blind-spot pattern.
+3. **Risk-scoped acceptance.** Name the composition and boundary checks for
+   the cutover. Require a full suite only when those focused checks cannot
+   cover an observed cross-module risk or a release gate explicitly requires
+   it. Prepare expensive criteria once through `verify-sprint --prepare-acceptance`
+   after freezing code; declare each check once in the JSON
+   `Verification Plan` before that run. Workers and reviewers consume its
+   subject-bound results rather than executing independent copies.
 4. **Composition fixtures.** Parity suites must include end-to-end cases
    through the production entrypoint (`runHook()` or equivalent) and
    combined-feature differentials; single-feature fixtures miss joins,
@@ -148,7 +287,7 @@ authority.
 ## Review Coupling
 
 - A contract is not truly done until its typed `AcceptanceReceipt` records a contract-allowed final disposition.
-- `tasks/reviews/<plan-stem>.review.md` is a human-readable projection of the typed `AcceptanceReceipt` plus any manual observations. It is not an authoring authority. The receipt binds `Reviewed Subject SHA256` with scope `normalized-final-content`; target revision invalidates acceptance only when target movement overlaps reviewed paths.
+- `tasks/reviews/<plan-stem>.review.md` is a human-readable projection of the typed `AcceptanceReceipt` plus any manual observations. It is not an authoring authority. The receipt binds `Reviewed Subject SHA256` with scope `normalized-final-content`; its canonical verification evidence includes an exact-target `ReviewSelectionPacket`, so any target revision movement requires fresh prepared verification.
 - `tasks/notes/<plan-stem>.notes.md` captures task-local decisions and should be archived or promoted deliberately, not left as hidden long-term memory.
 - Closeout is promote-then-archive: durable truths move into `docs/architecture/`, `docs/researches/`, `docs/spec.md`, or `tasks/lessons.md` before `archive-workflow.sh` moves fulfilled plan/contract/review/notes/todo artifacts into `plans/archive/` and `tasks/archive/`.
 
@@ -182,4 +321,19 @@ evaluator never guesses semantic equivalence.
   recorded `started_at`, then falls back to the recorded `base_branch`; the next fresh
   worktree start records immutable provenance.
 - Execute the sprint in that linked worktree. The primary worktree remains a merge target and must stay clean before merge-back.
-- After implementation, run `repo-harness run verify-sprint --prepare-acceptance`, obtain exactly one semantic disposition from the contract-frozen reviewer (or an explicitly allowed typed user waiver), record the `AcceptanceReceipt`, then run `repo-harness run verify-sprint`. The final verification projects the receipt into the review file. The finish command consumes that same receipt, creates a provider-free exact local seal, and fast-forwards the target branch only when the target worktree is clean.
+- After implementation, run `repo-harness run verify-sprint --prepare-acceptance`, obtain exactly one semantic disposition from the contract-frozen reviewer (or an explicitly allowed typed user waiver), record the `AcceptanceReceipt`, then run `repo-harness run verify-sprint`. The final verification projects the receipt into the review file. The finish command consumes that same receipt, creates a provider-free exact local seal, applies the allowlisted lifecycle archive, and publishes one synthesized target commit whose tree is byte-identical to the verified lifecycle HEAD. The target base must remain frozen and its worktree must remain clean through publication.
+- When architecture projection policy is `automatic`, `--prepare-acceptance` materializes it before computing the review subject. The generated `docs/architecture/.projection-manifest.json` is an exact workflow-owned publication output and does not need to be repeated in every contract `allowed_paths`; every other generated architecture/context path still needs explicit contract scope and otherwise fails closed. Provider unavailability or a non-publishable projection status aborts preparation. After a synthesized commit containing a manifest delta lands, closeout verifies the exact clean published tree and advances the architecture drift cursor to that publication SHA; recovery retries this acknowledgement before committing its journal. Post-publication Stop projection is recovery only, and closeout never restores or discards a dirty target manifest.
+- On the primary checkout, a Stop drain whose only effect is a digest-only manifest restamp publishes itself as one single-path commit, so the steady state stays clean for those dirty gates instead of needing a manual batching commit. The classifier is the provider's own result — exactly one `update` entry for `docs/architecture/.projection-manifest.json` and no pending human action — so a semantic projection delta is never auto-committed. The git gate is fail-closed on top of that: primary worktree, attached local branch, clean index, the manifest as the only dirty tracked path, and no `commit.gpgsign`. The commit is synthesized with `commit-tree` plus an `update-ref` compare-and-swap, which runs no user hooks and reads no untracked or unstaged state, so staged content and working files are never swept in. Nothing is pushed and the architecture drift cursor is not touched; a publication that leaves the branch ahead of its remote prints one push advisory, and every skip or fault prints one advisory and still exits 0. `repo-harness architecture-projection publish-restamp --json` runs the same classifier, gate, and synthesis for manual recovery and exits non-zero unless it published.
+
+## Publication Granularity
+
+- The public history unit is one work-package, not one agent checkpoint, verifier transition, receipt projection, or archive step. `contract-worktree finish --merge` therefore adds exactly one commit to the target branch for the complete verified package.
+- Checkpoint commits remain legal on the linked source branch. They provide recovery and red/green traceability while work is active, but local publication does not copy their topology into the target branch. `finish --no-merge` deliberately retains them because PR shipping owns the later provider merge/squash boundary.
+- Product code, regression tests, required documentation, deterministic generated projections, and workflow closeout belong to the same publication commit. Standalone `WIP`, `fixup!`, `squash!`, acceptance rebind, contract fulfillment, review finalization, projection refresh, and archive-closeout commits are process state and must not land as target history.
+- A second public commit is allowed only for an external fact that cannot exist before publication, such as package-registry, deployment, notarization, or store readback. It may update only release/deploy/readback evidence and must not change product code, tests, or contract semantics.
+- Do not enforce granularity with changed-line or changed-file thresholds. A one-line correction may be a complete work-package; the deciding boundaries are independent rollback, verification, approval, consumer, and release ownership.
+- If two changes have independent rollback or acceptance boundaries, split them into separate work-packages rather than preserving multiple commits inside one package publication.
+- A synthesized publication honors `commit.gpgsign=true` by invoking `git commit-tree -S`; signing failure or an invalid signing-policy value aborts before target mutation. Repositories that do not configure signing retain the ordinary unsigned commit-tree path.
+- If the verified lifecycle tree already equals the frozen target tree, finish refuses to create an empty publication commit. Resolve the already-landed work-package through the explicit no-op/cleanup path instead of manufacturing public history.
+- Once target publication lands, any later in-process assertion or journal-write failure retains the source lifecycle state and in-progress journal. `recover reconcile` completes that exact effect; automatic abort may run only before publication is observable.
+- Recovery recognizes only one legacy shape: an in-progress pre-cutover finish journal with no `publication_prepared` phase whose recorded lifecycle HEAD is already an ancestor of the target. Keep this probe through the next major release so operators can `recover abort|reconcile` interrupted upgrades; before that major upgrade, resolve every such journal. Remove the fallback in that major once the transaction store contains no matching in-progress journal.

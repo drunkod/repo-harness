@@ -16,10 +16,9 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
 import {
-  helperRequiresExpensiveRunLock,
   helperTimeoutMs,
   runHelper,
-} from '../../src/cli/runtime/helper-runner';
+} from '../../src/effects/runtime/helper-runner';
 import { acquireExpensiveRunLock } from '../../src/effects/expensive-run-lock';
 import { acquireExclusiveDirectoryLock } from '../../src/effects/locking/exclusive-directory-lock';
 import { runProcess } from '../../src/effects/process-runner';
@@ -85,9 +84,35 @@ async function waitForChildProcess(parentPid: number, timeoutMs = 2_000): Promis
   throw new Error(`timed out waiting for child of ${parentPid}`);
 }
 
+function isPositiveSafePid(pid: number): pid is number {
+  return Number.isSafeInteger(pid) && pid > 0;
+}
+
+function readPositiveSafePid(path: string, label: string): number {
+  const raw = readFileSync(path, 'utf-8').trim();
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new Error(`${label} did not contain a positive PID`);
+  }
+  const pid = Number(raw);
+  if (!isPositiveSafePid(pid)) {
+    throw new Error(`${label} did not contain a safe PID`);
+  }
+  return pid;
+}
+
 function killIfPresent(pid: number, signal: NodeJS.Signals): void {
+  if (!isPositiveSafePid(pid)) return;
   try {
     process.kill(pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+  }
+}
+
+function killGroupIfPresent(pid: number | null, signal: NodeJS.Signals): void {
+  if (pid === null || !isPositiveSafePid(pid)) return;
+  try {
+    process.kill(-pid, signal);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
   }
@@ -118,22 +143,11 @@ describe('closeout runner guardrails', () => {
 
   test('helper identity selects immutable ordinary, verifier, and closeout budgets', () => {
     expect(helperTimeoutMs('check-task-workflow')).toBe(120_000);
-    expect(helperTimeoutMs('verify-contract')).toBe(1_260_000);
-    expect(helperTimeoutMs('verify-sprint')).toBe(1_260_000);
+    expect(helperTimeoutMs('verify-contract')).toBe(3_660_000);
+    expect(helperTimeoutMs('verify-sprint')).toBe(3_660_000);
     expect(helperTimeoutMs('contract-worktree')).toBe(900_000);
     expect(helperTimeoutMs('merge-gate')).toBe(900_000);
     expect(helperTimeoutMs('ship-worktrees')).toBe(900_000);
-  });
-
-  test('only canonical expensive helper modes acquire the shared Git lock', () => {
-    expect(helperRequiresExpensiveRunLock('verify-contract', [])).toBe(true);
-    expect(helperRequiresExpensiveRunLock('verify-sprint', [])).toBe(true);
-    expect(helperRequiresExpensiveRunLock('contract-worktree', ['finish'])).toBe(true);
-    expect(helperRequiresExpensiveRunLock('contract-worktree', ['start'])).toBe(false);
-    expect(helperRequiresExpensiveRunLock('ship-worktrees', ['--pr'])).toBe(true);
-    expect(helperRequiresExpensiveRunLock('ship-worktrees', ['--cleanup-merged'])).toBe(false);
-    expect(helperRequiresExpensiveRunLock('verify-sprint', ['--help'])).toBe(false);
-    expect(helperRequiresExpensiveRunLock('check-task-workflow', [])).toBe(false);
   });
 
   test('outer timeout terminates descendants that ignore TERM before they can publish a sentinel', async () => {
@@ -254,9 +268,11 @@ describe('closeout runner guardrails', () => {
     });
     await waitForPath(supervisorPidPath);
     await waitForPath(processGroupPidPath);
-    const supervisorPid = Number(readFileSync(supervisorPidPath, 'utf-8').trim());
-    const processGroupPid = Number(readFileSync(processGroupPidPath, 'utf-8').trim());
+    let supervisorPid: number | null = null;
+    let processGroupPid: number | null = null;
     try {
+      supervisorPid = readPositiveSafePid(supervisorPidPath, 'supervisor pid');
+      processGroupPid = readPositiveSafePid(processGroupPidPath, 'process group pid');
       const exitCode = await Promise.race([
         worker.exited,
         Bun.sleep(4_000).then(() => null),
@@ -273,19 +289,18 @@ describe('closeout runner guardrails', () => {
       );
       expect(processGroupExists(processGroupPid)).toBe(false);
     } finally {
-      killIfPresent(-processGroupPid, 'SIGKILL');
-      killIfPresent(supervisorPid, 'SIGKILL');
+      killGroupIfPresent(processGroupPid, 'SIGKILL');
+      if (supervisorPid !== null) killIfPresent(supervisorPid, 'SIGKILL');
       killIfPresent(worker.pid, 'SIGKILL');
     }
   }, 6_000);
 
-  test('expensive-lock wait consumes the helper deadline and reports timeout before target start', async () => {
+  test('expensive-lock wait consumes the command deadline and reports timeout before target start', async () => {
     const root = temporaryRoot('repo-harness-lock-wait-timeout-');
     initializeGitRepository(root);
     const holderStarted = join(root, 'holder-started');
     const targetStarted = join(root, 'target-started');
     const holderWorker = join(root, 'lock-holder.ts');
-    const sourceRoot = createVerifierRuntime(root, [`touch "${targetStarted}"`]);
     writeFileSync(holderWorker, [
       `import { acquireExpensiveRunLock } from ${JSON.stringify(join(ROOT, 'src/effects/expensive-run-lock.ts'))};`,
       "import { writeFileSync } from 'fs';",
@@ -300,18 +315,34 @@ describe('closeout runner guardrails', () => {
       cwd: root, stdout: 'pipe', stderr: 'pipe',
     });
     await waitForPath(holderStarted);
-    const result = runHelper({
-      helper: 'verify-sprint',
+    const result = runProcess('touch', [targetStarted], {
       cwd: root,
-      env: { REPO_HARNESS_SOURCE_ROOT: sourceRoot },
       stdio: 'pipe',
+      processGroup: true,
       timeoutMs: 50,
+      expensiveRunLock: { cwd: root, gitBin: 'git' },
     });
 
     expect(await holder.exited).toBe(0);
-    expect(result.reason).toBe('timeout');
+    expect(result.timedOut).toBe(true);
     expect(existsSync(targetStarted)).toBe(false);
   }, 30_000);
+
+  test('a read-only helper does not wait for the expensive command lane', () => {
+    const root = temporaryRoot('repo-harness-reader-lane-');
+    initializeGitRepository(root);
+    const started = join(root, 'reader-started');
+    const sourceRoot = createVerifierRuntime(root, [`touch "${started}"`]);
+    const holder = acquireExpensiveRunLock(root);
+    try {
+      const result = runHelper({ helper: 'verify-sprint', cwd: root,
+        env: { REPO_HARNESS_SOURCE_ROOT: sourceRoot }, stdio: 'pipe', timeoutMs: 1000 });
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(started)).toBe(true);
+    } finally {
+      holder.release();
+    }
+  });
 
   test('helper timeout releases the shared expensive-run token after group cleanup', async () => {
     if (process.platform === 'win32') return;
@@ -352,7 +383,7 @@ describe('closeout runner guardrails', () => {
     ]);
     const worker = join(root, 'helper-entrypoint.ts');
     writeFileSync(worker, [
-      `import { runHelper } from ${JSON.stringify(join(ROOT, 'src/cli/runtime/helper-runner.ts'))};`,
+      `import { runHelper } from ${JSON.stringify(join(ROOT, 'src/effects/runtime/helper-runner.ts'))};`,
       `const result = runHelper({ helper: 'verify-sprint', cwd: ${JSON.stringify(root)},`,
       `  env: { REPO_HARNESS_SOURCE_ROOT: ${JSON.stringify(sourceRoot)} }, stdio: 'pipe', timeoutMs: 10_000 });`,
       'process.exitCode = result.exitCode;',
@@ -370,17 +401,16 @@ describe('closeout runner guardrails', () => {
     expect(existsSync(sentinel)).toBe(false);
   }, 10_000);
 
-  test('a caller killed while waiting for the expensive lane can never start its helper', async () => {
+  test('a caller killed while waiting for the expensive lane can never start its command', async () => {
     if (process.platform === 'win32') return;
     const root = temporaryRoot('repo-harness-waiting-parent-loss-');
     initializeGitRepository(root);
     const targetStarted = join(root, 'target-started');
-    const sourceRoot = createVerifierRuntime(root, [`touch "${targetStarted}"`]);
     const worker = join(root, 'waiting-helper-entrypoint.ts');
     writeFileSync(worker, [
-      `import { runHelper } from ${JSON.stringify(join(ROOT, 'src/cli/runtime/helper-runner.ts'))};`,
-      `runHelper({ helper: 'verify-sprint', cwd: ${JSON.stringify(root)},`,
-      `  env: { REPO_HARNESS_SOURCE_ROOT: ${JSON.stringify(sourceRoot)} }, stdio: 'pipe', timeoutMs: 10_000 });`,
+      `import { runProcess } from ${JSON.stringify(join(ROOT, 'src/effects/process-runner.ts'))};`,
+      `runProcess('touch', [${JSON.stringify(targetStarted)}], { cwd: ${JSON.stringify(root)},`,
+      `  expensiveRunLock: { cwd: ${JSON.stringify(root)}, gitBin: 'git' }, processGroup: true, stdio: 'pipe', timeoutMs: 10_000 });`,
       '',
     ].join('\n'));
     const holder = acquireExpensiveRunLock(root);
@@ -629,7 +659,7 @@ describe('closeout runner guardrails', () => {
 
   test('the fixed source retains the ordinary default without making it closeout authority', () => {
     const processRunner = readFileSync(join(ROOT, 'src/effects/process-runner.ts'), 'utf-8');
-    const helperRunner = readFileSync(join(ROOT, 'src/cli/runtime/helper-runner.ts'), 'utf-8');
+    const helperRunner = readFileSync(join(ROOT, 'src/effects/runtime/helper-runner.ts'), 'utf-8');
     const ship = readFileSync(join(ROOT, 'scripts/ship-worktrees.sh'), 'utf-8');
     const result = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf-8' });
 

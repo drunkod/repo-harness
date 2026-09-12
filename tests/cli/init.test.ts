@@ -12,7 +12,7 @@ import {
 } from "fs";
 import { spawnSync } from "child_process";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { PassThrough, Writable } from "stream";
 import {
   runInit,
@@ -22,6 +22,12 @@ import {
   writeGlobalContextFiles,
 } from "../../src/cli/commands/init";
 import { configuredBrainRoot } from "../../src/cli/commands/brain-root";
+import {
+  cutoverMarkerPath,
+  inspectCutoverQuiescence,
+  isCutoverInstalled,
+  recordCutoverInstalled,
+} from "../../src/effects/state/coordination-cutover";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -30,6 +36,50 @@ const CODEGRAPH_INIT_TIMEOUT_MS = 30000;
 function makeExecutable(path: string, body: string): void {
   writeFileSync(path, body);
   chmodSync(path, 0o755);
+}
+
+// scripts/check-agent-tooling.sh resolves `skills` from PATH; the probe itself
+// only runs under --probe-skills-cli. This stub keeps both paths hermetic.
+function writeFakeSkillsCli(fakeBin: string): void {
+  makeExecutable(
+    join(fakeBin, "skills"),
+    `#!/bin/bash\nif [[ "$*" == "ls -g --json" ]]; then echo '[]'; exit 0; fi\nexit 1\n`,
+  );
+}
+
+function writeOfficialCodexPluginFixture(pluginRoot: string): void {
+  mkdirSync(join(pluginRoot, "scripts"), { recursive: true });
+  mkdirSync(join(pluginRoot, ".claude-plugin"), { recursive: true });
+  mkdirSync(join(pluginRoot, "schemas"), { recursive: true });
+  writeFileSync(join(pluginRoot, "scripts", "codex-companion.mjs"), "// fixture\n");
+  writeFileSync(join(pluginRoot, ".claude-plugin", "plugin.json"), JSON.stringify({
+    name: "codex",
+    version: "1.0.6",
+    author: { name: "OpenAI" },
+  }));
+  writeFileSync(join(pluginRoot, "schemas", "review-output.schema.json"), JSON.stringify({
+    required: ["verdict", "summary", "findings", "next_steps"],
+    properties: {
+      verdict: { enum: ["approve", "needs-attention"] },
+      findings: { items: { properties: { severity: { enum: ["critical", "high", "medium", "low"] } } } },
+    },
+  }));
+}
+
+function writeReadyOfficialCodexPluginCli(fakeBin: string, home: string): string {
+  const pluginRoot = join(home, '.claude', 'plugins', 'cache', 'openai-codex', 'codex', '1.0.6');
+  writeOfficialCodexPluginFixture(pluginRoot);
+  const claude = join(fakeBin, 'claude');
+  makeExecutable(claude, [
+    '#!/bin/bash',
+    'if [[ "$*" == "plugin list --json" ]]; then',
+    `  printf '%s\\n' '${JSON.stringify([{ id: 'codex@openai-codex', version: '1.0.6', enabled: true, installPath: pluginRoot }])}'`,
+    '  exit 0',
+    'fi',
+    'exit 9',
+    '',
+  ].join('\n'));
+  return claude;
 }
 
 function setupFakeSource(root: string): void {
@@ -96,7 +146,16 @@ function writeFakeCodegraph(fakeBin: string, logFile: string): void {
       "case \"${1:-}\" in",
       "  \"--version\") echo '0.9.6' ;;",
       "  \"status\")",
-      "    if [[ -f .codegraph/initialized ]]; then",
+      "    if [[ -f .codegraph/unavailable ]]; then",
+      "      echo 'Temporary status failure'",
+      "    elif [[ -f .codegraph/unknown ]]; then",
+      "      echo 'CodeGraph Status'",
+      "      echo 'Status output unavailable'",
+      "    elif [[ -f .codegraph/stale ]]; then",
+      "      echo 'CodeGraph Status'",
+      "      echo 'Pending Changes'",
+      "      echo 'Run \"codegraph sync\" to update the index'",
+      "    elif [[ -f .codegraph/initialized ]]; then",
       "      echo 'CodeGraph Status'",
       "      echo 'Index is up to date'",
       "    else",
@@ -231,6 +290,8 @@ describe("init command", () => {
       writeFileSync(join(home, ".agents", "rules", "chinese.md"), "zh\n");
       writeFileSync(join(home, ".agents", "rules", "durable-context.md"), "durable\n");
       writeFileSync(join(home, ".agents", "rules", "english.md"), "en\n");
+      writeFakeSkillsCli(fakeBin);
+      const claude = writeReadyOfficialCodexPluginCli(fakeBin, home);
       makeExecutable(
         join(fakeBin, "bunx"),
         `#!/bin/bash\nprintf '%s\\n' "$*" >> "${bunxLog}"\nexit 0\n`,
@@ -247,6 +308,7 @@ describe("init command", () => {
           ...process.env,
           HOME: home,
           PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          REPO_HARNESS_CLAUDE_EXECUTABLE: claude,
         },
       });
 
@@ -578,6 +640,171 @@ describe("init command", () => {
     }
   }, CODEGRAPH_INIT_TIMEOUT_MS);
 
+  test("enabled applied init fails closed when the CodeGraph CLI is missing", () => {
+    const tmp = join(tmpdir(), `repo-harness-init-codegraph-missing-${Date.now()}`);
+    const source = join(tmp, "source");
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    try {
+      mkdirSync(source, { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(home, { recursive: true });
+      setupFakeSource(source);
+
+      const result = runInit({
+        repo,
+        sourceRoot: source,
+        syncSkill: false,
+        hostAdapters: false,
+        externalSkills: false,
+        verify: false,
+        env: {
+          ...process.env,
+          HOME: home,
+          AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
+          AGENTIC_DEV_CODEGRAPH_ALLOW_GLOBAL: "0",
+        },
+      });
+
+      const codegraphStep = result.steps.find((step) => step.step === "ensure codegraph index");
+      expect(result.exitCode).toBe(1);
+      expect(codegraphStep?.status).toBe("failed");
+      expect(codegraphStep?.detail).toContain("index unavailable");
+      expect(codegraphStep?.stderr).toContain("install with: bun add -g @colbymchenry/codegraph");
+      expect(codegraphStep?.stderr).toContain("repo-harness tools configure codegraph --target codex --location global");
+      expect(codegraphStep?.stderr).toContain("then run: codegraph init -i . && codegraph sync .");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, CODEGRAPH_INIT_TIMEOUT_MS);
+
+  test("enabled applied init fails closed when the CodeGraph index remains stale", () => {
+    const tmp = join(tmpdir(), `repo-harness-init-codegraph-stale-${Date.now()}`);
+    const source = join(tmp, "source");
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const fakeBin = join(tmp, "bin");
+    const logFile = join(tmp, "codegraph.log");
+    try {
+      mkdirSync(source, { recursive: true });
+      mkdirSync(join(repo, ".codegraph"), { recursive: true });
+      mkdirSync(home, { recursive: true });
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(join(repo, ".codegraph", "stale"), "stale\n");
+      setupFakeSource(source);
+      writeFakeCodegraph(fakeBin, logFile);
+
+      const result = runInit({
+        repo,
+        sourceRoot: source,
+        syncSkill: false,
+        hostAdapters: false,
+        externalSkills: false,
+        verify: false,
+        syncCodegraph: true,
+        env: {
+          ...process.env,
+          HOME: home,
+          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
+        },
+      });
+
+      const codegraphStep = result.steps.find((step) => step.step === "ensure codegraph index");
+      expect(result.exitCode).toBe(1);
+      expect(codegraphStep?.status).toBe("failed");
+      expect(codegraphStep?.detail).toContain("index stale");
+      expect(codegraphStep?.stderr).toContain("run: codegraph sync .");
+      expect(readFileSync(logFile, "utf8")).toContain("codegraph sync .");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, CODEGRAPH_INIT_TIMEOUT_MS);
+
+  test("enabled applied init fails closed with a diagnostic command when the CodeGraph index status is unknown", () => {
+    const tmp = join(tmpdir(), `repo-harness-init-codegraph-unknown-${Date.now()}`);
+    const source = join(tmp, "source");
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const fakeBin = join(tmp, "bin");
+    const logFile = join(tmp, "codegraph.log");
+    try {
+      mkdirSync(source, { recursive: true });
+      mkdirSync(join(repo, ".codegraph"), { recursive: true });
+      mkdirSync(home, { recursive: true });
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(join(repo, ".codegraph", "unknown"), "unknown\n");
+      setupFakeSource(source);
+      writeFakeCodegraph(fakeBin, logFile);
+
+      const result = runInit({
+        repo,
+        sourceRoot: source,
+        syncSkill: false,
+        hostAdapters: false,
+        externalSkills: false,
+        verify: false,
+        env: {
+          ...process.env,
+          HOME: home,
+          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
+        },
+      });
+
+      const codegraphStep = result.steps.find((step) => step.step === "ensure codegraph index");
+      expect(result.exitCode).toBe(1);
+      expect(codegraphStep?.status).toBe("failed");
+      expect(codegraphStep?.detail).toContain("index unknown");
+      expect(codegraphStep?.stderr).toContain("inspect with: codegraph status .");
+      expect(codegraphStep?.stderr).not.toContain("codegraph init -i .");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, CODEGRAPH_INIT_TIMEOUT_MS);
+
+  test("enabled applied init diagnoses unreadable status without reinstalling an available CodeGraph CLI", () => {
+    const tmp = join(tmpdir(), `repo-harness-init-codegraph-unavailable-${Date.now()}`);
+    const source = join(tmp, "source");
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const fakeBin = join(tmp, "bin");
+    const logFile = join(tmp, "codegraph.log");
+    try {
+      mkdirSync(source, { recursive: true });
+      mkdirSync(join(repo, ".codegraph"), { recursive: true });
+      mkdirSync(home, { recursive: true });
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(join(repo, ".codegraph", "unavailable"), "unavailable\n");
+      setupFakeSource(source);
+      writeFakeCodegraph(fakeBin, logFile);
+
+      const result = runInit({
+        repo,
+        sourceRoot: source,
+        syncSkill: false,
+        hostAdapters: false,
+        externalSkills: false,
+        verify: false,
+        env: {
+          ...process.env,
+          HOME: home,
+          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
+        },
+      });
+
+      const codegraphStep = result.steps.find((step) => step.step === "ensure codegraph index");
+      expect(result.exitCode).toBe(1);
+      expect(codegraphStep?.status).toBe("failed");
+      expect(codegraphStep?.detail).toContain("index unavailable");
+      expect(codegraphStep?.stderr).toContain("inspect with: codegraph status .");
+      expect(codegraphStep?.stderr).not.toContain("install with:");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, CODEGRAPH_INIT_TIMEOUT_MS);
+
   test("init reports CodeGraph readiness exceptions as a structured failed step", () => {
     const tmp = join(tmpdir(), `repo-harness-init-codegraph-failure-${Date.now()}`);
     const source = join(tmp, "source");
@@ -630,13 +857,13 @@ describe("init command", () => {
       const first = writeGlobalContextFiles(
         source,
         "both",
-        { reportLanguageInstruction: "Use Chinese to report to user." },
+        { reportLanguageInstruction: "Use Chinese to report to user.", reportLanguagePreset: "zh-CN" },
         { ...process.env, HOME: home },
       );
       const second = writeGlobalContextFiles(
         source,
         "both",
-        { reportLanguageInstruction: "Use Chinese to report to user." },
+        { reportLanguageInstruction: "Use Chinese to report to user.", reportLanguagePreset: "zh-CN" },
         { ...process.env, HOME: home },
       );
 
@@ -685,7 +912,7 @@ describe("init command", () => {
       const result = writeGlobalContextFiles(
         source,
         "codex",
-        { reportLanguageInstruction: "Use Chinese to report to user." },
+        { reportLanguageInstruction: "Use Chinese to report to user.", reportLanguagePreset: "zh-CN" },
         { ...process.env, HOME: home },
       );
 
@@ -710,7 +937,7 @@ describe("init command", () => {
       const result = writeGlobalContextFiles(
         source,
         "codex",
-        { reportLanguageInstruction: "Use Chinese to report to user." },
+        { reportLanguageInstruction: "Use Chinese to report to user.", reportLanguagePreset: "zh-CN" },
         { ...process.env, HOME: undefined, USERPROFILE: home } as NodeJS.ProcessEnv,
       );
 
@@ -741,7 +968,7 @@ describe("init command", () => {
       const result = writeGlobalContextFiles(
         source,
         "codex",
-        { reportLanguageInstruction: "Use Chinese to report to user." },
+        { reportLanguageInstruction: "Use Chinese to report to user.", reportLanguagePreset: "zh-CN" },
         { ...process.env, HOME: home },
       );
 
@@ -785,15 +1012,17 @@ describe("init command", () => {
       mkdirSync(home, { recursive: true });
       mkdirSync(fakeBin, { recursive: true });
       setupFakeSource(source);
+      const claude = writeReadyOfficialCodexPluginCli(fakeBin, home);
       writeFakeCodegraph(fakeBin, codegraphLog);
+      writeFakeSkillsCli(fakeBin);
       makeExecutable(join(fakeBin, "bunx"), `#!/bin/bash\nprintf '%s\\n' "$*" >> "${bunxLog}"\nexit 0\n`);
 
       const input = new PassThrough();
-      // Answers, in prompt order: host target, reporting language (English),
-      // brain location, brain mode, external skills confirm, CodeGraph
-      // confirm, final "Proceed" confirm. Blank lines take each prompt's
-      // default (defaults to "yes" for the two new confirms), preserving
-      // today's default-on outcome.
+      // Answers, in prompt order: host target, human-facing language
+      // (English), brain location, brain mode, external skills confirm,
+      // CodeGraph confirm, final "Proceed" confirm. Blank lines take each
+      // prompt's default (defaults to "yes" for the two new confirms),
+      // preserving today's default-on outcome.
       ["\n", "3\n", "\n", "\n", "\n", "\n", "y\n"].forEach((answer, index) => {
         setTimeout(() => input.write(answer), index * 5);
       });
@@ -816,14 +1045,23 @@ describe("init command", () => {
           ...process.env,
           HOME: home,
           PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          REPO_HARNESS_CLAUDE_EXECUTABLE: claude,
           AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
         },
       });
 
       expect(result.exitCode).toBe(0);
+      expect(result.steps.find((step) => step.step === "official Codex plugin")).toMatchObject({
+        status: "ok",
+        detail: expect.stringContaining("version=1.0.6"),
+      });
       expect(result.steps.find((step) => step.step === "global working rules")?.status).toBe("ok");
       expect(result.steps.find((step) => step.step === "ensure brain root")?.detail).toBe(join(home, "Documents", "brain"));
       expect(readFileSync(join(home, ".codex", "AGENTS.md"), "utf-8")).toContain("Use English to report to user.");
+      expect(outputChunks.join("")).toContain("documentation_language=en");
+      expect(
+        JSON.parse(readFileSync(join(repo, ".ai/harness/policy.json"), "utf-8")).documentation.language,
+      ).toBe("en");
       expect(readFileSync(bunxLog, "utf-8")).toContain("skills add tw93/Waza");
       expect(readFileSync(codegraphLog, "utf-8")).toContain("codegraph sync .");
       expect(outputChunks.join("")).toContain("externalSkills=true");
@@ -846,10 +1084,11 @@ describe("init command", () => {
       setupFakeSource(source);
 
       const input = new PassThrough();
-      // Same prompt order as above, but decline both new confirms ("n").
-      // Neither bunx nor codegraph should be invoked, so no fake binaries
-      // are needed on PATH for this run.
-      ["\n", "3\n", "\n", "\n", "n\n", "n\n", "y\n"].forEach((answer, index) => {
+      // Same prompt order as above, but take the default human-facing
+      // language ("Follow user's language") and decline both new confirms
+      // ("n"). Neither bunx nor codegraph should be invoked, so no fake
+      // binaries are needed on PATH for this run.
+      ["\n", "\n", "\n", "\n", "n\n", "n\n", "y\n"].forEach((answer, index) => {
         setTimeout(() => input.write(answer), index * 5);
       });
       setTimeout(() => input.end(), 40);
@@ -880,10 +1119,110 @@ describe("init command", () => {
       expect(result.steps.find((step) => step.step === "ensure codegraph index")?.detail).toBe("disabled");
       expect(outputChunks.join("")).toContain("externalSkills=false");
       expect(outputChunks.join("")).toContain("CodeGraph=skip");
+      // The single question drives both projections: the host reporting
+      // sentence and the repo-level human-facing document language.
+      expect(outputChunks.join("")).toContain("documentation_language=follow-user");
+      expect(readFileSync(join(home, ".codex", "AGENTS.md"), "utf-8")).toContain(
+        "Use the user's language for reports; keep technical terms in English.",
+      );
+      expect(
+        JSON.parse(readFileSync(join(repo, ".ai/harness/policy.json"), "utf-8")).documentation.language,
+      ).toBe("follow-user");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
   }, CODEGRAPH_INIT_TIMEOUT_MS);
+});
+
+/**
+ * The shared lease cutover is one-shot. Live contract worktrees are the normal
+ * steady state of an adopted repository, so a permanently armed quiescence gate
+ * would refuse every later `init` -- including upgrades that have nothing to do
+ * with sprint leases. Both directions are asserted here.
+ */
+describe("init cutover quiescence gate", () => {
+  function liveContractWorktreeRepo(tmp: string): { source: string; repo: string } {
+    const source = join(tmp, "source");
+    const repo = join(tmp, "repo");
+    mkdirSync(source, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    setupFakeSource(source);
+    expect(spawnSync("git", ["init", "-q"], { cwd: repo }).status).toBe(0);
+    writeFileSync(join(repo, "README.md"), "fixture\n");
+    expect(spawnSync("git", ["add", "-A"], { cwd: repo }).status).toBe(0);
+    expect(
+      spawnSync("git", ["-c", "user.email=t@e.st", "-c", "user.name=t", "commit", "-qm", "base"], {
+        cwd: repo,
+      }).status,
+    ).toBe(0);
+
+    // A linked worktree carrying its own contract metadata: exactly the
+    // `executing_contract_worktree` blocker the gate reports.
+    const live = join(tmp, "live");
+    expect(spawnSync("git", ["worktree", "add", "-q", live, "-b", "codex/live"], { cwd: repo }).status).toBe(0);
+    mkdirSync(join(live, ".ai", "harness", "worktrees"), { recursive: true });
+    writeFileSync(join(live, ".ai", "harness", "worktrees", "codex-live.json"), "{}\n");
+
+    return { source, repo };
+  }
+
+  const initOptions = {
+    syncSkill: false,
+    hostAdapters: false,
+    externalSkills: false,
+    verify: false,
+    codegraph: false,
+  } as const;
+
+  test("refuses to apply while the plane is absent and execution state is live", () => {
+    const tmp = join(tmpdir(), `init-cutover-absent-${Date.now()}`);
+    try {
+      const { source, repo } = liveContractWorktreeRepo(tmp);
+      expect(isCutoverInstalled(repo)).toBe(false);
+
+      const result = runInit({ repo, sourceRoot: source, ...initOptions });
+
+      expect(result.exitCode).toBe(1);
+      const gate = result.steps.find((step) => step.step === "cutover quiescence");
+      expect(gate?.status).toBe("failed");
+      expect(gate?.stderr).toContain("executing_contract_worktree");
+      // Fail-closed means nothing was applied and nothing was marked.
+      expect(existsSync(join(repo, ".ai", "harness", "workflow-contract.json"))).toBe(false);
+      expect(isCutoverInstalled(repo)).toBe(false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  test("does not refuse once the plane is installed, even with live contract worktrees", () => {
+    const tmp = join(tmpdir(), `init-cutover-installed-${Date.now()}`);
+    try {
+      const { source, repo } = liveContractWorktreeRepo(tmp);
+      recordCutoverInstalled(cutoverMarkerPath(repo)!);
+      expect(isCutoverInstalled(repo)).toBe(true);
+      // The blockers are still live; the marker is what makes the gate inert.
+      expect(inspectCutoverQuiescence(repo).quiescent).toBe(false);
+
+      const result = runInit({ repo, sourceRoot: source, ...initOptions });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.steps.find((step) => step.step === "cutover quiescence")).toBeUndefined();
+      expect(existsSync(join(repo, ".ai", "harness", "workflow-contract.json"))).toBe(true);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  test("an empty coordination directory does not read as installed", () => {
+    const tmp = join(tmpdir(), `init-cutover-empty-${Date.now()}`);
+    try {
+      const { repo } = liveContractWorktreeRepo(tmp);
+      mkdirSync(dirname(cutoverMarkerPath(repo)!), { recursive: true });
+      expect(isCutoverInstalled(repo)).toBe(false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30000);
 });
 
 describe("bundled host runtimes", () => {
@@ -917,7 +1256,10 @@ describe("bundled host runtimes", () => {
       mkdirSync(home, { recursive: true });
       makeSource(source);
 
-      const steps = syncCrossReviewSkills(source, "both", { ...process.env, HOME: home });
+      const fakeBin = join(tmp, 'bin');
+      mkdirSync(fakeBin, { recursive: true });
+      const claude = writeReadyOfficialCodexPluginCli(fakeBin, home);
+      const steps = syncCrossReviewSkills(source, "both", { ...process.env, HOME: home, REPO_HARNESS_CLAUDE_EXECUTABLE: claude });
 
       expect(steps.every((s) => s.status === "ok")).toBe(true);
       expect(existsSync(join(home, ".claude", "skills", "repo-harness-cross-review", "SKILL.md"))).toBe(true);
@@ -926,8 +1268,78 @@ describe("bundled host runtimes", () => {
       expect(existsSync(join(home, ".claude", "skills", "claude-plan", "SKILL.md"))).toBe(false);
       expect(existsSync(join(home, ".claude", "skills", "merge-gate", "SKILL.md"))).toBe(false);
 
-      const again = syncCrossReviewSkills(source, "both", { ...process.env, HOME: home });
+      const again = syncCrossReviewSkills(source, "both", { ...process.env, HOME: home, REPO_HARNESS_CLAUDE_EXECUTABLE: claude });
       expect(again.some((s) => /already present/.test(s.detail ?? ""))).toBe(true);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("Codex target installs the official OpenAI plugin without enabling Review Gate", () => {
+    const tmp = join(tmpdir(), `cross-review-plugin-install-${Date.now()}`);
+    const source = join(tmp, "source");
+    const home = join(tmp, "home");
+    const fakeBin = join(tmp, "bin");
+    const claude = join(fakeBin, "claude");
+    const installed = join(tmp, "installed");
+    const log = join(tmp, "claude.log");
+    const pluginRoot = join(home, ".claude", "plugins", "cache", "openai-codex", "codex", "1.0.6");
+    try {
+      mkdirSync(source, { recursive: true });
+      mkdirSync(home, { recursive: true });
+      mkdirSync(fakeBin, { recursive: true });
+      writeOfficialCodexPluginFixture(pluginRoot);
+      makeSource(source);
+      makeExecutable(claude, [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        `printf '%s\\n' "$*" >> "${log}"`,
+        'case "$*" in',
+        '  "plugin list --json")',
+        `    if [[ -f "${installed}" ]]; then printf '%s\\n' '${JSON.stringify([{ id: 'codex@openai-codex', version: '1.0.6', enabled: true, installPath: pluginRoot }])}'; else echo '[]'; fi`,
+        '    ;;',
+        '  "plugin marketplace list --json") echo "[]" ;;',
+        '  "plugin marketplace add openai/codex-plugin-cc") ;;',
+        `  "plugin install codex@openai-codex -s user -y") touch "${installed}" ;;`,
+        '  *) exit 9 ;;',
+        'esac',
+        '',
+      ].join("\n"));
+      const steps = syncCrossReviewSkills(source, "codex", {
+        ...process.env,
+        HOME: home,
+        REPO_HARNESS_CLAUDE_EXECUTABLE: claude,
+      });
+      expect(steps.find((step) => step.step === "official Codex plugin")?.status).toBe("ok");
+      const commands = readFileSync(log, "utf-8");
+      expect(commands).toContain("plugin marketplace add openai/codex-plugin-cc");
+      expect(commands).toContain("plugin install codex@openai-codex -s user -y");
+      expect(commands).not.toContain("review-gate");
+      expect(commands).not.toContain("setup");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("Codex target fails readiness when the enabled official plugin install is incomplete", () => {
+    const tmp = join(tmpdir(), `cross-review-plugin-invalid-${Date.now()}`);
+    const source = join(tmp, "source");
+    const home = join(tmp, "home");
+    const fakeBin = join(tmp, "bin");
+    try {
+      mkdirSync(source, { recursive: true });
+      mkdirSync(fakeBin, { recursive: true });
+      makeSource(source);
+      const claude = writeReadyOfficialCodexPluginCli(fakeBin, home);
+      rmSync(join(home, ".claude", "plugins", "cache", "openai-codex", "codex", "1.0.6", "scripts", "codex-companion.mjs"));
+      const steps = syncCrossReviewSkills(source, "codex", {
+        ...process.env,
+        HOME: home,
+        REPO_HARNESS_CLAUDE_EXECUTABLE: claude,
+      });
+      const plugin = steps.find((step) => step.step === "official Codex plugin");
+      expect(plugin?.status).toBe("failed");
+      expect(plugin?.detail ?? plugin?.stderr).toContain("missing safely-contained companion");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -962,7 +1374,10 @@ describe("bundled host runtimes", () => {
       expect(existsSync(join(claudeHome, ".codex", "skills", "repo-harness-cross-review", "SKILL.md"))).toBe(false);
       expect(existsSync(join(claudeHome, ".codex", "skills", "claude-plan", "SKILL.md"))).toBe(false);
 
-      syncCrossReviewSkills(source, "codex", { ...process.env, HOME: codexHome });
+      const fakeBin = join(tmp, 'bin');
+      mkdirSync(fakeBin, { recursive: true });
+      const claude = writeReadyOfficialCodexPluginCli(fakeBin, codexHome);
+      syncCrossReviewSkills(source, "codex", { ...process.env, HOME: codexHome, REPO_HARNESS_CLAUDE_EXECUTABLE: claude });
       expect(existsSync(join(codexHome, ".codex", "skills", "repo-harness-cross-review", "SKILL.md"))).toBe(true);
       expect(existsSync(join(codexHome, ".codex", "skills", "claude-plan", "SKILL.md"))).toBe(true);
       expect(existsSync(join(codexHome, ".claude", "skills", "repo-harness-cross-review", "SKILL.md"))).toBe(false);
@@ -989,7 +1404,10 @@ describe("bundled host runtimes", () => {
         join(source, "assets", "skill-commands", "manifest.json"),
       );
 
-      const steps = syncCrossReviewSkills(source, "both", { ...process.env, HOME: home });
+      const fakeBin = join(tmp, 'bin');
+      mkdirSync(fakeBin, { recursive: true });
+      const claude = writeReadyOfficialCodexPluginCli(fakeBin, home);
+      const steps = syncCrossReviewSkills(source, "both", { ...process.env, HOME: home, REPO_HARNESS_CLAUDE_EXECUTABLE: claude });
       expect(steps.every((s) => s.status !== "failed")).toBe(true);
       expect(steps.some((s) => s.status === "skipped")).toBe(true);
     } finally {

@@ -1,5 +1,7 @@
-import { readFileSync, readdirSync, statSync } from 'fs';
-import { posix, win32 } from 'path';
+import { artifactRepairPath } from '../../core/state/artifact-repair';
+import { readFileSync, readdirSync, realpathSync, statSync } from 'fs';
+import { execFileSync } from 'child_process';
+import { isAbsolute, posix, win32 } from 'path';
 import { buildReviewSubject, isImplementationSurfacePath } from '../review/diff-fingerprint';
 import { resolveWorkflowProfile, type WorkflowProfile } from '../../core/workflow/profile';
 import {
@@ -611,6 +613,21 @@ function resolveEffectiveStateUnlocked(
     explicitOverride: options.risk?.explicitOverride ?? (contractOverride as WorkflowProfile | null) ?? undefined,
   });
 
+  const worktreeOwnerIsCurrent = Boolean(owner && safeRealpath(owner) === currentWorktree);
+  const strictProfile = riskResolution.ok && riskResolution.profile === 'strict';
+  // Ownership alone also matches the primary checkout. Resolve Git isolation
+  // here and bind it to the authority revision consumed by the edit guard.
+  let isolatedContractWorktree = false;
+  if (strictProfile && worktreeOwnerIsCurrent) {
+    const directories = execFileSync('git', [
+      'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir',
+    ], { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trimEnd().split('\n');
+    if (directories.length !== 2 || directories.some((path) => !isAbsolute(path))) {
+      throw new Error('Git worktree directories are unavailable or malformed');
+    }
+    isolatedContractWorktree = realpathSync(directories[0]!) !== realpathSync(directories[1]!);
+  }
+
   // Capability registry reasons are appended to profile_reasons alongside
   // resolveWorkflowProfile's own reasons rather than folded into the resolver
   // itself -- the risk-floor ranking formula is untouched; only the reason
@@ -635,6 +652,8 @@ function resolveEffectiveStateUnlocked(
   const reviewText = readText(cwd, reviewPath);
   const reviewSubjectSha256 = reviewSubject.status === 'ok' ? reviewSubject.review_subject_sha256 : null;
   const checksText = readText(cwd, CHECKS_PATH);
+  const repairPath = artifactRepairPath(checksText);
+  const artifactRepairText = readText(cwd, repairPath);
   const sprintPath = readTrimmed(cwd, ACTIVE_SPRINT_MARKER);
   const taskId = planPath ? artifactStemFromPlan(planPath, planText) : null;
 
@@ -655,12 +674,14 @@ function resolveEffectiveStateUnlocked(
     active_sprint_marker: sourceHash(cwd, ACTIVE_SPRINT_MARKER),
     active_sprint_file: sprintPath ? sourceHash(cwd, sprintPath) : sha256('missing:active-sprint-file'),
     task_identity: sha256(taskId ?? 'missing:task-id'),
+    ...(strictProfile ? { isolated_contract_worktree: sha256(String(isolatedContractWorktree)) } : {}),
   });
   const subjectRevision = contentRevision({
     review_subject: reviewSubjectSha256 ?? sha256('unavailable:review-subject'),
     target_rev: reviewSubject.status === 'ok' ? sha256(reviewSubject.target_rev) : sha256('unavailable:target-rev'),
   });
   const evidenceRevision = contentRevision({
+    ...(repairPath ? { artifact_repair: artifactRepairText !== null ? sha256(artifactRepairText) : sha256('missing:artifact-repair') } : {}),
     checks: checksText !== null ? sha256(checksText) : sha256('missing:checks'),
     review: reviewText !== null ? sha256(reviewText) : sha256('missing:review'),
     // Bound to the subject: evidence recomputed against a new subject is
@@ -686,6 +707,7 @@ function resolveEffectiveStateUnlocked(
     ...(contractPath ? [contractPath] : []),
     ...(reviewPath ? [reviewPath] : []),
     CHECKS_PATH,
+    ...(repairPath ? [repairPath] : []),
     ACTIVE_SPRINT_MARKER,
     ...(sprintPath ? [sprintPath] : []),
     HANDOFF_PATH,
@@ -726,12 +748,14 @@ function resolveEffectiveStateUnlocked(
     },
     checksPath: CHECKS_PATH,
     checksText,
+    artifactRepairText,
     sprintPath,
     sprintExists: Boolean(sprintPath && fileExists(cwd, sprintPath)),
     activeWorktreePath: ACTIVE_WORKTREE_MARKER,
     currentWorktree,
     worktreeOwner: owner,
-    worktreeOwnerIsCurrent: Boolean(owner && safeRealpath(owner) === currentWorktree),
+    worktreeOwnerIsCurrent,
+    isolatedContractWorktree,
     handoffPath: HANDOFF_PATH,
     handoffText,
     resumePath: RESUME_PATH,
@@ -748,6 +772,19 @@ function resolveEffectiveStateUnlocked(
   });
 }
 
+
+/**
+ * Thrown when the stability contract exhausts its bounded re-reads because an
+ * authority source kept changing across them. Sustained concurrent authority
+ * churn, not an unresolvable workflow profile, so callers classify this by type
+ * and may retry.
+ */
+export class StateResolutionUnstableError extends Error {
+  constructor() {
+    super('workflow authority changed repeatedly while resolving effective state');
+    this.name = 'StateResolutionUnstableError';
+  }
+}
 
 /**
  * Run one stable-resolve + version-commit attempt. The version lock's
@@ -802,7 +839,7 @@ export function resolveEffectiveState(
       return resolveAndCommitEffectiveState(cwd, nowMs, risk, publicationEffects);
     } catch (error) {
       if (error instanceof StateVersionConfirmMismatchError) {
-        throw new Error('workflow authority changed repeatedly while resolving effective state');
+        throw new StateResolutionUnstableError();
       }
       throw error;
     }
@@ -832,7 +869,7 @@ function resolveStableEffectiveState(
     }
     state = confirmed;
   }
-  throw new Error('workflow authority changed repeatedly while resolving effective state');
+  throw new StateResolutionUnstableError();
 }
 
 export function buildStateSnapshotFromEffectiveState(

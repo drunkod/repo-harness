@@ -3,8 +3,11 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import { buildReviewSubject } from '../src/effects/review/diff-fingerprint';
+import { assessChange, buildReviewSelectionPacket } from '../src/core/review/change-assessment';
 import { recordAcceptance, verifyAcceptance } from '../scripts/acceptance-receipt';
+import { emptyVerificationEvaluation, withEmptyVerificationPlan } from './helpers/verification-plan-fixture';
 
 const tempDirs: string[] = [];
 afterEach(() => { for (const path of tempDirs.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -17,11 +20,12 @@ function git(cwd: string, ...args: string[]): string {
 function commit(cwd: string, message: string): void { git(cwd, 'add', '-A'); git(cwd, 'commit', '-m', message); }
 
 function contract(): string {
-  return [
+  return withEmptyVerificationPlan([
     '# Task Contract: demo', '', '> **Status**: Active', '> **Plan**: plans/plan-demo.md',
     '> **Owner**: kito', '', '## Acceptance Policy', '', '```json',
     '{"protocol":1,"reviewer":"Claude","user_waiver":"allowed"}', '```', '',
-  ].join('\n');
+    '## Change Assessment', '', '```json', '{"protocol":1,"oracles":[]}', '```', '',
+  ].join('\n'));
 }
 
 /**
@@ -41,6 +45,35 @@ function deepSortKeys<T>(value: T): T {
   return out as unknown as T;
 }
 
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+}
+
+function changeAssessmentEvidence(subject: ReturnType<typeof buildReviewSubject>): Record<string, unknown> {
+  const assessment = assessChange({
+    subject,
+    workflowProfile: 'lite',
+    strictCategories: [],
+    patternNoveltyPaths: [],
+    declaredOracles: [],
+  });
+  if (assessment.status !== 'ready') throw new Error('fixture assessment must be ready');
+  const selection_packet = buildReviewSelectionPacket(assessment);
+  const basis = {
+    schema: 'repo-harness-change-assessment-evidence.v1',
+    status: 'pass',
+    assessment,
+    selection_packet,
+  };
+  return {
+    ...basis,
+    evidence_sha256: `sha256:${createHash('sha256').update(stableJson(basis)).digest('hex')}`,
+  };
+}
+
 function passingChecks(root: string): Record<string, unknown> {
   const subject = buildReviewSubject(root, { targetRef: 'main' });
   expect(subject.status).toBe('ok');
@@ -58,9 +91,14 @@ function passingChecks(root: string): Record<string, unknown> {
       { name: 'contract', status: 'pass' },
       { name: 'review', status: 'pass' },
       { name: 'allowed_paths', status: 'pass' },
+      { name: 'change_assessment', status: 'pass' },
     ],
-    contract: { file: 'tasks/contracts/demo.contract.md' },
+    contract: {
+      file: 'tasks/contracts/demo.contract.md',
+      execution_evaluation: emptyVerificationEvaluation(root, 'tasks/contracts/demo.contract.md'),
+    },
     review: { file: 'tasks/reviews/demo.review.md' },
+    change_assessment: changeAssessmentEvidence(subject),
   };
 }
 

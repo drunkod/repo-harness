@@ -18,6 +18,7 @@ type FixtureOptions = {
   readonly checks?: unknown;
   readonly review?: string;
   readonly minimalChange?: 'off' | 'advice';
+  readonly acceptancePolicy?: string;
 };
 
 type Invocation = {
@@ -99,7 +100,7 @@ function fixture(options: FixtureOptions = {}): { root: string; cleanup(): void 
       '## Acceptance Policy',
       '',
       '```json',
-      '{"protocol":1,"reviewer":"Claude","user_waiver":"allowed"}',
+      options.acceptancePolicy ?? '{"protocol":1,"reviewer":"Claude","user_waiver":"allowed"}',
       '```',
       '',
     ].join('\n'));
@@ -178,6 +179,21 @@ describe('typed UserPromptSubmit.default handler', () => {
     }
   }, 30_000);
 
+  test('protocol 2 Codex-host guidance records source=codex-plugin', () => {
+    const repo = fixture({
+      contract: true,
+      acceptancePolicy: '{"protocol":2,"reviewer":"Codex","source":"codex-plugin","user_waiver":"allowed"}',
+    });
+    try {
+      const { result } = invoke(repo.root, '/check', { env: { HOOK_HOST: 'codex' } });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('Peer reviewer: Codex via repo-harness-cross-review');
+      expect(result.stdout).toContain('--reviewer "Codex" --source "codex-plugin"');
+    } finally {
+      repo.cleanup();
+    }
+  }, 30_000);
+
   test('long plan prose with a literal Completed token does not trigger done', () => {
     const repo = fixture({ contract: true });
     try {
@@ -227,6 +243,7 @@ describe('typed UserPromptSubmit.default handler', () => {
       expect(result.stdout).toContain('archived');
       expect(commands.filter((args) => args.includes('archive-workflow'))).toHaveLength(1);
       expect(commands.some((args) => args.includes('acceptance-receipt'))).toBe(true);
+      expect(commands.some((args) => args.includes('verify-contract'))).toBe(false);
     } finally {
       repo.cleanup();
     }
@@ -308,17 +325,17 @@ describe('typed UserPromptSubmit.default handler', () => {
     }
   }, 30_000);
 
-  test('done blocks when contract verification fails before archive', () => {
+  test('done blocks when acceptance evidence fails before archive', () => {
     const repo = fixture({ contract: true, checks: passingChecks() });
     try {
       const { result, commands } = invoke(repo.root, 'done', {
-        commands: (args) => args.includes('verify-contract')
-          ? { exitCode: 1, stdout: '', stderr: 'contract exit 1\n' }
+        commands: (args) => args.includes('acceptance-receipt')
+          ? { exitCode: 1, stdout: '', stderr: 'acceptance evidence invalid\n' }
           : { exitCode: 0, stdout: 'archived\n', stderr: '' },
       });
       expect(result.exitCode).toBe(2);
-      expect(result.stdout).toContain('ContractGuard');
-      expect(result.stdout).toContain('Contract verification failed');
+      expect(result.stdout).toContain('AcceptanceReceiptGuard');
+      expect(result.stdout).toContain('acceptance evidence invalid');
       expect(commands.some((args) => args.includes('archive-workflow'))).toBe(false);
     } finally {
       repo.cleanup();

@@ -1,3 +1,4 @@
+import { configurationReceiptPath } from './configuration-ownership';
 import { createHash, randomUUID } from 'crypto';
 import {
   cpSync,
@@ -14,11 +15,16 @@ import {
 } from 'fs';
 import { homedir } from 'os';
 import { delimiter, dirname, join } from 'path';
-import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
-import { buildManagedHooks, isManagedEntry, type HookHost, type HooksByEvent } from './managed-entries';
+import {
+  canonicalManagedHookProjection,
+  compareManagedHookProjection,
+  type HookHost,
+  type HooksByEvent,
+} from './managed-entries';
 import {
   mutationPathSkillNames as catalogMutationPathSkillNames,
+  requiredExplicitExternalDependencyInstallGroups,
   parseSkillSurfaceCatalog,
   probeExpectations as catalogProbeExpectations,
   profileOwnedSkillNames as catalogProfileOwnedSkillNames,
@@ -167,22 +173,14 @@ const LEGACY_PROFILE_COMPONENTS: Readonly<Record<LegacyInstallProfile, readonly 
 });
 const OWNER_MARKER = '.repo-harness-owner.json';
 const MANAGED_HOOK_MARKER = 'repo-harness-managed-hook-v1';
-const MANAGED_HOOK_PREFIX = `: ${MANAGED_HOOK_MARKER}; `;
 const CODEGRAPH_CONFIG_MARKER = 'codegraph-config-projection';
 
 function managedAdapterHash(path: string): string | null {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as {
-      hooks?: Record<string, Array<{ matcher?: unknown; hooks?: Array<{ type?: unknown; command?: unknown; timeout?: unknown }> }>>;
+      hooks?: unknown;
     };
-    const projection: Record<string, unknown[]> = {};
-    for (const [event, entries] of Object.entries(parsed.hooks ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
-      const managed = (entries ?? []).filter((entry) => (
-        Array.isArray(entry?.hooks)
-        && entry.hooks.some((hook) => typeof hook?.command === 'string' && hook.command.startsWith(MANAGED_HOOK_PREFIX))
-      ));
-      if (managed.length > 0) projection[event] = managed;
-    }
+    const projection = canonicalManagedHookProjection(parsed.hooks);
     if (Object.keys(projection).length === 0) return null;
     return `sha256:${createHash('sha256').update(JSON.stringify(projection)).digest('hex')}`;
   } catch {
@@ -248,14 +246,12 @@ function removeCodegraphProjection(path: string): void {
 function adapterHasRequiredProjection(path: string, host: HookHost, profile: InstallProfile): boolean {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as { hooks?: HooksByEvent };
-    const actual = parsed.hooks ?? {};
-    const expected = buildManagedHooks(host, profile);
-    return Object.entries(expected).every(([event, entries]) => {
-      const managedActual = (actual[event] ?? []).filter(isManagedEntry);
-      return entries.every((entry) => managedActual.some((candidate) => (
-        JSON.stringify(candidate) === JSON.stringify(entry)
-      )));
-    });
+    const projection = compareManagedHookProjection(parsed.hooks ?? {}, host, profile);
+    // A profile transition may probe the previous profile's still-present
+    // managed routes before the target installer rewrites the adapter. Extra
+    // routes are therefore tolerated by this component-presence probe, but
+    // any required route field drift, duplicate, or missing route is not.
+    return projection.mismatches.every((mismatch) => mismatch.kind === 'unexpected');
   } catch {
     return false;
   }
@@ -492,6 +488,11 @@ function surfaceIsCurrent(surface: ManagedInstallSurface): boolean {
   }
 }
 
+/** Verify one recorded managed surface without requiring unrelated profile probes. */
+export function managedInstallSurfaceIsCurrent(surface: ManagedInstallSurface): boolean {
+  return surfaceIsCurrent(surface);
+}
+
 export function assertInstallProfile(value: string): InstallProfile {
   if (!INSTALL_PROFILES.includes(value as InstallProfile)) {
     throw new Error(`invalid install profile ${value}; expected ${INSTALL_PROFILES.join('|')}`);
@@ -522,6 +523,7 @@ export function installProfileHostMutationPaths(env: NodeJS.ProcessEnv = process
     join(home, '.claude.json'),
     join(home, '.repo-harness', 'config.json'),
     installProfileStatePath(env),
+    configurationReceiptPath(env),
     join(home, '.agents', '.skill-lock.json'),
   ];
   for (const host of ['.codex', '.claude']) {
@@ -608,6 +610,16 @@ function componentsForTransactionPath(path: string): readonly InstallComponent[]
   const normalized = path.replaceAll('\\', '/');
   const name = normalized.split('/').at(-1) ?? '';
   const ownedSkills = profileOwnedSkillsSet();
+  const obsidianSelection = requiredExplicitExternalDependencyInstallGroups(
+    loadSkillSurfaceCatalog(),
+    'obsidian-memory',
+    ['claude', 'codex'],
+  );
+  if (obsidianSelection.status !== 'selected') {
+    throw new Error(`invalid Obsidian dependency selection: ${obsidianSelection.status}:${obsidianSelection.name}`);
+  }
+  const obsidianSkills = new Set(obsidianSelection.groups.flatMap(({ skills }) => skills));
+  if (obsidianSkills.has(name) && normalized.includes('/skills/')) return ['adaptive-workflow'];
   if (ownedSkills.has(name) && normalized.includes('/skills/')) {
     const crossModelSkills = catalogProbeExpectations(loadSkillSurfaceCatalog()).crossModel;
     return crossModelSkills.includes(name)
@@ -658,7 +670,12 @@ function transactionOwnedSurfaces(
         }];
       }
     }
-    if (snapshot.existed) return [];
+    if (snapshot.existed) {
+      const previousSurface = previous?.ownership_manifest.find((surface) => surface.path === snapshot.path);
+      if (previousSurface === undefined) return [];
+      const refreshed = captureOwnedPath(snapshot.path, previousSurface.components);
+      return refreshed ? [refreshed] : [];
+    }
     const surface = captureOwnedPath(snapshot.path, componentsForTransactionPath(snapshot.path));
     return surface ? [surface] : [];
   });
@@ -1164,7 +1181,5 @@ export function profileEnablesCodegraph(profile: InstallProfile, cwd = process.c
     };
     if (policy.tooling?.codegraph?.enabled === true) return true;
   } catch { /* policy opt-in absent */ }
-  const tracked = spawnSync('git', ['ls-files'], { cwd, encoding: 'utf-8' });
-  if (tracked.status !== 0) return false;
-  return tracked.stdout.split('\n').filter(Boolean).length >= 2_000;
+  return false;
 }

@@ -52,7 +52,7 @@
       "tests/effective-state.test.ts"
     ],
     "next_action": "resolve blockers",
-    "guidance": "at most one active plan artifact; no contract, notes, or todos scaffolding beyond it",
+    "guidance": "at most one active plan artifact; no contract, notes, or todos scaffolding beyond it. This is a state snapshot, not a session-wide restriction; re-resolve for the proposed edit and current diff when scope changes. Current edit-time requirements supersede earlier snapshot guidance.",
     "blockers": [
       "capability_registry:invalid"
     ],
@@ -122,7 +122,6 @@
       "allowedToEdit": {
         "decision": "block",
         "reasons": [
-          "required_work_package_missing",
           "hard_blocker_present"
         ]
       },
@@ -146,7 +145,7 @@
           {
             "key": "complete_approved_work_package",
             "status": "required",
-            "satisfied": false
+            "satisfied": true
           },
           {
             "key": "separate_contract",

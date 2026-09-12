@@ -6,9 +6,12 @@ export type BrowserProviderName = 'oracle' | 'native';
 
 export type NativeBrowserChannel = 'chrome' | 'chrome-beta' | 'chrome-dev' | 'chrome-canary';
 
-export type ThinkingLevel = 'light' | 'standard' | 'extended' | 'heavy';
+// Oracle validates the thinking value fail-closed at run time; the wrapper does not re-derive the accepted set.
+export type ThinkingLevel = string;
 
 export type BrowserWriteOutputPolicy = 'cli' | 'mcp';
+
+export type BrowserSessionTransport = 'copy_profile' | 'oracle_session' | 'native_profile';
 
 export interface BrowserFileInput {
   path: string;
@@ -116,12 +119,15 @@ export interface BrowserConsultInput {
   oracleBin?: string;
   gitleaksBin?: string;
   requireSecretScan?: boolean;
+  /** Internal fresh-audit evidence collection; never implies verified revision. */
+  captureNetworkEvidence?: true;
+  captureConversationEvidence?: true;
   files?: BrowserFileInput[];
   followups?: string[];
   model?: string;
   thinking?: ThinkingLevel;
-  /** Generic browser transport never selects a ChatGPT app. Create overrides this with its prompt-contract field. */
-  chatgptApp?: never;
+  /** null explicitly clears app preselection inherited by a follow-up. */
+  chatgptApp?: string | null;
   provider?: BrowserProviderName;
   chatgptUrl?: string;
   timeoutMs?: number;
@@ -241,8 +247,15 @@ export interface BrowserSessionMeta {
   };
   browser: {
     mode: 'manual-login';
+    /**
+     * How the run reaches a signed-in ChatGPT session. Oracle transports a
+     * repo-local Chrome profile binding by copying that profile
+     * (`copy_profile`); without a binding it uses its own browser session
+     * (`oracle_session`). The deprecated native provider drives the bound
+     * profile directly (`native_profile`).
+     */
+    transport: BrowserSessionTransport;
     chatgptUrl: string;
-    /** Legacy read compatibility only; current sessions do not populate this field. */
     chatgptApp?: string;
     channel?: NativeBrowserChannel;
     profileDir?: string;
@@ -278,6 +291,10 @@ export interface BrowserSessionMeta {
     binary?: string;
     version?: string;
     captureStatus?: 'completed' | 'recoverable';
+    observation?: import('./oracle-session-evidence').OracleSessionEvidence['observation'];
+    evidenceError?: string;
+    networkCapture?: import('./oracle-session-evidence').OracleNetworkCapture;
+    conversationCapture?: import('./oracle-session-evidence').OracleConversationCapture;
   };
   error?: {
     code: string;

@@ -469,6 +469,239 @@ describe('mcp http transport', () => {
     }
   }, 30_000);
 
+  test('health responds without running a synchronous git cold path per request', async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-health-git-'));
+    const traceDir = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-git-trace-'));
+    const port = await freePort();
+    const restoreRegistryHome = useTempRegistryHome();
+    let proc: Bun.Subprocess | null = null;
+    try {
+      mkdirSync(join(repoRoot, '.ai/harness'), { recursive: true });
+      writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
+      runMcpSetupChatgpt({ repo: repoRoot, port: String(port) });
+
+      // GIT_TRACE is git's own invocation log: it needs no PATH shim, so it
+      // works the same on POSIX and Windows, where an extensionless shell
+      // wrapper is not an executable.
+      const gitTrace = join(traceDir, 'git-trace.log');
+      writeFileSync(gitTrace, '');
+
+      proc = Bun.spawn(
+        [
+          'bun',
+          'src/cli/index.ts',
+          'mcp',
+          'serve',
+          '--repo',
+          repoRoot,
+          '--transport',
+          'http',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+          '--profile',
+          'planner',
+          '--auth',
+          'bearer',
+        ],
+        {
+          cwd: process.cwd(),
+          stdout: 'ignore',
+          stderr: 'pipe',
+          env: { ...process.env, GIT_TRACE: gitTrace },
+        },
+      );
+      await waitForHealth(port);
+
+      // Startup resolves the repo root through git. Asserting that first proves
+      // the trace actually observes this server's git calls, so the silence
+      // asserted below cannot pass vacuously.
+      expect(readFileSync(gitTrace, 'utf-8')).toContain('rev-parse');
+
+      // Steady-state health probes must not run that cold path, because it
+      // blocks the event loop for seconds on a cold disk.
+      writeFileSync(gitTrace, '');
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const response = await fetch(`http://127.0.0.1:${port}/health`);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ status: 'ok', profile: 'planner' });
+      }
+      expect(readFileSync(gitTrace, 'utf-8')).toBe('');
+    } finally {
+      proc?.kill();
+      await proc?.exited.catch(() => undefined);
+      restoreRegistryHome();
+      rmSync(traceDir, { recursive: true, force: true });
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('releases the session reservation when initialize server construction throws', async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-reservation-'));
+    const port = await freePort();
+    const restoreRegistryHome = useTempRegistryHome();
+    let proc: Bun.Subprocess | null = null;
+    try {
+      mkdirSync(join(repoRoot, '.ai/harness'), { recursive: true });
+      writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
+      runMcpSetupChatgpt({ repo: repoRoot, port: String(port) });
+      const token = (await Bun.file(join(process.env.REPO_HARNESS_HOME!, 'mcp.tokens.json')).json()).bearerToken;
+
+      proc = Bun.spawn(
+        [
+          'bun',
+          'src/cli/index.ts',
+          'mcp',
+          'serve',
+          '--repo',
+          repoRoot,
+          '--transport',
+          'http',
+          '--host',
+          '127.0.0.1',
+          '--port',
+          String(port),
+          '--profile',
+          'planner',
+          '--auth',
+          'bearer',
+        ],
+        {
+          cwd: process.cwd(),
+          stdout: 'ignore',
+          stderr: 'pipe',
+          env: { ...process.env, REPO_HARNESS_MCP_MAX_SESSIONS: '1' },
+        },
+      );
+      await waitForHealth(port);
+
+      // A legacy repo-scope config appearing after startup makes server
+      // construction throw on the next initialize, which is the exact failure
+      // path that used to skip the reservation release.
+      const legacyDir = join(repoRoot, '.repo-harness');
+      mkdirSync(legacyDir, { recursive: true });
+      writeFileSync(join(legacyDir, 'mcp.local.json'), '{}\n');
+
+      const failedInitialize = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: initializeBody(),
+      });
+      expect(failedInitialize.status).toBe(500);
+      expect(await failedInitialize.text()).toContain('legacy repo-scope MCP config');
+
+      rmSync(legacyDir, { recursive: true, force: true });
+
+      const recoveredInitialize = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: initializeBody(),
+      });
+      expect(recoveredInitialize.status).toBe(200);
+      expect(recoveredInitialize.headers.get('mcp-session-id')).toMatch(/^[0-9a-f-]{36}$/);
+
+      const health = await fetch(`http://127.0.0.1:${port}/health`);
+      expect(await health.json()).toMatchObject({ active_sessions: 1, max_sessions: 1, sessions_created: 1 });
+    } finally {
+      proc?.kill();
+      await proc?.exited.catch(() => undefined);
+      restoreRegistryHome();
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('binds sessions to the startup profile and fails closed when the config flips to coding', async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-profile-flip-'));
+    const port = await freePort();
+    const restoreRegistryHome = useTempRegistryHome();
+    let proc: Bun.Subprocess | null = null;
+    try {
+      mkdirSync(join(repoRoot, '.ai/harness'), { recursive: true });
+      writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
+      writeFileSync(join(repoRoot, 'AGENTS.md'), '# Profile flip test\n');
+      const runGit = (...args: string[]) => {
+        const result = Bun.spawnSync(['git', '-C', repoRoot, ...args], { stdout: 'pipe', stderr: 'pipe' });
+        if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+      };
+      runGit('init', '-b', 'main');
+      runGit('config', 'user.email', 'tests@example.com');
+      runGit('config', 'user.name', 'Repo Harness Tests');
+      runGit('add', '.');
+      runGit('commit', '-m', 'fixture');
+      runMcpSetupChatgpt({ repo: repoRoot, port: String(port) });
+      const token = (await Bun.file(join(process.env.REPO_HARNESS_HOME!, 'mcp.tokens.json')).json()).bearerToken;
+
+      // `startMcpHttp` resolves the profile from the local config when the
+      // caller omits it, so this entrypoint is driven directly instead of
+      // through the CLI, which always passes an explicit --profile.
+      const entry = join(repoRoot, 'serve-entry.ts');
+      writeFileSync(
+        entry,
+        `import { startMcpHttp } from ${JSON.stringify(join(process.cwd(), 'src/cli/mcp/transports/http.ts'))};\n`
+        + `await startMcpHttp({ repo: ${JSON.stringify(repoRoot)}, host: '127.0.0.1', port: ${port}, auth: 'bearer' });\n`,
+      );
+      proc = Bun.spawn(['bun', entry], { cwd: process.cwd(), stdout: 'ignore', stderr: 'pipe', env: { ...process.env } });
+      await waitForHealth(port);
+
+      const initialize = () => fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: initializeBody(),
+      });
+
+      const beforeFlip = await initialize();
+      expect(beforeFlip.status).toBe(200);
+      expect(beforeFlip.headers.get('mcp-session-id')).toMatch(/^[0-9a-f-]{36}$/);
+
+      // The local config now becomes a fully valid coding setup. The running
+      // process still enforces the planner profile it started with: no coding
+      // grant middleware, no OAuth requirement, no Host/Origin pinning. A new
+      // session must not resolve a coding tool context behind that enforcement.
+      runMcpSetupChatgpt({
+        repo: repoRoot,
+        profile: 'coding',
+        grantReadWrite: [repoRoot],
+        endpoint: `https://coding.test/mcp`,
+        port: String(port),
+      });
+      expect(readRegisteredRepoHarnessRepos({ adoptedOnly: true })
+        .some((repo) => repo.accessMode === 'read_write')).toBe(true);
+
+      const afterFlip = await initialize();
+      expect(afterFlip.status).toBe(503);
+      expect(afterFlip.headers.get('mcp-session-id')).toBeNull();
+      const flipBody = await afterFlip.json() as { error: { code: string; message: string } };
+      expect(flipBody.error.code).toBe('PROFILE_CHANGED');
+      expect(flipBody.error.message).toContain('planner');
+      expect(flipBody.error.message).toContain('coding');
+
+      const health = await fetch(`http://127.0.0.1:${port}/health`);
+      expect(await health.json()).toMatchObject({
+        profile: 'planner',
+        active_sessions: 1,
+        sessions_created: 1,
+      });
+    } finally {
+      proc?.kill();
+      await proc?.exited.catch(() => undefined);
+      restoreRegistryHome();
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('supports URL token compatibility mode for single-user clients', async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-url-token-'));
     const port = await freePort();
@@ -688,6 +921,190 @@ describe('mcp http transport', () => {
       rmSync(repoRoot, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test('engineer OAuth E2E binds sessions to authorization and exposes only the exact Engineer tools', async () => {
+    const repoRoot = realpathSync(mkdtempSync(join(tmpdir(), 'repo-harness-mcp-engineer-e2e-')));
+    const port = await freePort();
+    const restoreRegistryHome = useTempRegistryHome();
+    let proc: Bun.Subprocess | null = null;
+    try {
+      mkdirSync(join(repoRoot, '.ai/harness'), { recursive: true });
+      writeFileSync(join(repoRoot, '.ai/harness/policy.json'), '{}\n');
+      const runGit = (...args: string[]) => {
+        const result = Bun.spawnSync(['git', '-C', repoRoot, ...args], { stdout: 'pipe', stderr: 'pipe' });
+        if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+      };
+      runGit('init', '-b', 'main');
+      runGit('config', 'user.email', 'tests@example.com');
+      runGit('config', 'user.name', 'Repo Harness Tests');
+      runGit('add', '.');
+      runGit('commit', '-m', 'fixture');
+      runMcpSetupChatgpt({
+        repo: repoRoot,
+        profile: 'engineer',
+        grantReadWrite: [repoRoot],
+        endpoint: 'https://engineer.test/mcp',
+        port: String(port),
+      });
+      const passphrase = (await Bun.file(join(process.env.REPO_HARNESS_HOME!, 'mcp.oauth.json')).json()).passphrase as string;
+      await expect(startMcpHttp({
+        repo: repoRoot,
+        host: '127.0.0.1',
+        port,
+        profile: 'engineer',
+        auth: 'bearer',
+        authToken: 'must-not-bypass-engineer-oauth',
+      })).rejects.toThrow('engineer profile requires OAuth authentication');
+
+      proc = Bun.spawn([
+        'bun', 'src/cli/index.ts', 'mcp', 'serve',
+        '--repo', repoRoot,
+        '--transport', 'http',
+        '--host', '127.0.0.1',
+        '--port', String(port),
+        '--profile', 'engineer',
+      ], { cwd: process.cwd(), stdout: 'ignore', stderr: 'pipe', env: { ...process.env } });
+      await waitForHealth(port);
+      const health = await fetch(`http://127.0.0.1:${port}/health`, { headers: { origin: 'https://chatgpt.com' } });
+      expect(await health.json()).toMatchObject({
+        profile: 'engineer',
+        capabilities: { workspaceReader: false, workspaceCoder: false, workflowExecutor: false, agentRunner: false },
+      });
+      const metadata = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`);
+      const metadataJson = await metadata.json() as { scopes_supported: string[] };
+      expect(metadataJson.scopes_supported).toEqual(['repo-harness', 'repo-harness.engineer', 'offline_access']);
+
+      const registered = await fetch(`http://127.0.0.1:${port}/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          redirect_uris: ['https://chatgpt.com/connector/callback'],
+          token_endpoint_auth_method: 'none',
+          grant_types: ['authorization_code', 'refresh_token'],
+          response_types: ['code'],
+        }),
+      });
+      const client = await registered.json() as { client_id: string };
+      const verifier = randomBytes(32).toString('base64url');
+      const challenge = createHash('sha256').update(verifier).digest('base64url');
+      const authorize = async (scope = 'repo-harness repo-harness.engineer offline_access') => fetch(`http://127.0.0.1:${port}/authorize`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          passphrase,
+          client_id: client.client_id,
+          redirect_uri: 'https://chatgpt.com/connector/callback',
+          response_type: 'code',
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+          scope,
+        }),
+        redirect: 'manual',
+      });
+      const missingScope = await authorize('repo-harness offline_access');
+      expect(missingScope.status).toBe(400);
+      expect(await missingScope.json()).toMatchObject({ error: 'invalid_scope' });
+      const consent = await fetch(`http://127.0.0.1:${port}/authorize?${new URLSearchParams({
+        client_id: client.client_id,
+        redirect_uri: 'https://chatgpt.com/connector/callback',
+        response_type: 'code',
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+        scope: 'repo-harness repo-harness.engineer offline_access',
+      })}`);
+      const consentHtml = await consent.text();
+      expect(consentHtml).toContain('no shell, generic file write, Binding mutation, Publication, or Acceptance tools');
+      expect(consentHtml).toContain('repo-harness-mcp-engineer-e2e-');
+      expect(consentHtml).not.toContain(repoRoot);
+
+      const issueToken = async (): Promise<string> => {
+        const authorized = await authorize();
+        expect(authorized.status).toBe(302);
+        const code = new URL(authorized.headers.get('location') ?? '').searchParams.get('code') ?? '';
+        const response = await fetch(`http://127.0.0.1:${port}/token`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code',
+            client_id: client.client_id,
+            code,
+            code_verifier: verifier,
+            redirect_uri: 'https://chatgpt.com/connector/callback',
+          }),
+        });
+        const token = await response.json() as { access_token: string; expires_in: number; scope: string };
+        expect(token).toMatchObject({ expires_in: 3600, scope: 'repo-harness repo-harness.engineer offline_access' });
+        return token.access_token;
+      };
+      const initialize = async (accessToken: string): Promise<Record<string, string>> => {
+        const headers: Record<string, string> = {
+          authorization: `Bearer ${accessToken}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        };
+        const response = await fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST', headers, body: initializeBody() });
+        expect(response.status).toBe(200);
+        headers['mcp-session-id'] = response.headers.get('mcp-session-id') ?? '';
+        await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+        });
+        return headers;
+      };
+      const firstHeaders = await initialize(await issueToken());
+      const call = async (headers: Record<string, string>, id: number, method: string, params?: Record<string, unknown>) => {
+        const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
+          method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id, method, ...(params ? { params } : {}) }),
+        });
+        expect(response.status).toBe(200);
+        return parseMcpResponse(await response.text());
+      };
+      const tools = (await call(firstHeaders, 2, 'tools/list')).result.tools as Array<{ name: string }>;
+      expect(tools.map((tool) => tool.name)).toEqual([
+        'engineer_status',
+        'engineer_offers',
+        'engineer_acquire',
+        'engineer_acquire_next',
+        'engineer_messages',
+        'engineer_message_send',
+        'engineer_message_ack',
+        'engineer_runtime_effect_capability',
+        'engineer_runtime_effect_status',
+          'engineer_interface_change_propose',
+          'engineer_interface_change_transition',
+          'engineer_work_demand_propose',
+          'engineer_work_demand_transition',
+        // C7's collaboration block. It extends the same closed inventory rather
+        // than opening a second profile, so this list stays the one place the
+        // engineer profile's whole surface is stated.
+        'collaboration_exchange',
+        'collaboration_threads',
+        'collaboration_packet',
+        'collaboration_signal_post',
+        'collaboration_handoff_publish',
+        'collaboration_handoff_adopt',
+      ]);
+      const unmapped = await call(firstHeaders, 3, 'tools/call', { name: 'engineer_status', arguments: {} });
+      expect(JSON.parse(unmapped.result.content[0].text)).toMatchObject({ error: { code: 'engineer_principal_unmapped' } });
+
+      const secondHeaders = await initialize(await issueToken());
+      const hijacked = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: 'POST',
+        headers: { ...secondHeaders, 'mcp-session-id': firstHeaders['mcp-session-id']! },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/list' }),
+      });
+      expect(hijacked.status).toBe(404);
+
+      setRepoHarnessAccessMode(repoRoot, 'read_only');
+      const disabled = await fetch(`http://127.0.0.1:${port}/health`, { headers: { origin: 'https://chatgpt.com' } });
+      expect(disabled.status).toBe(503);
+      expect(await disabled.json()).toEqual({ error: 'engineer_disabled' });
+    } finally {
+      proc?.kill();
+      await proc?.exited.catch(() => undefined);
+      restoreRegistryHome();
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   test('coding OAuth E2E enforces Host/CORS/redirect boundaries and exposes the exact direct-coding schema', async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-coding-e2e-'));

@@ -41,15 +41,15 @@ function writeInstalledProfileFixture(profile: InstallProfile): void {
 }
 
 describe('status command (Phase 1C)', () => {
-  test('reports CLI version + 11 routes with correct per-event breakdown', () => {
+  test('reports CLI version + 12 routes with correct per-event breakdown', () => {
     withTempHome(() => {
       const r = runStatus();
       expect(r.cli.version).toBeTruthy();
-      expect(r.routes.total).toBe(11);
+      expect(r.routes.total).toBe(12);
       expect(r.routes.byEvent.PreToolUse).toBe(2);
       expect(r.routes.byEvent.PostToolUse).toBe(3);
       expect(r.routes.byEvent.SessionStart).toBe(1);
-      expect(r.routes.byEvent.UserPromptSubmit).toBe(2);
+      expect(r.routes.byEvent.UserPromptSubmit).toBe(3);
       expect(r.routes.byEvent.SubagentStart).toBe(1);
       expect(r.routes.byEvent.SubagentStop).toBe(1);
       expect(r.routes.byEvent.Stop).toBe(1);
@@ -74,17 +74,120 @@ describe('status command (Phase 1C)', () => {
       const codex = r.targets.find((t) => t.id === 'codex')!;
       expect(codex.alreadyConfigured).toBe(true);
       expect(codex.managedEntryCount).toBe(codex.expectedEntryCount);
-      expect(codex.managedEntryCount).toBe(11);
+      expect(codex.managedEntryCount).toBe(12);
       const claude = r.targets.find((t) => t.id === 'claude')!;
       expect(claude.managedEntryCount).toBe(claude.expectedEntryCount);
-      expect(claude.managedEntryCount).toBe(8);
+      expect(claude.managedEntryCount).toBe(9);
+    });
+  });
+
+  test('reports exact projection drift when Stop timeout changes without changing managed count', () => {
+    withTempHome(() => {
+      runInstall({ target: 'codex', location: 'global' });
+      const configPath = path.join(process.env.HOME!, '.codex', 'hooks.json');
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+        hooks: Record<string, Array<{ hooks: Array<{ timeout?: number }> }>>;
+      };
+      config.hooks.Stop[0].hooks[0].timeout = 30;
+      fs.writeFileSync(configPath, JSON.stringify(config));
+
+      const report = runStatus();
+      const codex = report.targets.find((target) => target.id === 'codex')!;
+      const projection = codex.projection!;
+      expect(codex.managedEntryCount).toBe(codex.expectedEntryCount);
+      expect(projection.status).toBe('drift');
+      expect(projection.mismatches).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          event: 'Stop',
+          routeId: 'default',
+          field: 'timeout',
+          expected: 150,
+          actual: 30,
+        }),
+      ]));
+      expect(formatStatus(report, false)).toContain('Stop.default timeout expected=150 actual=30');
+    });
+  });
+
+  test('reports matcher, type, and command field drift by route', () => {
+    withTempHome(() => {
+      runInstall({ target: 'codex', location: 'global' });
+      const configPath = path.join(process.env.HOME!, '.codex', 'hooks.json');
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+        hooks: Record<string, Array<{
+          matcher?: unknown;
+          hooks: Array<{ type?: unknown; command?: unknown; timeout?: unknown }>;
+        }>>;
+      };
+      const edit = config.hooks.PreToolUse.find((entry) => entry.matcher === 'Edit|Write')!;
+      edit.matcher = 'Edit';
+      edit.hooks[0].type = 'script';
+      edit.hooks[0].command = `${edit.hooks[0].command}; changed`;
+      fs.writeFileSync(configPath, JSON.stringify(config));
+
+      const codex = runStatus().targets.find((target) => target.id === 'codex')!;
+      expect(codex.projection?.mismatches).toEqual(expect.arrayContaining([
+        expect.objectContaining({ event: 'PreToolUse', routeId: 'edit', field: 'matcher' }),
+        expect.objectContaining({ event: 'PreToolUse', routeId: 'edit', field: 'type' }),
+        expect.objectContaining({ event: 'PreToolUse', routeId: 'edit', field: 'command' }),
+      ]));
+    });
+  });
+
+  test('reports missing, duplicate, and unexpected managed routes', () => {
+    withTempHome(() => {
+      runInstall({ target: 'codex', location: 'global' });
+      const configPath = path.join(process.env.HOME!, '.codex', 'hooks.json');
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+        hooks: Record<string, Array<{
+          matcher?: unknown;
+          hooks: Array<{ type?: unknown; command?: unknown; timeout?: unknown }>;
+        }>>;
+      };
+      const stop = config.hooks.Stop[0];
+      config.hooks.Stop = [];
+      config.hooks.SessionStart.push({
+        ...stop,
+        hooks: stop.hooks.map((hook) => ({
+          ...hook,
+          command: String(hook.command).replace('--route default', '--route unknown'),
+        })),
+      });
+      config.hooks.PostToolUse.push(config.hooks.PostToolUse[0]);
+      fs.writeFileSync(configPath, JSON.stringify(config));
+
+      const projection = runStatus().targets.find((target) => target.id === 'codex')!.projection!;
+      expect(projection.status).toBe('drift');
+      expect(projection.mismatches).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'missing', event: 'Stop', routeId: 'default' }),
+        expect.objectContaining({ kind: 'duplicate', event: 'PostToolUse', routeId: 'edit' }),
+        expect.objectContaining({ kind: 'unexpected', event: 'SessionStart', routeId: 'unknown' }),
+      ]));
+    });
+  });
+
+  test('ignores unmanaged sibling commands while checking the managed projection', () => {
+    withTempHome(() => {
+      runInstall({ target: 'codex', location: 'global' });
+      const configPath = path.join(process.env.HOME!, '.codex', 'hooks.json');
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+        hooks: Record<string, Array<{
+          hooks: Array<{ type?: unknown; command?: unknown; timeout?: unknown }>;
+        }>>;
+      };
+      config.hooks.Stop[0].hooks.push({ type: 'command', command: 'echo user-owned', timeout: 30 });
+      fs.writeFileSync(configPath, JSON.stringify(config));
+
+      const projection = runStatus().targets.find((target) => target.id === 'codex')!.projection!;
+      expect(projection.status).toBe('consistent');
+      expect(projection.mismatches).toEqual([]);
     });
   });
 
   test('uses the recorded install profile for expected managed entry count', () => {
     const cases: ReadonlyArray<readonly [InstallProfile, number]> = [
-      ['minimal', 7],
-      ['full', 11],
+      ['minimal', 8],
+      ['full', 12],
     ];
 
     for (const [profile, expectedCount] of cases) {
@@ -191,7 +294,7 @@ describe('status command (Phase 1C)', () => {
       expect(() => JSON.parse(json)).not.toThrow();
       const parsed = JSON.parse(json);
       expect(parsed.cli).toBeDefined();
-      expect(parsed.routes.total).toBe(11);
+      expect(parsed.routes.total).toBe(12);
     });
   });
 
@@ -199,7 +302,7 @@ describe('status command (Phase 1C)', () => {
     withTempHome(() => {
       const r = runStatus();
       expect(r.installedProfile).toEqual({ recorded: false });
-      expect(r.targets.find((target) => target.id === 'codex')?.expectedEntryCount).toBe(11);
+      expect(r.targets.find((target) => target.id === 'codex')?.expectedEntryCount).toBe(12);
       const text = formatStatus(r, false);
       expect(text).toContain('Installed profile:');
       expect(text).toContain('(not recorded)');
@@ -237,7 +340,7 @@ describe('status command (Phase 1C)', () => {
       expect(r.installedProfile.recorded).toBe('invalid');
       expect(r.installedProfile).toMatchObject({ kind: 'corrupt_current' });
       expect(r.installedProfile).not.toEqual({ recorded: false });
-      expect(r.targets.find((target) => target.id === 'codex')?.expectedEntryCount).toBe(11);
+      expect(r.targets.find((target) => target.id === 'codex')?.expectedEntryCount).toBe(12);
       const text = formatStatus(r, false);
       expect(text).toContain('(invalid)');
       expect(text).not.toContain('(not recorded)');

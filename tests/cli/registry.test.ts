@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import {
@@ -12,7 +12,10 @@ import { claudeTarget } from '../../src/cli/installer/targets/claude';
 import {
   applyRepoHarnessRegistryBatch,
   readRegisteredRepoHarnessRepos,
+  readRepoHarnessRegistryStrictSnapshot,
+  RepoHarnessRegistryStrictError,
   repoHarnessAuthorizationRevision,
+  repoHarnessRepoIdFor,
 } from '../../src/effects/repo-registry';
 
 describe('installer target registry', () => {
@@ -63,6 +66,136 @@ describe('installer target registry', () => {
 });
 
 describe('repo registration persistence', () => {
+  test('fleet strict registry reader rejects malformed authority instead of silently returning no repositories', () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'repo-harness-registry-fleet-strict-'));
+    const home = join(fixtureRoot, 'home');
+    const env = { ...process.env, REPO_HARNESS_HOME: home };
+    try {
+      mkdirSync(home, { recursive: true });
+      writeFileSync(join(home, 'registered-repos.json'), '{"version":1,"repos":"not-an-array"}\n');
+      expect(() => readRepoHarnessRegistryStrictSnapshot({ env, adoptedOnly: false })).toThrow(RepoHarnessRegistryStrictError);
+      try {
+        readRepoHarnessRegistryStrictSnapshot({ env, adoptedOnly: false });
+      } catch (error) {
+        expect((error as RepoHarnessRegistryStrictError).code).toBe('fleet_registry_invalid');
+      }
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('fleet strict registry reader retains every authorized row and stamps exact authority bytes', () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'repo-harness-registry-fleet-snapshot-'));
+    const home = join(fixtureRoot, 'home');
+    const repo = join(fixtureRoot, 'repo');
+    const env = { ...process.env, REPO_HARNESS_HOME: home };
+    try {
+      mkdirSync(home, { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      const canonicalRepo = realpathSync(repo);
+      writeFileSync(join(home, 'registered-repos.json'), `${JSON.stringify({
+        version: 1,
+        authorizationRevision: 4,
+        repos: [{
+          id: repoHarnessRepoIdFor(canonicalRepo), path: canonicalRepo, accessMode: 'read_only', source: 'manual',
+          registeredAt: '2026-08-23T00:00:00.000Z', lastSeenAt: '2026-08-23T00:00:00.000Z',
+        }],
+      })}\n`);
+      const snapshot = readRepoHarnessRegistryStrictSnapshot({ env, adoptedOnly: false });
+      expect(snapshot.authorizationRevision).toBe(4);
+      expect(snapshot.repos).toEqual([expect.objectContaining({ id: repoHarnessRepoIdFor(canonicalRepo), path: canonicalRepo })]);
+      expect(snapshot.registryRevision).toMatch(/^sha256:[0-9a-f]{64}$/u);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('fleet strict registry reader rejects repository ids that are not derived from the canonical path', () => {
+    const rejectedIds = [
+      '/Users/alice/private-client/repository',
+      String.raw`C:\Users\alice\private-client\repository`,
+      'repo_safe\ncontrol',
+      'token=secret-value',
+      '${HOME}/private-client/repository',
+    ];
+
+    for (const [index, id] of rejectedIds.entries()) {
+      const fixtureRoot = mkdtempSync(join(tmpdir(), `repo-harness-registry-id-${index}-`));
+      const home = join(fixtureRoot, 'home');
+      const repo = join(fixtureRoot, 'repo');
+      const env = { ...process.env, REPO_HARNESS_HOME: home };
+      try {
+        mkdirSync(home, { recursive: true });
+        mkdirSync(repo, { recursive: true });
+        const canonicalRepo = realpathSync(repo);
+        writeFileSync(join(home, 'registered-repos.json'), `${JSON.stringify({
+          version: 1,
+          authorizationRevision: 0,
+          repos: [{
+            id,
+            path: canonicalRepo,
+            accessMode: 'read_only',
+            source: 'manual',
+            registeredAt: '2026-08-23T00:00:00.000Z',
+            lastSeenAt: '2026-08-23T00:00:00.000Z',
+          }],
+        })}\n`);
+
+        expect(() => readRepoHarnessRegistryStrictSnapshot({ env, adoptedOnly: false })).toThrow(RepoHarnessRegistryStrictError);
+      } finally {
+        rmSync(fixtureRoot, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test('registry writers replace a persisted non-derived id with the canonical derived id', () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'repo-harness-registry-id-write-'));
+    const home = join(fixtureRoot, 'home');
+    const repo = join(fixtureRoot, 'repo');
+    const env = { ...process.env, REPO_HARNESS_HOME: home };
+    try {
+      mkdirSync(join(repo, '.ai', 'harness'), { recursive: true });
+      writeFileSync(join(repo, '.ai', 'harness', 'policy.json'), '{}\n');
+      mkdirSync(home, { recursive: true });
+      writeFileSync(join(home, 'registered-repos.json'), `${JSON.stringify({
+        version: 1,
+        authorizationRevision: 0,
+        repos: [{
+          id: '/Users/alice/private-client/repository',
+          path: repo,
+          accessMode: 'read_only',
+          source: 'manual',
+          registeredAt: '2026-08-23T00:00:00.000Z',
+          lastSeenAt: '2026-08-23T00:00:00.000Z',
+        }],
+      })}\n`);
+
+      applyRepoHarnessRegistryBatch([{ repoRoot: repo, source: 'manual', accessMode: 'read_write' }], { env });
+      const persisted = JSON.parse(readFileSync(join(home, 'registered-repos.json'), 'utf-8')) as {
+        repos: Array<{ id: string; path: string }>;
+      };
+      expect(persisted.repos).toEqual([{ id: repoHarnessRepoIdFor(realpathSync(repo)), path: realpathSync(repo) }].map((expected) => expect.objectContaining(expected)));
+      expect(readRepoHarnessRegistryStrictSnapshot({ env, adoptedOnly: false }).repos[0].id).toBe(repoHarnessRepoIdFor(realpathSync(repo)));
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('fleet strict registry reader rejects a symlinked registry authority file', () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'repo-harness-registry-fleet-symlink-'));
+    const home = join(fixtureRoot, 'home');
+    const target = join(fixtureRoot, 'outside-registry.json');
+    const env = { ...process.env, REPO_HARNESS_HOME: home };
+    try {
+      mkdirSync(home, { recursive: true });
+      writeFileSync(target, '{"version":1,"authorizationRevision":0,"repos":[]}\n');
+      symlinkSync(target, join(home, 'registered-repos.json'));
+      expect(() => readRepoHarnessRegistryStrictSnapshot({ env, adoptedOnly: false })).toThrow(RepoHarnessRegistryStrictError);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
   test('batch authorization validates every repo and commits one revision atomically', () => {
     const fixtureRoot = mkdtempSync(join(tmpdir(), 'repo-harness-registry-batch-'));
     const env = { ...process.env, REPO_HARNESS_HOME: join(fixtureRoot, 'home') };

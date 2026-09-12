@@ -85,9 +85,18 @@ function installWorkflowArchiveFixture(cwd: string): void {
     join(cwd, "scripts/acceptance-receipt.ts"),
     [
       "import { existsSync, realpathSync } from 'fs';",
+      "export function parseAcceptancePolicy(text: string) {",
+      "  const body = text.match(/^## Acceptance Policy[ \\t]*\\r?\\n+```json[ \\t]*\\r?\\n([\\s\\S]*?)\\r?\\n```[ \\t]*$/m)?.[1];",
+      "  if (!body) throw new Error('contract Acceptance Policy JSON block is missing');",
+      "  return JSON.parse(body);",
+      "}",
+      "export function acceptancePolicySource(policy: { protocol: number; reviewer: string; source?: string }) {",
+      "  if (policy.protocol === 2) return policy.source;",
+      "  return policy.reviewer === 'Claude' ? 'claude-review' : 'codex-review';",
+      "}",
       "const expected = process.env.EXPECT_ACCEPTANCE_CWD;",
       "const cwdMatches = !expected || realpathSync(process.cwd()) === realpathSync(expected);",
-      "process.exit(existsSync('.acceptance-pass') && cwdMatches ? 0 : 1);",
+      "if (import.meta.main) process.exit(existsSync('.acceptance-pass') && cwdMatches ? 0 : 1);",
       "",
     ].join("\n"),
   );
@@ -146,6 +155,12 @@ function writeWorkflowContract(cwd: string, status: string): void {
       "```yaml",
       "evidence_requirements:",
       "  benchmark: not_applicable",
+      "```",
+      "",
+      "## Acceptance Policy",
+      "",
+      "```json",
+      '{"protocol":2,"reviewer":"Codex","source":"codex-plugin","user_waiver":"allowed"}',
       "```",
       "",
     ].join("\n"),
@@ -233,7 +248,7 @@ function writeSealedWorkflowReview(cwd: string): void {
       "",
       "> **Disposition**: external_pass",
       "> **Reviewer**: Codex",
-      "> **Source**: codex-review",
+      "> **Source**: codex-plugin",
       "> **Actor**: not-applicable",
       `> **Reviewed Subject SHA256**: sha256:${"a".repeat(64)}`,
       "> **Reviewed Subject Scope**: normalized-final-content",
@@ -265,6 +280,11 @@ function installArchitectureArchiveFixture(cwd: string): void {
     join(ROOT, "scripts/archive-architecture-request.sh"),
     join(cwd, "scripts/archive-architecture-request.sh"),
   );
+  copyFileSync(
+    join(ROOT, "scripts/architecture-event.ts"),
+    join(cwd, "scripts/architecture-event.ts"),
+  );
+  mkdirSync(join(cwd, ".ai/harness/architecture"), { recursive: true });
   writeFileSync(
     join(cwd, "scripts/architecture-queue.sh"),
     [
@@ -371,7 +391,7 @@ describe("archive evidence gates", () => {
       ]) {
         mkdirSync(join(primary, dir), { recursive: true });
       }
-      for (const helper of ["contract-worktree.sh", "archive-workflow.sh"]) {
+      for (const helper of ["contract-worktree.sh", "worktree-merge-lib.sh", "archive-workflow.sh"]) {
         copyFileSync(join(ROOT, "scripts", helper), join(primary, "scripts", helper));
         chmodSync(join(primary, "scripts", helper), 0o755);
       }
@@ -612,7 +632,7 @@ describe("archive evidence gates", () => {
     }
   }, 30_000);
 
-  test("predict-manifest merges live checks evidence into the scratch clone instead of nesting it", () => {
+  test.each(["main", "origin/main"])("predict-manifest preserves live evidence and exact review base %s", (reviewBase) => {
     withTempRepo("archive-workflow-predict-manifest", (cwd) => {
       installWorkflowArchiveFixture(cwd);
       // The real repo gitignores the structured checks payload and tracks only
@@ -635,6 +655,17 @@ describe("archive evidence gates", () => {
       // has sitting in .ai/harness/checks/latest.json when finish predicts.
       writeWorkflowChecks(cwd);
 
+      if (reviewBase === "origin/main") {
+        const policyFile = join(cwd, ".ai/harness/policy.json");
+        const policy = JSON.parse(readFileSync(policyFile, "utf8"));
+        policy.worktree_strategy.review_base = reviewBase;
+        expect(runProcess("git", ["checkout", "-b", "candidate"], cwd).status).toBe(0);
+        writeFileSync(policyFile, JSON.stringify(policy));
+        expect(runProcess("git", ["add", policyFile], cwd).status).toBe(0);
+        expect(runProcess("git", ["commit", "-m", "candidate with newer remote target"], cwd).status).toBe(0);
+        expect(runProcess("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], cwd).status).toBe(0);
+      }
+      const originalMain = runProcess("git", ["rev-parse", "main"], cwd).stdout;
       const output = join(cwd, "predicted-manifest.txt");
       const result = run(
         "scripts/archive-workflow.sh",
@@ -649,7 +680,8 @@ describe("archive evidence gates", () => {
         cwd,
         { EXPECT_ACCEPTANCE_CWD: cwd },
       );
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
+      expect(runProcess("git", ["rev-parse", "main"], cwd).stdout).toBe(originalMain);
       expect(existsSync(output)).toBe(true);
       const manifest = readFileSync(output, "utf-8");
       expect(manifest).toContain("plans/archive/plan-20260711-1200-demo.md");

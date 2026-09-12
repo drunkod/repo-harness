@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
-import { dirname, join, resolve } from "path";
+import { dirname, isAbsolute, join, resolve } from "path";
 
 export type RepoHarnessRegistrySource = "adopt" | "init" | "mcp-setup" | "manual" | "discovery"; // "adopt": legacy-read-only, no current writers
 export type RepoHarnessAccessMode = "read_only" | "read_write";
@@ -57,7 +57,44 @@ export interface RepoHarnessRegistryBatchResult {
   readonly repos: readonly RepoHarnessRegisteredRepo[];
 }
 
-function repoHarnessHome(env: NodeJS.ProcessEnv = process.env): string {
+/**
+ * One read of the registry authority.  `repos` and
+ * `authorizationRevision` come from the same atomically replaced file, so a
+ * caller cannot accidentally pair an authorization fence from one revision
+ * with repository rows from another.
+ */
+export interface RepoHarnessRegistrySnapshot {
+  readonly registryPath: string;
+  readonly authorizationRevision: number;
+  readonly repos: readonly RepoHarnessRegisteredRepo[];
+}
+
+/**
+ * The normal registry reader predates the fleet projection and intentionally
+ * turns a malformed optional registry into an empty list for legacy callers.
+ * Fleet enumeration is an authority boundary instead: silently treating bad
+ * authorization bytes as zero repositories would make a successful board
+ * indistinguishable from a lost registry.  Keep that stricter policy here,
+ * beside the only registry parser, rather than teaching fleet a second parser.
+ */
+export type RepoHarnessRegistryStrictErrorCode =
+  | 'fleet_registry_unavailable'
+  | 'fleet_registry_invalid';
+
+export class RepoHarnessRegistryStrictError extends Error {
+  constructor(readonly code: RepoHarnessRegistryStrictErrorCode, message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = 'RepoHarnessRegistryStrictError';
+  }
+}
+
+export interface RepoHarnessRegistryStrictSnapshot extends RepoHarnessRegistrySnapshot {
+  /** Digest of the exact authority bytes observed for this enumeration. */
+  readonly registryRevision: string;
+}
+
+/** The single account-level harness home; every host-owned authority store roots here. */
+export function repoHarnessHome(env: NodeJS.ProcessEnv = process.env): string {
   return resolve(env.REPO_HARNESS_HOME ?? join(env.HOME ?? env.USERPROFILE ?? homedir(), ".repo-harness"));
 }
 
@@ -69,7 +106,16 @@ export function repoHarnessRepoIdFor(path: string): string {
   return `repo_${createHash("sha256").update(path).digest("hex").slice(0, 16)}`;
 }
 
-function canonicalRepoPath(path: string): string {
+/**
+ * The single canonicalization rule for a repository root. `repoHarnessRepoIdFor`
+ * hashes its argument verbatim, and every writer of a stored `repository_id`
+ * passes a path through here first, so any caller that later compares against a
+ * stored id must canonicalize the same way. `resolve` alone is not enough: it is
+ * lexical and cannot collapse a symlink, so a symlinked root would still derive a
+ * different id. Falls back to the resolved path when the target does not exist,
+ * so a caller keeps its own clear not-a-repository error instead of a raw ENOENT.
+ */
+export function canonicalRepoPath(path: string): string {
   const absolute = resolve(path);
   try {
     if (!statSync(absolute).isDirectory()) return absolute;
@@ -149,7 +195,15 @@ function dedupeRepos(repos: readonly RepoHarnessRegisteredRepo[]): RepoHarnessRe
 function writeRegistryFile(path: string, repos: readonly RepoHarnessRegisteredRepo[], authorizationRevision: number): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify({ version: 1, authorizationRevision, repos: dedupeRepos(repos) }, null, 2)}\n`, {
+  const canonicalRepos = dedupeRepos(repos).map((repo): RepoHarnessRegisteredRepo => ({
+    id: repoHarnessRepoIdFor(repo.path),
+    path: repo.path,
+    accessMode: repo.accessMode,
+    source: repo.source,
+    registeredAt: repo.registeredAt,
+    lastSeenAt: repo.lastSeenAt,
+  }));
+  writeFileSync(temporary, `${JSON.stringify({ version: 1, authorizationRevision, repos: canonicalRepos }, null, 2)}\n`, {
     encoding: "utf-8",
     mode: 0o600,
   });
@@ -177,6 +231,40 @@ function describeRegistryLock(path: string): string {
     }
   } catch {
     return 'owner metadata is unreadable; verify and remove this stale lock manually';
+  }
+}
+
+function reclaimDeadRegistryMutationLock(lockPath: string): boolean {
+  let descriptor: number | null = null;
+  try {
+    const published = lstatSync(lockPath);
+    if (!published.isFile()) return false;
+    descriptor = openSync(lockPath, 'r');
+    const opened = fstatSync(descriptor);
+    if (opened.dev !== published.dev || opened.ino !== published.ino) return false;
+    const owner = JSON.parse(readFileSync(descriptor, 'utf-8')) as Partial<RegistryLockOwner>;
+    if (!Number.isSafeInteger(owner.pid)
+      || (owner.pid ?? 0) < 1
+      || typeof owner.token !== 'string'
+      || typeof owner.acquiredAt !== 'string') return false;
+    try {
+      process.kill(owner.pid!, 0);
+      return false;
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== 'ESRCH') return false;
+    }
+    const current = lstatSync(lockPath);
+    if (!current.isFile() || current.dev !== published.dev || current.ino !== published.ino) return false;
+    const currentOwner = JSON.parse(readFileSync(lockPath, 'utf-8')) as Partial<RegistryLockOwner>;
+    if (currentOwner.pid !== owner.pid || currentOwner.token !== owner.token) return false;
+    unlinkSync(lockPath);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== null) {
+      try { closeSync(descriptor); } catch { /* descriptor may already be closed */ }
+    }
   }
 }
 
@@ -218,6 +306,7 @@ function acquireRegistryMutationLock(registryPath: string): () => void {
       };
     } catch (error) {
       if (!isNodeError(error) || error.code !== 'EEXIST') throw error;
+      if (reclaimDeadRegistryMutationLock(lockPath)) continue;
       if (Date.now() >= deadline) {
         throw new Error(`timed out waiting for registry mutation lock ${lockPath}: ${describeRegistryLock(lockPath)}`);
       }
@@ -239,11 +328,163 @@ export function readRegisteredRepoHarnessRepos(opts: {
   readonly env?: NodeJS.ProcessEnv;
   readonly adoptedOnly?: boolean;
 } = {}): RepoHarnessRegisteredRepo[] {
-  const path = repoHarnessRegisteredReposPath(opts.env);
-  const repos = dedupeRepos(readRegistryFile(path).repos);
-  return opts.adoptedOnly === true
-    ? repos.filter((repo) => isRepoHarnessAdoptedPath(repo.path))
-    : repos;
+  return [...readRepoHarnessRegistrySnapshot(opts).repos];
+}
+
+/**
+ * Read the registry once and return a coherent authorization snapshot.  The
+ * registry writer uses temp+rename, so `readFileSync` observes either the old
+ * complete document or the new complete document, never a partially-written
+ * one.  Filtering adopted repos happens after the parse but remains part of
+ * this one returned snapshot.
+ */
+export function readRepoHarnessRegistrySnapshot(opts: {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly adoptedOnly?: boolean;
+} = {}): RepoHarnessRegistrySnapshot {
+  const registryPath = repoHarnessRegisteredReposPath(opts.env);
+  const registry = readRegistryFile(registryPath);
+  const repos = dedupeRepos(registry.repos).filter((repo) => (
+    opts.adoptedOnly !== true || isRepoHarnessAdoptedPath(repo.path)
+  ));
+  return Object.freeze({
+    registryPath,
+    authorizationRevision: registry.authorizationRevision,
+    repos: Object.freeze(repos.map((repo) => Object.freeze({ ...repo }))),
+  });
+}
+
+function strictRegistryEntry(value: unknown, index: number): RepoHarnessRegisteredRepo {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', `registry repo ${index} must be an object`);
+  }
+  const entry = value as Record<string, unknown>;
+  const expected = ['accessMode', 'id', 'lastSeenAt', 'path', 'registeredAt', 'source'];
+  const keys = Object.keys(entry).sort();
+  if (JSON.stringify(keys) !== JSON.stringify(expected)) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', `registry repo ${index} fields are invalid`);
+  }
+  if (typeof entry.id !== 'string' || entry.id.trim() === '') {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', `registry repo ${index} id is invalid`);
+  }
+  if (typeof entry.path !== 'string' || entry.path.trim() === '' || !isAbsolute(entry.path) || resolve(entry.path) !== entry.path) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', `registry repo ${index} path is invalid`);
+  }
+  const canonicalPath = canonicalRepoPath(entry.path);
+  if (canonicalPath !== entry.path) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', `registry repo ${index} path is not canonical`);
+  }
+  if (entry.id !== repoHarnessRepoIdFor(canonicalPath)) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', `registry repo ${index} id does not match its canonical path`);
+  }
+  if (entry.accessMode !== 'read_only' && entry.accessMode !== 'read_write') {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', `registry repo ${index} access mode is invalid`);
+  }
+  if (entry.source !== 'adopt' && entry.source !== 'init' && entry.source !== 'mcp-setup'
+    && entry.source !== 'manual' && entry.source !== 'discovery') {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', `registry repo ${index} source is invalid`);
+  }
+  if (typeof entry.registeredAt !== 'string' || entry.registeredAt.trim() === ''
+    || typeof entry.lastSeenAt !== 'string' || entry.lastSeenAt.trim() === '') {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', `registry repo ${index} timestamps are invalid`);
+  }
+  return Object.freeze({
+    id: entry.id,
+    path: entry.path,
+    accessMode: entry.accessMode,
+    source: entry.source,
+    registeredAt: entry.registeredAt,
+    lastSeenAt: entry.lastSeenAt,
+  });
+}
+
+/**
+ * Read every authorized row once without the legacy empty-registry fallback.
+ * This does not touch repository paths: a missing or unsafe individual root
+ * is a repository-local fleet result, while malformed enumeration authority is
+ * fatal before a collector can claim it saw all authorized repositories.
+ */
+export function readRepoHarnessRegistryStrictSnapshot(opts: {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly adoptedOnly?: false;
+} = {}): RepoHarnessRegistryStrictSnapshot {
+  const registryPath = repoHarnessRegisteredReposPath(opts.env);
+  let stat;
+  try {
+    stat = lstatSync(registryPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return Object.freeze({
+        registryPath,
+        authorizationRevision: 0,
+        registryRevision: `sha256:${createHash('sha256').update('repo-harness-registry-v1:empty', 'utf-8').digest('hex')}`,
+        repos: Object.freeze([]),
+      });
+    }
+    throw new RepoHarnessRegistryStrictError('fleet_registry_unavailable', `cannot inspect registry authority: ${registryPath}`, error);
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', `registry authority is not a regular file: ${registryPath}`);
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(registryPath, 'utf-8');
+  } catch (error) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_unavailable', `cannot read registry authority: ${registryPath}`, error);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', `registry authority is not valid JSON: ${registryPath}`, error);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', 'registry authority must be an object');
+  }
+  const record = parsed as Record<string, unknown>;
+  if (JSON.stringify(Object.keys(record).sort()) !== JSON.stringify(['authorizationRevision', 'repos', 'version'])) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', 'registry authority fields are invalid');
+  }
+  if (record.version !== 1 || !Number.isInteger(record.authorizationRevision) || (record.authorizationRevision as number) < 0) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', 'registry authority version or revision is invalid');
+  }
+  if (!Array.isArray(record.repos)) {
+    throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', 'registry authority repos must be an array');
+  }
+  const repos = record.repos.map(strictRegistryEntry);
+  const ids = new Set<string>();
+  const paths = new Set<string>();
+  for (const repo of repos) {
+    if (ids.has(repo.id) || paths.has(repo.path)) {
+      throw new RepoHarnessRegistryStrictError('fleet_registry_invalid', 'registry authority has duplicate repository identities');
+    }
+    ids.add(repo.id);
+    paths.add(repo.path);
+  }
+  return Object.freeze({
+    registryPath,
+    authorizationRevision: record.authorizationRevision as number,
+    registryRevision: `sha256:${createHash('sha256').update(raw, 'utf-8').digest('hex')}`,
+    repos: Object.freeze([...repos].sort((left, right) => left.id.localeCompare(right.id))),
+  });
+}
+
+/**
+ * Serialize an authorization-sensitive operation with registry mutations.
+ *
+ * The callback observes one strict registry revision while its mutation lock
+ * remains held. Callers that also touch per-task state must take the task lock
+ * only inside this callback: registry authorization lock -> task lock is the
+ * sole permitted order. Registry mutation paths never acquire task locks.
+ */
+export function withRepoHarnessRegistryAuthorizationLock<T>(
+  opts: { readonly env?: NodeJS.ProcessEnv } = {},
+  action: (snapshot: RepoHarnessRegistryStrictSnapshot) => T,
+): T {
+  const registryPath = repoHarnessRegisteredReposPath(opts.env);
+  return withRegistryMutationLock(registryPath, () => (
+    action(readRepoHarnessRegistryStrictSnapshot({ env: opts.env, adoptedOnly: false }))
+  ));
 }
 
 export function repoHarnessAuthorizationRevision(env: NodeJS.ProcessEnv = process.env): number {
@@ -267,6 +508,7 @@ export function applyRepoHarnessRegistryBatch(
     readonly requireAdopted?: boolean;
     readonly bumpAuthorizationRevision?: boolean;
     readonly beforeCommit?: (authorizationRevision: number) => void;
+    readonly recordChanges?: (before: readonly RepoHarnessRegisteredRepo[], after: readonly RepoHarnessRegisteredRepo[]) => void;
     readonly onCommitFailure?: () => void;
   } = {},
 ): RepoHarnessRegistryBatchResult {
@@ -277,7 +519,7 @@ export function applyRepoHarnessRegistryBatch(
       const unadopted = canonicalEntries.find((entry) => !isRepoHarnessAdoptedPath(entry.repoRoot));
       if (unadopted) throw new Error(`repo is not repo-harness adopted: ${unadopted.repoRoot}`);
     }
-    const registry = readRegistryFile(registryPath);
+    const registry = opts.recordChanges ? readRepoHarnessRegistryStrictSnapshot({ env: opts.env }) : readRegistryFile(registryPath);
     const now = new Date().toISOString();
     let repos = dedupeRepos(registry.repos);
     let accessChanged = false;
@@ -286,7 +528,7 @@ export function applyRepoHarnessRegistryBatch(
       const accessMode = entry.accessMode ?? previous?.accessMode ?? 'read_only';
       if (accessMode !== (previous?.accessMode ?? 'read_only')) accessChanged = true;
       const next: RepoHarnessRegisteredRepo = {
-        id: previous?.id ?? repoHarnessRepoIdFor(entry.repoRoot),
+        id: repoHarnessRepoIdFor(entry.repoRoot),
         path: entry.repoRoot,
         accessMode,
         source: entry.source,
@@ -303,6 +545,7 @@ export function applyRepoHarnessRegistryBatch(
     const changed = JSON.stringify(repos) !== JSON.stringify(dedupeRepos(registry.repos)) || revisionChanged;
     let prepared = false;
     try {
+      opts.recordChanges?.(registry.repos, repos);
       opts.beforeCommit?.(authorizationRevision);
       prepared = true;
       if (changed) writeRegistryFile(registryPath, repos, authorizationRevision);
@@ -349,7 +592,7 @@ export function registerRepoHarnessRepo(
     const existing = dedupeRepos(registry.repos);
     const previous = existing.find((repo) => repo.path === canonical);
     const nextEntry: RepoHarnessRegisteredRepo = {
-      id: previous?.id ?? repoHarnessRepoIdFor(canonical),
+      id: repoHarnessRepoIdFor(canonical),
       path: canonical,
       accessMode: previous?.accessMode ?? "read_only",
       source,
@@ -399,4 +642,33 @@ export function setRepoHarnessAccessMode(
       authorizationRevision,
     };
   });
+}
+
+/** Restore only proven setup-owned rows while holding the registry's mutation lock. */
+export function restoreRepoHarnessRegistryEntries(
+  changes: readonly { before: RepoHarnessRegisteredRepo | null; installed: RepoHarnessRegisteredRepo }[],
+  opts: { env?: NodeJS.ProcessEnv; dryRun?: boolean } = {},
+): { restored: string[]; conflicts: string[] } {
+  const apply = () => {
+    const snapshot = readRepoHarnessRegistryStrictSnapshot({ env: opts.env });
+    let repos = [...snapshot.repos];
+    const restored: string[] = [], conflicts: string[] = [];
+    for (const entry of changes) {
+      strictRegistryEntry(entry.installed, 0);
+      if (entry.before) strictRegistryEntry(entry.before, 0);
+      if (entry.before && entry.before.path !== entry.installed.path) throw new Error('registry restore identity mismatch');
+      const current = repos.find((row) => row.path === entry.installed.path) ?? null;
+      const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+      if (equal(current, entry.before)) { restored.push(entry.installed.path); continue; }
+      if (!equal(current, entry.installed)) { conflicts.push(entry.installed.path); continue; }
+      repos = repos.filter((row) => row.path !== entry.installed.path);
+      if (entry.before) repos.push(entry.before);
+      restored.push(entry.installed.path);
+    }
+    if (!opts.dryRun && JSON.stringify(repos) !== JSON.stringify(snapshot.repos)) {
+      writeRegistryFile(snapshot.registryPath, repos, snapshot.authorizationRevision + 1);
+    }
+    return { restored, conflicts };
+  };
+  return opts.dryRun ? apply() : withRegistryMutationLock(repoHarnessRegisteredReposPath(opts.env), apply);
 }

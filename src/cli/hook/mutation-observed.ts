@@ -11,8 +11,8 @@
  * (append-only, one file per event) carrying dirty bits. The deferred
  * consumers (`consumePendingPostEditEvents`, invoked at Stop by
  * `runtime.ts`, and `pendingPostEditJournalSection`, surfaced at
- * SessionStart) replay the SAME external commands/functions the retired
- * scripts used, just later. See
+ * SessionStart) consume deferred changes; contract verification reads execution
+ * evidence without starting contract commands. See
  * `tasks/notes/20260720-1146-hrd-05-post-edit-event-journal.notes.md` for
  * the condition-by-condition dirty-bit derivation table and the falsifier
  * record.
@@ -29,6 +29,7 @@
  */
 
 import { execFileSync, spawnSync } from 'child_process';
+import { parseVerificationPlanFromContractText } from '../../core/evidence/verification-plan';
 import {
   existsSync,
   mkdirSync,
@@ -46,6 +47,7 @@ import { loadMinimalChangePolicy } from './minimal-change-policy';
 import { collectMinimalChangeSignals } from './minimal-change-signals';
 import { canonicalRepoRelativePath, fileExists, readText } from '../../effects/state/collect-state-inputs';
 import { withExclusiveDirectoryLock } from '../../effects/locking/exclusive-directory-lock';
+import { PROCESS_GROUP_CALL_TIMEOUT_OVERHEAD_MS, runProcess } from '../../effects/process-runner';
 import type { WorktreeOwnership } from '../../effects/loop/state-input-collector';
 import {
   artifactStemFromPlan,
@@ -74,6 +76,8 @@ export interface MutationObservedInput {
   readonly env?: NodeJS.ProcessEnv;
   /** HRD-08 event telemetry observer, invoked only after one journal transaction commits. */
   readonly observeJournalWrite?: (path: string) => void;
+  /** Narrow post-commit fault/observation seam; never driven by an env flag. */
+  readonly afterJournalWrite?: (path: string) => void;
 }
 
 export interface MutationObservedResult {
@@ -127,6 +131,7 @@ export function runMutationObserved(opts: MutationObservedInput): MutationObserv
     minimalChangeInfo: minimalChangeEnabled ? { path: filePath, baseRef: 'HEAD' } : null,
   });
   if (journalPath) opts.observeJournalWrite?.(journalPath);
+  if (journalPath) opts.afterJournalWrite?.(journalPath);
 
   return { exitCode: 0, stdout: out.join(''), stderr: errOut.join('') };
 }
@@ -244,11 +249,6 @@ function emitAdvisories(out: string[], filePath: string, base: string, dir: stri
     out.push('  Check: docs/architecture.md source tree may need updating\n');
   }
 
-  if (base === 'metro.config.js' || base === 'metro.config.ts') {
-    out.push('[DocDrift] Metro config changed\n');
-    out.push('  Check: docs/guides/metro-esm-gotchas.md may need updating\n');
-  }
-
   if (base === 'tsconfig.json' && /(^|\/)(packages|apps)\//.test(dir)) {
     out.push(`[DocDrift] TypeScript config changed in ${basename(dir)}\n`);
     out.push('  Check: docs/packages.md may need updating\n');
@@ -350,15 +350,15 @@ function getActiveContractPath(repoRoot: string, activePlan: string): string | n
 // NOT mutation-guard.ts's contractAllowsPath (a different check over a
 // different YAML section -- see notes file "Design Decisions" for the
 // side-by-side verification). Scans the contract's `exit_criteria` YAML
-// block's files_exist/tests_pass/files_contain/files_not_exist/
+// block's files_exist/files_contain/files_not_exist/
 // files_not_contain sections for a literal path match.
 // ---------------------------------------------------------------------------
 
 const CONTRACT_REFERENCES_SECTION_HEADERS = new Set([
-  'files_exist:', 'tests_pass:', 'files_contain:', 'files_not_exist:', 'files_not_contain:',
+  'files_exist:', 'files_contain:', 'files_not_exist:', 'files_not_contain:',
 ]);
 const CONTRACT_REFERENCES_LIST_SECTIONS = new Set(['files_exist', 'files_not_exist']);
-const CONTRACT_REFERENCES_PATH_SECTIONS = new Set(['tests_pass', 'files_contain', 'files_not_contain']);
+const CONTRACT_REFERENCES_PATH_SECTIONS = new Set(['files_contain', 'files_not_contain']);
 
 function extractFirstYamlBlock(text: string): string {
   const lines = text.split('\n');
@@ -377,6 +377,13 @@ function extractFirstYamlBlock(text: string): string {
 
 function contractReferencesPath(contractText: string, contractFile: string, filePath: string): boolean {
   if (filePath === contractFile) return true;
+  try {
+    const plan = parseVerificationPlanFromContractText(contractText);
+    if (plan.checks.some((check) => check.kind === 'package_test' && check.path === filePath)) return true;
+  } catch {
+    // Invalid plans need a read-only evaluation so the diagnostic stays visible.
+    return true;
+  }
   const yamlBlock = extractFirstYamlBlock(contractText);
   let section = '';
   for (const rawLine of yamlBlock.split('\n')) {
@@ -406,25 +413,7 @@ interface ContractVerificationTarget {
   readonly checksFile: string;
 }
 
-/**
- * EPC-05 orchestrator ruling (residual finding 2b, closed in this same
- * package): continuous contract verification (this Stop-time cascade) is
- * telemetry about "is the active contract still passing", not acceptance
- * evidence -- it must never write to the policy's `harness.checks_file`
- * (`.ai/harness/checks/latest.json`), the file
- * `src/effects/evidence/checks-materializer.ts` now exclusively authors
- * from the evidence ledger. Writing continuous-verification telemetry to
- * that same path was exactly the last-writer-wins shadow authority the
- * audit called out: a Stop-time run could silently clobber a frozen
- * `--prepare-acceptance` evidence bundle, and the two schemas are not even
- * compatible (`verify-contract.sh`'s own `write_report()` has no
- * `source`/`status`/`exit_code` fields at all -- nothing downstream could
- * even tell the two apart by content). This report gets its own,
- * deliberately-namespaced file instead; already covered by the existing
- * `.ai/harness/checks/*.latest.json` gitignore pattern. The policy default
- * itself (`resolveChecksFile` below, `harness.checks_file`) is unchanged --
- * every OTHER consumer of the acceptance-evidence checks file is unaffected.
- */
+/** Read-only contract telemetry stays separate from authoritative checks/latest. */
 const CONTRACT_VERIFICATION_REPORT_RELATIVE = '.ai/harness/checks/contract-verify.latest.json';
 
 /** `run_continuous_contract_verification()`'s guard (post-edit-guard.sh:31-47), ported condition-for-condition. */
@@ -563,6 +552,8 @@ export interface PostEditJournalEvent {
 
 const JOURNAL_ROOT = '.ai/harness/journal/post-edit';
 const JOURNAL_PENDING_DIR = `${JOURNAL_ROOT}/pending`;
+const POST_EDIT_CONSUME_BUDGET_MS = 15_000;
+const POST_EDIT_HELPER_TIMEOUT_MS = 10_000;
 
 /** Session-scoped coalesce key: a same-session edit to the same path set
  * overwrites the same pending file instead of appending unboundedly. */
@@ -736,12 +727,11 @@ export function readPendingPostEditEvents(repoRoot: string): readonly PostEditJo
 }
 
 /**
- * Retention decision (gate round-1 second widening, MEDIUM adjudicated): the
- * journal is a transit queue, not an evidence ledger (that is EPC scope --
- * out of scope for this row). Consumption DELETES the pending file outright;
- * there is no `consumed/` retention directory. A consumption failure simply
- * leaves the file in `pending/` for the next Stop to retry (see
- * `consumePendingPostEditEvents`'s per-event try/catch).
+ * The journal is a transit queue, not an evidence ledger. Consumption deletes
+ * the pending file outright; there is no `consumed/` retention directory.
+ * An effect that returns failure or reaches its deadline is reported and
+ * acknowledged so it cannot permanently pin the queue head. Storage and lock
+ * failures still leave the pending file for a later Stop.
  */
 function deletePendingPostEditEventFile(repoRoot: string, name: string): void {
   unlinkSync(join(repoRoot, JOURNAL_PENDING_DIR, name));
@@ -773,7 +763,7 @@ export function pendingPostEditJournalSection(repoRoot: string): SessionContextS
     // keeps this section (and the whole budgeted payload) from being
     // dropped.
     actionable: true,
-    reference: 'repo-harness run verify-contract',
+    reference: 'repo-harness run verification-plan evaluate',
   };
 }
 
@@ -804,32 +794,43 @@ function runRepoHarnessHelper(
   env: NodeJS.ProcessEnv,
   helper: string,
   args: readonly string[],
-): { status: number; stdout: string } {
+  timeoutMs: number,
+): { status: number; stdout: string; stderr: string; timedOut: boolean } {
   const cli = env.REPO_HARNESS_CLI;
+  let command: string;
+  let commandArgs: readonly string[];
   if (cli && existsSync(cli) && commandAvailable('bun', env)) {
-    const res = spawnSync('bun', [cli, 'run', helper, ...args], { cwd: repoRoot, encoding: 'utf-8', env });
-    return { status: res.status ?? 1, stdout: res.stdout ?? '' };
+    command = 'bun';
+    commandArgs = [cli, 'run', helper, ...args];
+  } else {
+    command = 'repo-harness';
+    commandArgs = ['run', helper, ...args];
   }
-  const res = spawnSync('repo-harness', ['run', helper, ...args], { cwd: repoRoot, encoding: 'utf-8', env });
-  return { status: res.status ?? 1, stdout: res.stdout ?? '' };
+  const result = runProcess(command, commandArgs, { cwd: repoRoot, env, inheritEnv: false, processGroup: true, timeoutMs });
+  return {
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    timedOut: result.timedOut,
+  };
 }
 
 /** capability-context's own 3-tier fallback (post-edit-guard.sh:73-93) --
  * NOT `run <helper>` shaped, ported as its own function. */
-function runCapabilityContextRequest(repoRoot: string, env: NodeJS.ProcessEnv): { status: number } {
+function runCapabilityContextRequest(repoRoot: string, env: NodeJS.ProcessEnv, timeoutMs: number): { status: number } {
   const args = ['capability-context', 'request', '--from-latest-architecture-event'];
   const cli = env.REPO_HARNESS_CLI;
   if (cli && existsSync(cli) && commandAvailable('bun', env)) {
-    const result = spawnSync('bun', [cli, ...args], { cwd: repoRoot, encoding: 'utf-8', env });
+    const result = runProcess('bun', [cli, ...args], { cwd: repoRoot, env, inheritEnv: false, processGroup: true, timeoutMs });
     return { status: result.status ?? 1 };
   }
   if (commandAvailable('repo-harness', env)) {
-    const result = spawnSync('repo-harness', args, { cwd: repoRoot, encoding: 'utf-8', env });
+    const result = runProcess('repo-harness', args, { cwd: repoRoot, env, inheritEnv: false, processGroup: true, timeoutMs });
     return { status: result.status ?? 1 };
   }
   const localCli = join(repoRoot, 'src/cli/index.ts');
   if (commandAvailable('bun', env) && existsSync(localCli)) {
-    const result = spawnSync('bun', [localCli, ...args], { cwd: repoRoot, encoding: 'utf-8', env });
+    const result = runProcess('bun', [localCli, ...args], { cwd: repoRoot, env, inheritEnv: false, processGroup: true, timeoutMs });
     return { status: result.status ?? 1 };
   }
   return { status: 1 };
@@ -849,20 +850,34 @@ export type ArchitectureCascadeResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: string };
 
-export function processArchitectureCascade(repoRoot: string, env: NodeJS.ProcessEnv, filePath: string): ArchitectureCascadeResult {
+export function processArchitectureCascade(
+  repoRoot: string,
+  env: NodeJS.ProcessEnv,
+  filePath: string,
+  budget: { readonly deadlineMs: number; readonly nowMs: () => number },
+): ArchitectureCascadeResult {
+  const remaining = () => Math.max(0, budget.deadlineMs - budget.nowMs());
+  const expired = (): ArchitectureCascadeResult => ({ ok: false, error: `legacy architecture cascade deadline exhausted before ${filePath}; drift retained for retry` });
+  if (remaining() <= 0) return expired();
   if (!repoHarnessRunnerAvailable(env)) {
     return { ok: false, error: `legacy architecture cascade runner is unavailable for ${filePath}` };
   }
-  const result = runRepoHarnessHelper(repoRoot, env, 'architecture-queue', ['record', '--file', filePath]);
+  const queueBudget = remaining();
+  if (queueBudget <= 0) return expired();
+  const result = runRepoHarnessHelper(repoRoot, env, 'architecture-queue', ['record', '--file', filePath], queueBudget);
   if (result.status !== 0) {
     return { ok: false, error: `legacy architecture cascade failed for ${filePath}: architecture-queue exited ${result.status}` };
   }
   if (/^\[ArchitectureDrift\] Request:/m.test(result.stdout)) {
-    const contextSync = runRepoHarnessHelper(repoRoot, env, 'context-contract-sync', ['sync-latest']);
+    const contextBudget = remaining();
+    if (contextBudget <= 0) return expired();
+    const contextSync = runRepoHarnessHelper(repoRoot, env, 'context-contract-sync', ['sync-latest'], contextBudget);
     if (contextSync.status !== 0) {
       return { ok: false, error: `legacy architecture cascade failed for ${filePath}: context-contract-sync exited ${contextSync.status}` };
     }
-    const capabilityContext = runCapabilityContextRequest(repoRoot, env);
+    const capabilityBudget = remaining();
+    if (capabilityBudget <= 0) return expired();
+    const capabilityContext = runCapabilityContextRequest(repoRoot, env, capabilityBudget);
     if (capabilityContext.status !== 0) {
       return { ok: false, error: `legacy architecture cascade failed for ${filePath}: capability-context exited ${capabilityContext.status}` };
     }
@@ -870,33 +885,48 @@ export function processArchitectureCascade(repoRoot: string, env: NodeJS.Process
   return { ok: true };
 }
 
-/** `run_continuous_contract_verification()`'s durable action (post-edit-guard.sh:31-47). */
+/** Evaluate the current plan without starting missing verification commands. */
 function processContractVerification(
   repoRoot: string,
   env: NodeJS.ProcessEnv,
   contractFile: string,
   checksFilePath: string,
-): void {
-  if (!repoHarnessRunnerAvailable(env)) return;
+  timeoutMs: number,
+): { status: number; stderr: string; timedOut: boolean } | null {
+  if (!repoHarnessRunnerAvailable(env)) return null;
   try {
     mkdirSync(dirname(join(repoRoot, checksFilePath)), { recursive: true });
   } catch {
     /* best-effort */
   }
-  runRepoHarnessHelper(repoRoot, env, 'verify-contract', ['--contract', contractFile, '--quiet', '--report-file', checksFilePath]);
+  const result = runRepoHarnessHelper(
+    repoRoot,
+    env,
+    'verification-plan',
+    ['evaluate', '--repo', repoRoot, '--contract', contractFile, '--report-file', checksFilePath],
+    timeoutMs,
+  );
+  return { status: result.status, stderr: result.stderr, timedOut: result.timedOut };
 }
 
 /** `minimal_change_hook_entry signals --phase post-edit` port -- calls the
  * SAME `collectMinimalChangeSignals()` function `minimal-change-observer.sh`
  * called (via minimal-change-cli.ts), just deferred to Stop time using the
  * path+baseRef captured in the journal event's payload. */
-function processMinimalChangeDeferred(repoRoot: string, path: string, baseRef: string): void {
+function processMinimalChangeDeferred(
+  repoRoot: string,
+  path: string,
+  baseRef: string,
+  deadlineMs: number,
+  nowMs: () => number,
+): { timedOut: boolean } {
   try {
     const policy = loadMinimalChangePolicy(repoRoot);
-    collectMinimalChangeSignals({ repoRoot, path, policy, baseRef });
+    collectMinimalChangeSignals({ repoRoot, path, policy, baseRef, deadlineMs, nowMs });
   } catch {
     // Matches minimal-change-cli.ts's own non-fatal "signals skipped" stance.
   }
+  return { timedOut: nowMs() >= deadlineMs };
 }
 
 export interface PostEditConsumeSummary {
@@ -907,6 +937,15 @@ export interface PostEditConsumeSummary {
    * stderr (see below), returned too so tests/callers can observe it
    * without capturing the process stream. */
   readonly warnings: readonly string[];
+}
+
+export interface PostEditConsumeOptions {
+  /** Absolute wall-clock deadline for this queue pass. */
+  readonly deadlineMs?: number;
+  /** Per helper ceiling, always clamped to the remaining queue budget. */
+  readonly helperTimeoutMs?: number;
+  /** Test seam for deterministic budget exhaustion. */
+  readonly nowMs?: () => number;
 }
 
 /** Writes one warning line to the real process stderr -- host-visible and
@@ -921,18 +960,26 @@ function warnStderr(line: string): void {
 }
 
 /**
- * Processes every pending journal event's dirty bits (contract verification,
- * deferred minimal-change signals) and deletes the event on success.
- * Best-effort per event: one event's failure leaves its file in `pending/`
- * for the next Stop to retry rather than losing the others or throwing out of
- * Stop. Corrupt pending files (unparseable JSON, wrong schema) are removed
- * outright with a stderr warning -- they can never be "retried" into
- * validity.
+ * Processes pending journal events within one bounded Stop-time pass. External
+ * helpers are process-group supervised and clamped to the pass deadline.
+ * Completed, failed, and timed-out effects are all acknowledged; the latter
+ * two emit warnings so one slow event cannot pin the queue head forever.
+ * Events not reached before the total budget remain pending for the next Stop,
+ * as do storage/lock failures. Corrupt files are removed with a warning because
+ * they can never be retried into validity.
  */
 export function consumePendingPostEditEvents(
   repoRoot: string,
   env: NodeJS.ProcessEnv = process.env,
+  options: PostEditConsumeOptions = {},
 ): PostEditConsumeSummary {
+  const nowMs = options.nowMs ?? Date.now;
+  const deadlineMs = options.deadlineMs ?? nowMs() + POST_EDIT_CONSUME_BUDGET_MS;
+  const helperTimeoutMs = options.helperTimeoutMs ?? POST_EDIT_HELPER_TIMEOUT_MS;
+  if (!Number.isFinite(deadlineMs)) throw new Error('post-edit journal deadline must be finite');
+  if (!Number.isSafeInteger(helperTimeoutMs) || helperTimeoutMs < 1) {
+    throw new Error('post-edit journal helper timeout must be a positive integer');
+  }
   migratePendingPostEditJournalV1(repoRoot, 100);
   const { valid, corruptNames } = scanPendingPostEditEventFiles(repoRoot);
   let consumed = 0;
@@ -951,21 +998,45 @@ export function consumePendingPostEditEvents(
   }
 
   for (const { name, event } of valid) {
+    const remainingMs = Math.floor(deadlineMs - nowMs());
     try {
-      if (event.dirty['contract-verification'] && event.payload.contract_verification) {
-        processContractVerification(
-          repoRoot,
-          env,
-          event.payload.contract_verification.contract_file,
-          event.payload.contract_verification.checks_file,
-        );
+      const eventFailures: string[] = [];
+      const deadlineElapsed = remainingMs <= 0;
+      const hasDeferredEffect = Boolean(
+        (event.dirty['contract-verification'] && event.payload.contract_verification)
+        || (event.dirty['minimal-change'] && event.payload.minimal_change),
+      );
+      if (deadlineElapsed && hasDeferredEffect) {
+        eventFailures.push('journal deadline elapsed before deferred effects');
+      } else if (event.dirty['contract-verification'] && event.payload.contract_verification) {
+        const targetTimeoutMs = Math.min(helperTimeoutMs, remainingMs - PROCESS_GROUP_CALL_TIMEOUT_OVERHEAD_MS);
+        if (targetTimeoutMs < 1) {
+          eventFailures.push('contract verification skipped because the remaining journal budget cannot cover process cleanup');
+        } else {
+          const verification = processContractVerification(
+            repoRoot,
+            env,
+            event.payload.contract_verification.contract_file,
+            event.payload.contract_verification.checks_file,
+            targetTimeoutMs,
+          );
+          if (verification && verification.status !== 0) {
+            const detail = verification.timedOut
+              ? `contract verification timed out after ${targetTimeoutMs}ms`
+              : `contract verification exited ${verification.status}${verification.stderr.trim() ? `: ${verification.stderr.trim().slice(0, 300)}` : ''}`;
+            eventFailures.push(detail);
+          }
+        }
       }
-      if (event.dirty['minimal-change'] && event.payload.minimal_change) {
-        processMinimalChangeDeferred(
+      if (!deadlineElapsed && event.dirty['minimal-change'] && event.payload.minimal_change) {
+        const minimalChange = processMinimalChangeDeferred(
           repoRoot,
           event.payload.minimal_change.path,
           event.payload.minimal_change.base_ref,
+          deadlineMs,
+          nowMs,
         );
+        if (minimalChange.timedOut) eventFailures.push('minimal-change signals reached the journal deadline');
       }
       const root = realpathSync(repoRoot);
       const key = name.replace(/\.json$/, '');
@@ -976,7 +1047,16 @@ export function consumePendingPostEditEvents(
         deletePendingPostEditEventFile(root, name);
         deleted = true;
       });
-      if (deleted) consumed += 1;
+      if (deleted) {
+        consumed += 1;
+        if (eventFailures.length > 0) {
+          errors += eventFailures.length;
+          const warning = `[PostEditJournal] WARN: removed pending event ${event.event_id} after ${eventFailures.join('; ')}`;
+          warnings.push(warning);
+          warnStderr(warning);
+        }
+      }
+      if (nowMs() >= deadlineMs) break;
     } catch {
       errors += 1;
     }

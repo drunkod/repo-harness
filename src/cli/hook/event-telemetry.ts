@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from 'crypto';
-import { appendFileSync, mkdirSync } from 'fs';
 import { performance } from 'perf_hooks';
 import { join } from 'path';
 import type {
+  HookEventTelemetryEffectObservation,
   HookEventTelemetryMetric,
   HookEventTelemetryRecord,
   HookEventTelemetryStep,
 } from '../../core/loop/loop-event-protocol';
 import type { HookEvent, RouteHost, RouteId } from './route-registry';
 import { resolveRunIdentity } from './run-identity';
+import { appendHookEventLog } from '../../effects/hook-event-log';
 
 export const HOOK_EVENT_TELEMETRY_PROTOCOL = 'loop-engine-hook-event/v1' as const;
 export const HOOK_EVENT_TELEMETRY_PATH = '.ai/harness/runs/hook-events.jsonl';
@@ -26,6 +27,23 @@ const METRICS: readonly HookEventTelemetryMetric[] = [
   'elapsed_ms',
 ];
 
+/**
+ * Metrics whose zero/one value is trustworthy without an explicit observer.
+ *
+ * `child_processes` counts *direct route-runtime children* -- a dispatch that
+ * spawns its route instead of running a typed handler in process. It is not a
+ * count of every fork under the handler: the Git and Bun plumbing inside
+ * session-context, mutation-observed and friends is handler business logic and
+ * is deliberately excluded (`scripts/hook-dispatch-diet-report.ts` states the
+ * same split in its report legend). `recordDirectChildProcess` therefore has no
+ * call site by design -- it is the sentinel that would go non-zero if a route
+ * ever regressed to the retired `run-hook.sh` shape, which is why
+ * `tests/hook-runtime.test.ts` ("typed handlers do not ... spawn a route
+ * child") and `tests/hook-runtime-characterization.test.ts` both pin it to 0.
+ * Wiring it into the internal spawn sites would not close a measurement gap; it
+ * would destroy the invariant those tests assert. See
+ * `docs/researches/20260721-hrd09-legacy-retirement-evidence.md`.
+ */
 const ALWAYS_COMPLETE: readonly HookEventTelemetryMetric[] = [
   'runtime_entries',
   'child_processes',
@@ -52,6 +70,7 @@ export interface HookEventTelemetryFinalResult {
   readonly exitCode: number;
   readonly reason: string;
   readonly blocked?: boolean;
+  readonly effectObservation?: HookEventTelemetryEffectObservation;
 }
 
 export interface HookEventTelemetryAccumulator {
@@ -111,9 +130,7 @@ function roundMs(value: number): number {
 
 function writeRecord(repoRoot: string, record: HookEventTelemetryRecord): void {
   try {
-    const runsDir = join(repoRoot, '.ai/harness/runs');
-    mkdirSync(runsDir, { recursive: true });
-    appendFileSync(join(repoRoot, HOOK_EVENT_TELEMETRY_PATH), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    appendHookEventLog(join(repoRoot, HOOK_EVENT_TELEMETRY_PATH), `${JSON.stringify(record)}\n`, repoRoot);
   } catch {
     // Runtime telemetry is non-authoritative and must never alter hook safety.
   }
@@ -233,6 +250,7 @@ export function createHookEventTelemetry(
           incomplete_metrics: incompleteMetrics,
           opaque_steps: [...opaqueSteps],
         },
+        effect_observation: result.effectObservation,
       };
       const semanticFingerprint = {
         event: options.event,
@@ -257,6 +275,7 @@ export function createHookEventTelemetry(
           event_writes: eventWrites,
         },
         measurement: unsigned.measurement,
+        effect_observation: unsigned.effect_observation,
       };
       finalized = {
         ...unsigned,
@@ -297,6 +316,7 @@ export function isHookEventTelemetryRecord(value: unknown): value is HookEventTe
     !/^sha256:[0-9a-f]{64}$/.test(record.fingerprint)
   ) return false;
   const metrics = record.metrics;
+  if (!isEffectObservation(record.effect_observation)) return false;
   return (
     finiteNonNegative(metrics.state_resolutions) &&
     finiteNonNegative(metrics.child_processes) &&
@@ -312,4 +332,28 @@ export function isHookEventTelemetryRecord(value: unknown): value is HookEventTe
     Array.isArray(record.measurement.incomplete_metrics) &&
     Array.isArray(record.measurement.opaque_steps)
   );
+}
+
+function isEffectObservation(value: unknown): value is HookEventTelemetryEffectObservation | undefined {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const observation = value as Partial<HookEventTelemetryEffectObservation>;
+  const states = ['none_committed', 'unknown_partial', 'committed_partial', 'committed_complete'];
+  const cardinals = ['zero-or-one', 'bounded-sequence'];
+  const recoveries = ['retry-converges', 'reconcile-required'];
+  return typeof observation.contract_id === 'string'
+    && observation.contract_id.trim().length > 0
+    && observation.boundary === 'durable-emission'
+    && typeof observation.cardinality === 'string'
+    && cardinals.includes(observation.cardinality)
+    && typeof observation.recovery === 'string'
+    && recoveries.includes(observation.recovery)
+    && typeof observation.state === 'string'
+    && states.includes(observation.state)
+    && Array.isArray(observation.committed_phases)
+    && observation.committed_phases.every((phase) => typeof phase === 'string' && phase.length > 0)
+    && new Set(observation.committed_phases).size === observation.committed_phases.length
+    && (observation.last_committed_phase === null
+      || (typeof observation.last_committed_phase === 'string'
+        && observation.committed_phases.includes(observation.last_committed_phase)));
 }

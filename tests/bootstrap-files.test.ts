@@ -77,9 +77,9 @@ describe("Bootstrap Script Contracts", () => {
     const specs: Array<{ name: string; model: string; effort: string; sandboxMode?: string }> = [
       { name: "explorer", model: "gpt-5.6-luna", effort: "high", sandboxMode: "read-only" },
       { name: "deep-reasoner", model: "gpt-5.6-terra", effort: "xhigh", sandboxMode: "read-only" },
-      { name: "fast-worker", model: "gpt-5.6-luna", effort: "max", sandboxMode: "workspace-write" },
-      { name: "deep-worker", model: "gpt-5.6-terra", effort: "xhigh", sandboxMode: "workspace-write" },
-      { name: "gatekeeper", model: "gpt-5.6-terra", effort: "xhigh", sandboxMode: "read-only" },
+      { name: "fast-worker", model: "gpt-6-astra", effort: "low", sandboxMode: "workspace-write" },
+      { name: "deep-worker", model: "gpt-6-astra", effort: "medium", sandboxMode: "workspace-write" },
+      { name: "gatekeeper", model: "gpt-6-astra", effort: "medium", sandboxMode: "read-only" },
       { name: "root-cause-prover", model: "gpt-5.6-terra", effort: "high", sandboxMode: "workspace-write" },
       { name: "harness-evaluator", model: "gpt-5.6-terra", effort: "high", sandboxMode: "workspace-write" },
     ];
@@ -96,7 +96,10 @@ describe("Bootstrap Script Contracts", () => {
       expect(toml).not.toContain("Opus 4.8 at max effort");
       expect(toml).not.toContain("Sonnet 5 at max effort");
       expect(toml).toContain("developer_instructions = '''");
-      expect(toml).toContain(
+      // Persona owns role identity only. The execution boundary is injected once
+      // by the runtime task packet (SubagentStart context), contract- and
+      // writability-aware, so a read-only persona is never told to implement.
+      expect(toml).not.toContain(
         "Execution boundary: implement exactly the Goal, In scope items, Allowed Paths, and Exit Criteria in this brief."
       );
       expect(read(`agents/fleet/${spec.name}.md`)).toContain(`name: ${spec.name}`);
@@ -153,7 +156,7 @@ describe("Bootstrap Script Contracts", () => {
     expect(claude).not.toContain("gstack");
     expect(claude).toContain("operations.deploy_sql");
     expect(agents).toContain("tasks/todos.md");
-    expect(agents).toContain("repo-harness run check-task-workflow --strict");
+    expect(agents).toContain("bash scripts/check-task-workflow.sh --strict");
     expect(agents).toContain("check-agent-tooling.sh --host both --check-updates");
     expect(agents).toContain("operations.deploy_sql");
   });
@@ -318,7 +321,10 @@ describe("Bootstrap Script Contracts", () => {
     expect(contract.artifacts.requiredFiles).not.toContain("scripts/capture-plan.sh");
     expect(contract.artifacts.requiredFiles).not.toContain("scripts/refresh-current-status.sh");
     expect(contract.artifacts.requiredFiles).not.toContain("scripts/sync-brain-docs.sh");
-    expect(contract.artifacts.requiredFiles).toContain("tasks/current.md");
+    expect(contract.artifacts.requiredFiles).not.toContain("tasks/current.md");
+    // ignored local read model: same list membership as .ai/harness/handoff/current.md
+    expect(contract.artifacts.runtimeFiles).toContain("tasks/current.md");
+    expect(contract.artifacts.runtimeFiles).toContain(".ai/harness/handoff/current.md");
     expect(contract.artifacts.requiredFiles).not.toContain("scripts/capability-config.ts");
     expect(contract.artifacts.requiredFiles).toContain(".ai/harness/workflow-contract.json");
     expect(contract.artifacts.requiredFiles).not.toContain(".codex/hooks.json");
@@ -489,25 +495,21 @@ describe("Bootstrap Script Contracts", () => {
   // tests/cli/cross-review.test.ts, not by scanning Skill Markdown for
   // embedded shell variable assignments. This test now checks the one
   // canonical repo-harness-cross-review package's own prose properties:
-  // read-only provider boundaries, model/timeout budgets, transcript
-  // recovery, and the no-merge-gate guarantee.
-  test("repo-harness-cross-review documents read-only scope, timeouts, transcript recovery, and no-merge-gate boundaries", () => {
-    const claudeMode = read("assets/skills/repo-harness-cross-review/references/claude-mode.md");
+  // read-only provider boundaries, model/timeout budgets, structured plugin
+  // validation, and the no-merge-gate guarantee.
+  test("repo-harness-cross-review documents direct and official-plugin read-only review boundaries", () => {
+    const pluginMode = read("assets/skills/repo-harness-cross-review/references/codex-plugin-mode.md");
     const codexMode = read("assets/skills/repo-harness-cross-review/references/codex-mode.md");
 
-    expect(claudeMode).toContain("read-only reviewer");
-    expect(claudeMode).toContain("no `Bash`/`Edit`/`Write`");
-    expect(claudeMode).toContain("Pinned to the `fable` alias");
-    expect(claudeMode).toContain("Exactly two attempts");
-    expect(claudeMode).toContain("attempt 2 always re-runs on `opus`");
-    expect(claudeMode).toContain("`skipped`: advisory and\n  non-blocking (exit 0)");
-    expect(claudeMode).toContain("do not re-run the review");
-    expect(claudeMode).toContain("330 seconds");
-    expect(claudeMode).toContain("~/.claude/projects/<project>/<session-id>.jsonl");
-    expect(claudeMode).toContain("malformed_transcript");
-    expect(claudeMode).toContain("repo-harness cross-review --provider claude");
-    expect(claudeMode).toContain("No merge-gate");
-    expect(claudeMode).toContain("silently retried against Codex");
+    expect(pluginMode).toContain("official Claude Code");
+    expect(pluginMode).toContain("claude plugin list --json");
+    expect(pluginMode).toContain("adversarial-review --json");
+    expect(pluginMode).toContain("read-only sandbox");
+    expect(pluginMode).toContain("critical|high -> P1");
+    expect(pluginMode).toContain("repo-harness cross-review --provider codex-plugin");
+    expect(pluginMode).toContain("Review Gate stays disabled");
+    expect(pluginMode).toContain("No merge-gate");
+    expect(pluginMode).toContain("source=codex-plugin");
 
     expect(codexMode).toContain("read-only reviewer");
     expect(codexMode).toContain("read-only Bash access");

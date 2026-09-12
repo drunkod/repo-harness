@@ -7,9 +7,28 @@ GIT_BIN="${REPO_HARNESS_GIT_BIN:-/usr/bin/git}"
 BASH_BIN="${REPO_HARNESS_BASH_BIN:-/bin/bash}"
 BUN_BIN="${REPO_HARNESS_BUN_BIN:-}"
 WORKFLOW_STATE_LIB="${REPO_HARNESS_WORKFLOW_STATE_LIB:-.ai/hooks/lib/workflow-state.sh}"
-[[ "$GIT_BIN" == /* && -x "$GIT_BIN" ]] || { echo "ship-worktrees: trusted git executable is unavailable" >&2; exit 1; }
-[[ "$BASH_BIN" == /* && -x "$BASH_BIN" ]] || { echo "ship-worktrees: trusted bash executable is unavailable" >&2; exit 1; }
-if [[ -n "$BUN_BIN" ]] && [[ "$WORKFLOW_STATE_LIB" != /* || ! -f "$WORKFLOW_STATE_LIB" || -L "$WORKFLOW_STATE_LIB" ]]; then
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+  GIT_BIN="${GIT_BIN//\\//}"
+  BASH_BIN="${BASH_BIN//\\//}"
+  BUN_BIN="${BUN_BIN//\\//}"
+  WORKFLOW_STATE_LIB="${WORKFLOW_STATE_LIB//\\//}"
+  REPO_HARNESS_TARGET_REPO_ROOT="${REPO_HARNESS_TARGET_REPO_ROOT:-}"
+  REPO_HARNESS_TARGET_REPO_ROOT="${REPO_HARNESS_TARGET_REPO_ROOT//\\//}"
+  REPO_HARNESS_HELPER_SOURCE_PATH="${REPO_HARNESS_HELPER_SOURCE_PATH:-}"
+  REPO_HARNESS_HELPER_SOURCE_PATH="${REPO_HARNESS_HELPER_SOURCE_PATH//\\//}"
+fi
+is_absolute_host_path() {
+  case "$1" in
+    /*) return 0 ;;
+    [A-Za-z]:/*|[A-Za-z]:\\*) [[ "${OS:-}" == "Windows_NT" ]] && return 0 ;;
+  esac
+  return 1
+}
+is_trusted_executable() { is_absolute_host_path "$1" && [[ -f "$1" && ! -L "$1" && -x "$1" ]]; }
+is_trusted_regular_file() { is_absolute_host_path "$1" && [[ -f "$1" && ! -L "$1" ]]; }
+is_trusted_executable "$GIT_BIN" || { echo "ship-worktrees: trusted git executable is unavailable" >&2; exit 1; }
+is_trusted_executable "$BASH_BIN" || { echo "ship-worktrees: trusted bash executable is unavailable" >&2; exit 1; }
+if [[ -n "$BUN_BIN" ]] && ! is_trusted_regular_file "$WORKFLOW_STATE_LIB"; then
   echo "ship-worktrees: trusted workflow-state library is unavailable" >&2
   exit 1
 fi
@@ -32,6 +51,11 @@ if [[ -n "${REPO_HARNESS_HELPER_SOURCE_PATH:-}" && -f "$REPO_HARNESS_HELPER_SOUR
   helper_source="$REPO_HARNESS_HELPER_SOURCE_PATH"
 fi
 helper_dir="$(cd "$(dirname "$helper_source")" && pwd)"
+
+worktree_merge_lib="$helper_dir/worktree-merge-lib.sh"
+[[ -f "$worktree_merge_lib" ]] || { echo "ship-worktrees: worktree merge library is unavailable: $worktree_merge_lib" >&2; exit 1; }
+# shellcheck source=worktree-merge-lib.sh
+. "$worktree_merge_lib"
 
 usage() {
   cat <<'USAGE_EOF'
@@ -356,13 +380,22 @@ closeout_journal_has_phase() {
 closeout_journal_phase_ref() {
   local file="$1/status.json" name="$2"
   [[ -f "$file" ]] || return 1
-  sed -n "s/^    {\"phase\": \"${name}\", \"at\": \"[^\"]*\", \"ref\": \"\([^\"]*\)\"}.*\$/\1/p" "$file" | tail -1
+  sed -n "s/^    {\"phase\": \"${name}\", \"at\": \"[^\"]*\", \"ref\": \"\([^\"]*\)\".*\$/\1/p" "$file" | tail -1
+}
+
+# Publication payloads are emitted as one canonical JSON line by the trusted
+# CLI. This reads only that durable carrier; validation happens in the CLI
+# before any retry is allowed to reuse it.
+closeout_journal_phase_publication() {
+  local file="$1/status.json" name="$2"
+  [[ -f "$file" ]] || return 1
+  sed -n "/^    {\"phase\": \"${name}\", / { s/^.*\"publication\": //; s/,$//; s/}$//; p; }" "$file" | tail -1
 }
 
 # Rewrites the whole status document so the phase list has exactly one authority
 # and lands in one atomic rename. An empty phase name only flips the status.
 closeout_journal_record() {
-  local dir="$1" status_value="$2" name="$3" ref="${4:-}"
+  local dir="$1" status_value="$2" name="$3" ref="${4:-}" publication="${5:-}"
   local file="$dir/status.json"
   local -a lines=()
   local line stamp index
@@ -374,7 +407,13 @@ closeout_journal_record() {
   fi
   stamp="$(date '+%Y-%m-%dT%H:%M:%S%z')"
   if [[ -n "$name" ]]; then
-    lines+=("{\"phase\": \"$(json_escape "$name")\", \"at\": \"$stamp\", \"ref\": \"$(json_escape "$ref")\"}")
+    if [[ -n "$publication" ]]; then
+      # The trusted publication CLI emits this canonical JSON object. It is
+      # journal evidence, not workflow state, and supports crash convergence.
+      lines+=("{\"phase\": \"$(json_escape "$name")\", \"at\": \"$stamp\", \"ref\": \"$(json_escape "$ref")\", \"publication\": $publication}")
+    else
+      lines+=("{\"phase\": \"$(json_escape "$name")\", \"at\": \"$stamp\", \"ref\": \"$(json_escape "$ref")\"}")
+    fi
   fi
   {
     printf '{\n'
@@ -641,7 +680,7 @@ ship_transaction_begin() {
 # rollback, because by then the push is already an external effect.
 ship_transaction_phase() {
   [[ -n "$closeout_journal_dir" ]] || return 0
-  closeout_journal_record "$closeout_journal_dir" in_progress "$1" "${2:-}"
+  closeout_journal_record "$closeout_journal_dir" in_progress "$1" "${2:-}" "${3:-}"
 }
 
 ship_transaction_complete() {
@@ -798,7 +837,7 @@ discard_scaffold_dirty_paths() {
     run_cmd git -C "$worktree" checkout -- "${tracked_paths[@]}"
   fi
 
-  for path in "${untracked_paths[@]}"; do
+  for path in ${untracked_paths[@]+"${untracked_paths[@]}"}; do
     if [[ "$DRY_RUN" -eq 1 ]]; then
       echo "[Ship] would remove scaffold file: $worktree/$path"
     else
@@ -865,7 +904,7 @@ require_finish_ready() {
   [[ -n "$review_file" && -f "$review_file" ]] || fail "active sprint review is missing"
 
   [[ -f "$helper_dir/acceptance-receipt.ts" ]] || fail "AcceptanceReceipt helper is missing: $helper_dir/acceptance-receipt.ts"
-  [[ "$BUN_BIN" == /* && -x "$BUN_BIN" ]] || fail "AcceptanceReceipt requires the trusted Bun runtime injected by repo-harness run"
+  is_trusted_executable "$BUN_BIN" || fail "AcceptanceReceipt requires the trusted Bun runtime injected by repo-harness run"
   REPO_HARNESS_TARGET_REPO_ROOT="$(pwd -P)" "$BUN_BIN" "$helper_dir/acceptance-receipt.ts" verify \
     --contract "$contract_file" --verification ".ai/harness/checks/latest.json" >/dev/null \
     || fail "active AcceptanceReceipt is missing, rejected, or stale"
@@ -885,7 +924,7 @@ finish_contract_worktree() {
 verify_merge_gate_before_ship() {
   local base_ref="$1"
   [[ -f "$helper_dir/merge-gate.ts" ]] || fail "merge-gate helper is missing: $helper_dir/merge-gate.ts"
-  [[ "$BUN_BIN" == /* && -x "$BUN_BIN" ]] || fail "merge gate requires the trusted Bun runtime injected by repo-harness run"
+  is_trusted_executable "$BUN_BIN" || fail "merge gate requires the trusted Bun runtime injected by repo-harness run"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     git rev-parse HEAD
     return 0
@@ -896,7 +935,7 @@ verify_merge_gate_before_ship() {
 seal_merge_gate_before_ship() {
   local base_ref="$1"
   [[ -f "$helper_dir/merge-gate.ts" ]] || fail "merge-gate helper is missing: $helper_dir/merge-gate.ts"
-  [[ "$BUN_BIN" == /* && -x "$BUN_BIN" ]] || fail "merge gate requires the trusted Bun runtime injected by repo-harness run"
+  is_trusted_executable "$BUN_BIN" || fail "merge gate requires the trusted Bun runtime injected by repo-harness run"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     git rev-parse HEAD
     return 0
@@ -906,10 +945,9 @@ seal_merge_gate_before_ship() {
 
 merge_gate_required() {
   local base_ref="$1" result
-  [[ "$BUN_BIN" == /* && -x "$BUN_BIN" ]] || fail "merge gate requires the trusted Bun runtime injected by repo-harness run"
-  command -v jq >/dev/null 2>&1 || fail "merge gate preflight requires jq"
-  result="$("$BUN_BIN" "$helper_dir/merge-gate.ts" fingerprint --base "$base_ref" --format json)" || fail "cannot read merge-gate requirement from $base_ref"
-  printf '%s' "$result" | jq -er '.required == true' >/dev/null 2>&1
+  is_trusted_executable "$BUN_BIN" || fail "merge gate requires the trusted Bun runtime injected by repo-harness run"
+  result="$("$BUN_BIN" "$helper_dir/merge-gate.ts" fingerprint --base "$base_ref" --format required)" || fail "cannot read merge-gate requirement from $base_ref"
+  [[ "$result" == "true" ]]
 }
 
 refresh_target_base() {
@@ -995,6 +1033,198 @@ create_or_report_pr() {
   fail "gh pr create failed for $branch (exit $status)"
 }
 
+# A claim token is only a locator. The publication CLI re-reads the shared
+# common-dir lease owner record before it reads task_revision or generation.
+publication_claim_id=""
+publication_task_id=""
+publication_journal_payload=""
+publication_create_intent=""
+publication_create_intent_journal=""
+publication_cli_stdout=""
+publication_cli_stderr=""
+
+resolve_publication_claim_token() {
+  local marker dir token
+  publication_claim_id=""
+  publication_task_id=""
+  publication_token_file=""
+  marker="$(policy_get '.sprints.active_marker_file' '.ai/harness/sprint/active-sprint')"
+  dir="$(dirname "$marker")/claims"
+  [[ -d "$dir" ]] || return 1
+  for token in "$dir"/*.claim; do
+    [[ -f "$token" ]] || continue
+    [[ -z "$publication_token_file" ]] || return 1
+    publication_token_file="$token"
+  done
+  [[ -n "$publication_token_file" ]] || return 1
+  publication_claim_id="$(sed -n 's/^claim_id=//p' "$publication_token_file" | head -1)"
+  publication_task_id="$(sed -n 's/^task_id=//p' "$publication_token_file" | head -1)"
+  [[ -n "$publication_claim_id" && -n "$publication_task_id" ]]
+}
+
+publication_cli() {
+  publication_command_cli receipt "$@"
+}
+
+publication_command_cli() {
+  if [[ -n "${REPO_HARNESS_CLI_BIN:-}" ]]; then
+    is_trusted_executable "$REPO_HARNESS_CLI_BIN" || return 1
+    "$REPO_HARNESS_CLI_BIN" publication "$@"
+  elif [[ -n "$BUN_BIN" ]] && is_trusted_executable "$BUN_BIN" && [[ -f "src/cli/index.ts" ]]; then
+    "$BUN_BIN" "src/cli/index.ts" publication "$@"
+  elif command -v repo-harness >/dev/null 2>&1; then
+    repo-harness publication "$@"
+  else
+    return 1
+  fi
+}
+
+# Keep trusted CLI stdout separate from diagnostics. The journal consumes only
+# a revalidated single JSON envelope; provider/tool log noise is never embedded.
+publication_cli_capture() {
+  local stdout_file stderr_file status
+  publication_cli_stdout=""
+  publication_cli_stderr=""
+  stdout_file="$(mktemp "${TMPDIR:-/tmp}/repo-harness-publication.stdout.XXXXXX")" || return 1
+  stderr_file="$(mktemp "${TMPDIR:-/tmp}/repo-harness-publication.stderr.XXXXXX")" || {
+    rm -f "$stdout_file"
+    return 1
+  }
+  if publication_cli "$@" >"$stdout_file" 2>"$stderr_file"; then
+    status=0
+  else
+    status=$?
+  fi
+  publication_cli_stdout="$(<"$stdout_file")"
+  publication_cli_stderr="$(<"$stderr_file")"
+  rm -f "$stdout_file" "$stderr_file"
+  return "$status"
+}
+
+validate_publication_journal_envelope() {
+  local kind="$1" payload="$2"
+  [[ -n "$payload" ]] || return 1
+  if ! publication_cli_capture validate-journal-envelope --kind "$kind" --json "$payload"; then
+    [[ -z "$publication_cli_stderr" ]] || printf '%s\n' "$publication_cli_stderr" >&2
+    return 1
+  fi
+  [[ -z "$publication_cli_stderr" ]] || printf '%s\n' "$publication_cli_stderr" >&2
+  [[ -n "$publication_cli_stdout" ]] || return 1
+  printf '%s' "$publication_cli_stdout"
+}
+
+prepare_publication_receipt() {
+  local branch="$1" output validated
+  publication_create_intent=""
+  publication_create_intent_journal=""
+  if ! resolve_publication_claim_token; then
+    printf '%s\n' '{"ok":false,"error":"publication_incomplete","message":"no unique local claim token can locate publication authority"}' >&2
+    return 1
+  fi
+  if ! publication_cli_capture prepare \
+    --task-id "$publication_task_id" \
+    --claim-id "$publication_claim_id" \
+    --branch "$branch" \
+    --target "$TARGET_BRANCH"; then
+    [[ -z "$publication_cli_stderr" ]] || printf '%s\n' "$publication_cli_stderr" >&2
+    return 1
+  fi
+  [[ -z "$publication_cli_stderr" ]] || printf '%s\n' "$publication_cli_stderr" >&2
+  output="$publication_cli_stdout"
+  if ! validated="$(validate_publication_journal_envelope prepare "$output")"; then
+    printf '%s\n' '{"ok":false,"error":"publication_incomplete","message":"publication prepare output is not one canonical journal envelope"}' >&2
+    return 1
+  fi
+  case "$validated" in
+    '{"action":"create","create_intent":{'*) publication_create_intent="$validated" ;;
+    '{"action":"existing","create_intent":null,'*) ;;
+    *)
+      printf '%s\n' '{"ok":false,"error":"publication_incomplete","message":"publication prepare envelope action is invalid"}' >&2
+      return 1
+      ;;
+  esac
+}
+
+load_publication_create_intent() {
+  local dir="$1" payload validated
+  publication_create_intent=""
+  publication_create_intent_journal=""
+  payload="$(closeout_journal_phase_publication "$dir" publication_create_intent)" || return 1
+  if ! validated="$(validate_publication_journal_envelope prepare "$payload")"; then
+    printf '%s\n' '{"ok":false,"error":"publication_incomplete","message":"journal publication create intent is malformed"}' >&2
+    return 1
+  fi
+  case "$validated" in
+    '{"action":"create","create_intent":{'*)
+      publication_create_intent="$validated"
+      publication_create_intent_journal="$dir/status.json"
+      ;;
+    *)
+      printf '%s\n' '{"ok":false,"error":"publication_incomplete","message":"journal publication create intent does not authorize creation"}' >&2
+      return 1
+      ;;
+  esac
+}
+
+# Cache first, then marker. Any failure after the PR exists stays an explicit,
+# non-zero publication_incomplete outcome; recover reconcile retries this path.
+ensure_publication_receipt() {
+  local branch="$1" output validated
+  local -a args
+  publication_journal_payload=""
+  if ! resolve_publication_claim_token; then
+    printf '%s\n' '{"ok":false,"error":"publication_incomplete","message":"no unique local claim token can locate publication authority"}' >&2
+    return 1
+  fi
+  args=(ensure --task-id "$publication_task_id" --claim-id "$publication_claim_id" --branch "$branch" --target "$TARGET_BRANCH")
+  if [[ -n "$publication_create_intent" ]]; then
+    [[ -n "$publication_create_intent_journal" ]] || {
+      printf '%s\n' '{"ok":false,"error":"publication_incomplete","message":"publication create intent lacks its durable journal"}' >&2
+      return 1
+    }
+    args+=(--create-intent "$publication_create_intent" --create-intent-journal "$publication_create_intent_journal")
+  fi
+  if ! publication_cli_capture "${args[@]}"; then
+    [[ -z "$publication_cli_stderr" ]] || printf '%s\n' "$publication_cli_stderr" >&2
+    return 1
+  fi
+  [[ -z "$publication_cli_stderr" ]] || printf '%s\n' "$publication_cli_stderr" >&2
+  output="$publication_cli_stdout"
+  [[ -n "$output" ]] || {
+    printf '%s\n' '{"ok":false,"error":"publication_incomplete","message":"publication CLI returned no journal evidence"}' >&2
+    return 1
+  }
+  if ! validated="$(validate_publication_journal_envelope evidence "$output")"; then
+    printf '%s\n' '{"ok":false,"error":"publication_incomplete","message":"publication ensure output is not one canonical journal envelope"}' >&2
+    return 1
+  fi
+  publication_journal_payload="$validated"
+}
+
+# This is deliberately after durable pr_observed and before complete. The raw
+# finish command runs before provider facts exist and remains completing.
+enter_publication_reviewing() {
+  local output key
+  [[ -n "$publication_task_id" && -n "$publication_claim_id" ]] || {
+    printf '%s\n' '{"ok":false,"error":"publication_incomplete","message":"publication claim token is unavailable for review entry"}' >&2
+    return 1
+  }
+  [[ -n "$closeout_journal_dir" && -f "$closeout_journal_dir/status.json" ]] || {
+    printf '%s\n' '{"ok":false,"error":"publication_incomplete","message":"ship journal is unavailable for review entry"}' >&2
+    return 1
+  }
+  key="$(basename "$closeout_journal_dir")"
+  if ! output="$(publication_command_cli mark-reviewing \
+    --task-id "$publication_task_id" \
+    --claim-id "$publication_claim_id" \
+    --ship-transaction-key "$key" \
+    --ship-journal "$closeout_journal_dir/status.json")"; then
+    return 1
+  fi
+  [[ -n "$output" ]] || return 1
+  printf '%s\n' "$output"
+}
+
 ship_linked_pr() {
   local branch gate_base_ref verified_sha
   branch="$(current_branch)"
@@ -1018,8 +1248,19 @@ ship_linked_pr() {
   push_branch "$branch" "$verified_sha"
   ship_transaction_phase pushed "$verified_sha"
   ship_transaction_commit
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    prepare_publication_receipt "$branch" || fail "publication receipt preparation failed (publication_incomplete)"
+    if [[ -n "$publication_create_intent" ]]; then
+      ship_transaction_phase publication_create_intent "$verified_sha" "$publication_create_intent"
+      publication_create_intent_journal="$closeout_journal_dir/status.json"
+    fi
+  fi
   create_or_report_pr "$branch"
-  ship_transaction_phase pr_observed "$verified_sha"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    ensure_publication_receipt "$branch" || fail "publication receipt persistence failed (publication_incomplete)"
+    ship_transaction_phase pr_observed "$verified_sha" "$publication_journal_payload"
+    enter_publication_reviewing || fail "publication review entry failed (publication_incomplete)"
+  fi
   ship_transaction_complete "$verified_sha"
 }
 
@@ -1108,7 +1349,7 @@ ship_primary_local_merge() {
 }
 
 cleanup_merged() {
-  local branch path slug cleaned=0
+  local branch path slug merge_mode item_status cleaned=0 blocked=0 skipped=0
   ! is_linked_worktree || fail "--cleanup-merged must run from the target primary worktree"
 
   while IFS=$'\t' read -r branch path; do
@@ -1117,26 +1358,59 @@ cleanup_merged() {
     if [[ -n "$SLUG_OVERRIDE" && "$slug" != "$SLUG_OVERRIDE" ]]; then
       continue
     fi
-    if git merge-base --is-ancestor "$branch" "$TARGET_BRANCH" >/dev/null 2>&1; then
-      if ! ensure_worktree_status_for_cleanup "$path"; then
-        if [[ "$DRY_RUN" -eq 1 ]]; then
-          run_cmd bash "$helper_dir/contract-worktree.sh" cleanup --slug "$slug" --target "$TARGET_BRANCH" --dry-run
-          cleaned=1
-          continue
+    # Same authority as contract-worktree cleanup --slug. An ancestry-only
+    # filter here reported every squash-merged worktree as unmerged, which
+    # under this project's squash ship flow means every worktree (issue #196).
+    # Dirtiness is still a separate refusal below: merged-but-dirty must stay
+    # distinguishable from unmerged.
+    #
+    # Enumerate the accepting modes rather than negating `unmerged`. This
+    # branch reaches guard_dirty_merged_worktree below, which under
+    # --discard-scaffold-only performs an irreversible write (git checkout --
+    # on tracked scaffold, rm -f on untracked) BEFORE cleanup is delegated.
+    # A value this function does not recognize must therefore land on the
+    # refusing side, and negation would put it on the accepting side.
+    merge_mode="$(worktree_merge_mode "$branch" "$TARGET_BRANCH")"
+    if [[ "$merge_mode" == "ancestor" || "$merge_mode" == "absorbed" ]]; then
+      # Keep errexit active inside the item, including scaffold discard helpers.
+      # Calling this subshell in an if/|| condition would disable that protection.
+      set +e
+      (
+        set -e
+        ensure_worktree_status_for_cleanup "$path"
+        lock_path="$(git -C "$path" rev-parse --git-path locked)"
+        if [[ -e "$lock_path" ]]; then
+          fail "linked worktree is locked, refusing cleanup: $path"
         fi
-      fi
-      guard_dirty_merged_worktree "$branch" "$path" || exit 1
-      if [[ "$DRY_RUN" -eq 1 ]]; then
-        run_cmd bash "$helper_dir/contract-worktree.sh" cleanup --slug "$slug" --target "$TARGET_BRANCH" --dry-run
+        guard_dirty_merged_worktree "$branch" "$path"
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+          # run_cmd deliberately skips execution in dry-run; the guard above
+          # is therefore the read-only safety check for this preview.
+          run_cmd bash "$helper_dir/contract-worktree.sh" cleanup --slug "$slug" --target "$TARGET_BRANCH" --dry-run
+        else
+          run_cmd bash "$helper_dir/contract-worktree.sh" cleanup --slug "$slug" --target "$TARGET_BRANCH"
+        fi
+      )
+      item_status=$?
+      set -e
+      if [[ "$item_status" -eq 0 ]]; then
+        cleaned=$((cleaned + 1))
       else
-        run_cmd bash "$helper_dir/contract-worktree.sh" cleanup --slug "$slug" --target "$TARGET_BRANCH"
+        blocked=$((blocked + 1))
+        echo "[Ship] Cleanup blocked: $branch at $path (exit $item_status)" >&2
       fi
-      cleaned=1
     else
       echo "[Ship] Skipped unmerged branch: $branch"
+      skipped=$((skipped + 1))
     fi
   done < <(list_contract_worktrees "$BRANCH_PREFIX")
 
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[Ship] Cleanup summary: would-clean=$cleaned blocked=$blocked skipped=$skipped"
+  else
+    echo "[Ship] Cleanup summary: cleaned=$cleaned blocked=$blocked skipped=$skipped"
+  fi
+  [[ "$blocked" -eq 0 ]] || return 1
   if [[ "$cleaned" -eq 0 ]]; then
     if [[ -n "$SLUG_OVERRIDE" ]]; then
       echo "[Ship] No merged contract worktree to clean for slug: $SLUG_OVERRIDE"
@@ -1267,9 +1541,25 @@ recover_ship() {
       verified="$(closeout_journal_phase_ref "$dir" gate_sealed)"
       closeout_journal_has_phase "$dir" pushed || closeout_journal_record "$dir" in_progress pushed "$verified"
       if ! closeout_journal_has_phase "$dir" pr_observed; then
+        if closeout_journal_has_phase "$dir" publication_create_intent; then
+          load_publication_create_intent "$dir" || fail "journal publication create intent is invalid (publication_incomplete)"
+        else
+          prepare_publication_receipt "$branch" || fail "publication receipt preparation failed (publication_incomplete)"
+          if [[ -n "$publication_create_intent" ]]; then
+            closeout_journal_record "$dir" in_progress publication_create_intent "$verified" "$publication_create_intent"
+            publication_create_intent_journal="$dir/status.json"
+          fi
+        fi
         create_or_report_pr "$branch"
-        closeout_journal_record "$dir" in_progress pr_observed "$verified"
+        ensure_publication_receipt "$branch" || fail "publication receipt persistence failed (publication_incomplete)"
+        closeout_journal_record "$dir" in_progress pr_observed "$verified" "$publication_journal_payload"
       fi
+      # Once pr_observed exists the lease may already be reviewing: replay the
+      # lifecycle proof directly instead of calling the completing-only receipt
+      # writer again. The transition is idempotent for the same pointer/key.
+      resolve_publication_claim_token || fail "publication claim token is unavailable for review recovery (publication_incomplete)"
+      closeout_journal_dir="$dir"
+      enter_publication_reviewing || fail "publication review entry failed (publication_incomplete)"
       closeout_journal_record "$dir" complete complete "$verified"
       rm -rf "$dir/snapshot"
       closeout_claim_release

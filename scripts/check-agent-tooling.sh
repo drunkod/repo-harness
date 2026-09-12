@@ -42,16 +42,17 @@ const fs = require("fs");
 const crypto = require("crypto");
 const os = require("os");
 const path = require("path");
-const { spawnSync } = require("child_process");
+const { spawnSync, execFileSync } = require("child_process");
 
 const argv = process.argv.slice(2);
 let jsonOutput = false;
 let checkUpdates = false;
 let strictReadiness = false;
+let probeSkillsCli = false;
 let hostMode = "both";
 
 function usage() {
-  console.log(`Usage: scripts/check-agent-tooling.sh [--json] [--check-updates] [--strict-readiness] [--host claude|codex|both]`);
+  console.log(`Usage: scripts/check-agent-tooling.sh [--json] [--check-updates] [--strict-readiness] [--probe-skills-cli] [--host claude|codex|both]`);
 }
 
 for (let index = 0; index < argv.length; index += 1) {
@@ -66,6 +67,10 @@ for (let index = 0; index < argv.length; index += 1) {
   }
   if (arg === "--strict-readiness") {
     strictReadiness = true;
+    continue;
+  }
+  if (arg === "--probe-skills-cli") {
+    probeSkillsCli = true;
     continue;
   }
   if (arg === "--host") {
@@ -100,8 +105,24 @@ const WAZA_SOURCE_URL = "https://github.com/tw93/Waza.git";
 const WAZA_RAW_BASE_URL = "https://raw.githubusercontent.com/tw93/Waza/main";
 const WAZA_MANAGED_SKILLS = ["think", "hunt", "check", "health"];
 const WAZA_SHARED_RULES = ["anti-patterns.md", "chinese.md", "durable-context.md", "english.md"];
+// Skills CLI reporting is opt-in, like `--check-updates`. PATH resolution is
+// cheap and always runs, so an absent binary is reported as `missing`; the
+// `ls -g --json` call itself measured 36.8s against a real global skill set
+// (the cost is in the Skills CLI, not in the former `bunx` wrapper), so the
+// default run reports `not-probed` instead of paying that per invocation.
+// `--probe-skills-cli` runs the real probe under a budget with headroom.
+// There is no bunx fallback: an unresolved binary stays `missing` rather than
+// being re-probed through a second authority.
+const SKILLS_CLI_COMMAND = "skills";
+const SKILLS_CLI_PROBE_ARGS = ["ls", "-g", "--json"];
+const SKILLS_CLI_PROBE_TIMEOUT_MS = 45000;
 const CODEX_AUTOMATION_SKILLS = ["health", "check", "mermaid"];
+const OFFICIAL_CODEX_PLUGIN_ID = "codex@openai-codex";
+const OFFICIAL_CODEX_PLUGIN_INSTALL_COMMAND = "claude plugin marketplace add openai/codex-plugin-cc && claude plugin install codex@openai-codex -s user -y && claude plugin enable codex@openai-codex -s user";
+const OBSIDIAN_RUNTIME_CONSUMER = "obsidian-memory";
 const AGENT_FLEET_SOURCE_DIR = process.env.REPO_HARNESS_AGENT_FLEET_SOURCE_DIR;
+const PACKAGE_ROOT = path.dirname(path.dirname(AGENT_FLEET_SOURCE_DIR));
+const SKILL_SURFACE_MANIFEST_PATH = path.join(PACKAGE_ROOT, "assets", "skill-commands", "manifest.json");
 const AGENT_FLEET_SOURCE_LABEL = "package:agents/fleet";
 const AGENT_FLEET_DEFAULT_MANAGED = ["explorer", "deep-reasoner", "fast-worker", "deep-worker", "gatekeeper", "root-cause-prover", "harness-evaluator"];
 const AGENT_FLEET_INSTALL_COMMAND = "repo-harness run install-agent-fleet";
@@ -121,6 +142,7 @@ const ARCHCTX_CONTRACTS_PACKAGE = "archctx-contracts";
 const ARCHCTX_MODEL_DIR = ".archcontext/model";
 const ARCHCTX_NODES_DIR = ".archcontext/model/nodes";
 const ARCHCTX_CAPABILITY_SOURCE_KEY = ".ai/harness/policy.json#context.capability_source";
+const HERDR_PIN_KEY = ".ai/harness/policy.json#external_tooling.herdr";
 const WAZA_STAGING_ROOT = path.join(HOME, ".agents");
 const WAZA_STAGING_DIR = path.join(WAZA_STAGING_ROOT, "skills");
 const WAZA_STAGING_RULES_DIR = path.join(WAZA_STAGING_ROOT, "rules");
@@ -231,6 +253,8 @@ function run(command, args, options = {}) {
   return {
     ok: result.status === 0 && !result.error,
     status: result.status,
+    signal: result.signal ?? null,
+    error_code: result.error?.code ?? null,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
     error: result.error ? String(result.error.message || result.error) : "",
@@ -606,8 +630,11 @@ function inspectWazaSkill(host, skill, skillLock, skillItems, upstreamSkills) {
 function detectWaza() {
   const skillLockPath = path.join(HOME, ".agents", ".skill-lock.json");
   const skillLock = readJson(skillLockPath);
-  const skillsResult = run("bunx", ["skills", "ls", "-g", "--json"], { timeoutMs: 1500 });
-  const skillItems = skillsResult.ok ? parseJson(skillsResult.stdout) || [] : [];
+  const skillsCliPath = resolvePathCommand(SKILLS_CLI_COMMAND);
+  const skillsResult = skillsCliPath && probeSkillsCli
+    ? run(skillsCliPath, SKILLS_CLI_PROBE_ARGS, { timeoutMs: SKILLS_CLI_PROBE_TIMEOUT_MS })
+    : null;
+  const skillItems = skillsResult?.ok ? parseJson(skillsResult.stdout) || [] : [];
   const wazaEntries = Object.entries(skillLock?.skills || {}).filter(([, meta]) => meta?.source === WAZA_SOURCE_REPO);
   const upstream = fetchWazaUpstreamSkills();
   const hostStatuses = {};
@@ -737,7 +764,16 @@ function detectWaza() {
     staging_rules_path: WAZA_STAGING_RULES_DIR,
     sync_mode: "codex-first-copy-from-staging",
     host_drift_policy: "report-per-host-directory-rule-staging-and-upstream-drift",
-    skills_cli_status: skillsResult.ok ? "available" : skillsResult.timed_out ? "timed-out" : "unavailable",
+    skills_cli_path: skillsCliPath,
+    skills_cli_status: !skillsCliPath
+      ? "missing"
+      : !probeSkillsCli
+        ? "not-probed"
+        : skillsResult.ok
+          ? "available"
+          : skillsResult.timed_out
+            ? "timed-out"
+            : "unavailable",
     source_lock_entries: wazaEntries.map(([name]) => name).sort(),
     upstream_status: upstream.status,
     upstream_reason: upstream.reason,
@@ -759,8 +795,43 @@ function detectWaza() {
   };
 }
 
+/**
+ * Reads the single herdr runtime pin. The version floor, the release URL, and
+ * the release checksum are one datum owned by
+ * `.ai/harness/policy.json#external_tooling.herdr`; CI installs from the same
+ * key. A missing or malformed pin fails closed instead of assuming a floor.
+ */
+function herdrMinVersion() {
+  const policy = readJson(path.join(REPO_ROOT, ".ai/harness/policy.json"));
+  const pinned = policy?.external_tooling?.herdr?.min_version;
+  return typeof pinned === "string" && /^\d+\.\d+\.\d+$/.test(pinned) ? pinned : null;
+}
+
+function versionAtLeast(actual, minimum) {
+  const parse = (value) => /^(\d+)\.(\d+)\.(\d+)$/.exec(value)?.slice(1, 4).map(Number) ?? null;
+  const left = parse(actual);
+  const right = parse(minimum);
+  if (!left || !right) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] > right[index];
+  }
+  return true;
+}
+
 function detectRuntimeCapabilities(waza) {
+  const herdr = commandCapability("herdr", "persistent agent terminals, peer collaboration and task-scoped Claude acceptance review", "platform-runtime", true);
+  const minVersion = herdrMinVersion();
+  herdr.min_version = minVersion;
+  herdr.min_version_source = HERDR_PIN_KEY;
+  if (herdr.path) {
+    try {
+      herdr.version = execFileSync(herdr.path, ["--version"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+      const reported = /^herdr (\d+\.\d+\.\d+)$/.exec(herdr.version)?.[1] ?? null;
+      if (!minVersion || !reported || !versionAtLeast(reported, minVersion)) herdr.status = "unavailable";
+    } catch (_) { herdr.status = "unavailable"; }
+  }
   return {
+    herdr,
     bun: commandCapability(
       "bun",
       "repo-harness-owned global installs, local package dependency install, and test/runtime execution",
@@ -781,12 +852,12 @@ function detectRuntimeCapabilities(waza) {
     ),
     skills_cli: {
       name: "skills_cli",
-      status: waza.skills_cli_status === "available" ? "available" : waza.skills_cli_status,
-      path: null,
+      status: waza.skills_cli_status,
+      path: waza.skills_cli_path,
       owner: "external-skills-cli",
       required: false,
       required_for: "Waza/Mermaid external skill bootstrap; repo-harness reports this as an explicit exception boundary",
-      command: "bunx skills ls -g --json",
+      command: `${SKILLS_CLI_COMMAND} ${SKILLS_CLI_PROBE_ARGS.join(" ")}`,
     },
     bash: commandCapability(
       "bash",
@@ -846,6 +917,120 @@ function detectCodexAutomationProfile() {
     missing_skills: missingSkills,
     skills,
   };
+}
+
+function inspectObsidianRuntimeSkill(host, skill) {
+  const skillFile = path.join(HOSTS[host].skillsDir, skill, "SKILL.md");
+  const local = readSkillFile(skillFile);
+
+  return {
+    name: skill,
+    path: skillFile,
+    real_path: resolveRealPath(skillFile),
+    present: local.exists,
+    version: local.version,
+    hash: local.hash,
+  };
+}
+
+function detectObsidianRuntimeSkillsHost(host) {
+  const meta = HOSTS[host];
+  const requiredSkills = obsidianRuntimeContract().requiredSkills;
+  const skills = requiredSkills.map((skill) => inspectObsidianRuntimeSkill(host, skill));
+  const installedSkills = skills.filter((entry) => entry.present).map((entry) => entry.name);
+  const missingSkills = skills.filter((entry) => !entry.present).map((entry) => entry.name);
+  const status = missingSkills.length === 0 ? "present" : installedSkills.length > 0 ? "partial" : "missing";
+
+  return {
+    label: meta.label,
+    status,
+    source: meta.skillsDir,
+    installed_skills: installedSkills,
+    missing_skills: missingSkills,
+    skills,
+  };
+}
+
+function detectObsidianRuntimeSkills() {
+  const contract = obsidianRuntimeContract();
+  if (contract.status !== "valid") {
+    return {
+      name: "obsidian_runtime_skills",
+      status: "invalid",
+      reason: contract.reason,
+      required_skills: [],
+      optional_skills: [],
+      required_by: OBSIDIAN_RUNTIME_CONSUMER,
+      mode: "catalog-dependency-closure",
+      readiness: "managed",
+      vendoring_policy: "do-not-vendor-skill-body",
+      install_command: "repo-harness install --with-obsidian-skills",
+      hosts: {},
+    };
+  }
+  const hosts = {};
+  for (const host of SELECTED_HOSTS) {
+    hosts[host] = detectObsidianRuntimeSkillsHost(host);
+  }
+
+  const values = Object.values(hosts);
+  const presentCount = values.filter((entry) => entry.status === "present").length;
+  const anyInstalled = values.some((entry) => entry.installed_skills.length > 0);
+  const status = values.length > 0 && presentCount === values.length
+    ? "present"
+    : anyInstalled
+      ? "partial"
+      : "missing";
+  const gaps = Object.entries(hosts)
+    .filter(([, entry]) => entry.missing_skills.length > 0)
+    .map(([host, entry]) => `${host}: ${entry.missing_skills.join(", ")}`);
+
+  const installState = readJson(path.join(HOME, ".repo-harness", "install-state.json"));
+  const ownership = Array.isArray(installState?.ownership_manifest) ? installState.ownership_manifest : [];
+  const managed = ownership.some((surface) => {
+    if (typeof surface?.path !== "string") return false;
+    const normalized = surface.path.replaceAll("\\", "/");
+    return normalized.includes("/skills/") && contract.requiredSkills.includes(path.basename(surface.path));
+  });
+  const target = hostMode === "both" ? "both" : hostMode;
+
+  return {
+    name: "obsidian_runtime_skills",
+    status,
+    reason: status === "present"
+      ? `Detected all catalog-declared Obsidian skills required by ${OBSIDIAN_RUNTIME_CONSUMER} on every selected host.`
+      : `Missing catalog-declared Obsidian skills required by ${OBSIDIAN_RUNTIME_CONSUMER} (${gaps.join("; ")}).`,
+    required_skills: contract.requiredSkills,
+    optional_skills: [],
+    required_by: OBSIDIAN_RUNTIME_CONSUMER,
+    mode: "catalog-dependency-closure",
+    readiness: managed ? "managed" : "advisory",
+    managed_receipt: managed,
+    install_command: `repo-harness install --target ${target} --with-obsidian-skills`,
+    vendoring_policy: "do-not-vendor-skill-body",
+    hosts,
+};
+}
+
+function obsidianRuntimeContract() {
+  const manifest = readJson(SKILL_SURFACE_MANIFEST_PATH);
+  const packages = Array.isArray(manifest?.packages) ? manifest.packages : [];
+  const consumer = packages.find((pkg) => pkg?.name === OBSIDIAN_RUNTIME_CONSUMER);
+  if (!consumer || !Array.isArray(consumer.requires) || consumer.requires.length === 0) {
+    return { status: "invalid", reason: `${OBSIDIAN_RUNTIME_CONSUMER} has no catalog dependency closure`, requiredSkills: [] };
+  }
+  const requiredSkills = consumer.requires.filter((name) => typeof name === "string");
+  if (requiredSkills.length !== consumer.requires.length || new Set(requiredSkills).size !== requiredSkills.length) {
+    return { status: "invalid", reason: `${OBSIDIAN_RUNTIME_CONSUMER} has an invalid catalog dependency closure`, requiredSkills: [] };
+  }
+  const invalid = requiredSkills.find((name) => {
+    const pkg = packages.find((entry) => entry?.name === name);
+    return !pkg || pkg.kind !== "external" || pkg.provider == null || !/^sha256:[0-9a-f]{64}$/.test(pkg.integrity ?? "");
+  });
+  if (invalid) {
+    return { status: "invalid", reason: `catalog dependency ${invalid} is not a pinned external Skill`, requiredSkills: [] };
+  }
+  return { status: "valid", reason: null, requiredSkills };
 }
 
 function resolveManagedAgents() {
@@ -1433,12 +1618,26 @@ function resolveCodeGraphBinary() {
   };
 }
 
-function codeGraphVersion(binPath) {
+function codeGraphProbe(binPath, args, timeoutMs, probes) {
+  const result = run(binPath, args, { timeoutMs });
+  probes.push({
+    bin_path: binPath,
+    args,
+    status: result.status,
+    signal: result.signal,
+    error: result.error,
+    error_code: result.error_code,
+    timed_out: result.timed_out,
+  });
+  return result;
+}
+
+function codeGraphVersion(binPath, probes) {
   if (!binPath) return null;
-  const result = run(binPath, ["--version"], { timeoutMs: 1000 });
+  const result = codeGraphProbe(binPath, ["--version"], 1000, probes);
   if (result.ok) return result.stdout.trim() || null;
   if (result.timed_out) {
-    const retry = run(binPath, ["--version"], { timeoutMs: 1000 });
+    const retry = codeGraphProbe(binPath, ["--version"], 1000, probes);
     if (retry.ok) return retry.stdout.trim() || null;
   }
   return null;
@@ -1447,9 +1646,10 @@ function codeGraphVersion(binPath) {
 function detectCodeGraph() {
   const resolution = resolveCodeGraphBinary();
   const cliPresent = Boolean(resolution.bin_path);
-  const version = codeGraphVersion(resolution.bin_path);
+  const probes = [];
+  const version = codeGraphVersion(resolution.bin_path, probes);
   const globalVersion = resolution.global_bin_path && resolution.global_bin_path !== resolution.bin_path
-    ? codeGraphVersion(resolution.global_bin_path)
+    ? codeGraphVersion(resolution.global_bin_path, probes)
     : resolution.source === "global"
       ? version
       : null;
@@ -1465,7 +1665,7 @@ function detectCodeGraph() {
   }
 
   const selectedMcpConfigured = SELECTED_HOSTS.every((host) => mcpHosts[host]?.status === "configured");
-  const statusResult = cliPresent ? run(resolution.bin_path, ["status", "."], { timeoutMs: 1500 }) : null;
+  const statusResult = cliPresent ? codeGraphProbe(resolution.bin_path, ["status", "."], 1500, probes) : null;
   const statusOutput = `${statusResult?.stdout || ""}\n${statusResult?.stderr || ""}`;
   const projectIndexStatus = cliPresent ? parseCodeGraphProjectStatus(statusOutput) : "unavailable";
   const indexInitialized = fs.existsSync(path.join(REPO_ROOT, ".codegraph"))
@@ -1514,6 +1714,7 @@ function detectCodeGraph() {
     local_bin_path: resolution.local_bin_path,
     global_bin_path: resolution.global_bin_path,
     global_fallback_used: resolution.global_fallback_used,
+    probes,
     version,
     local_version: localVersion,
     global_version: globalVersion,
@@ -1643,6 +1844,146 @@ function detectArchctx() {
   };
 }
 
+function detectOfficialCodexPlugin() {
+  const required = SELECTED_HOSTS.includes("codex");
+  if (!required) {
+    return {
+      name: "official_codex_plugin",
+      status: "not-applicable",
+      required: false,
+      reason: "The requested host set does not include Codex.",
+      plugin_id: OFFICIAL_CODEX_PLUGIN_ID,
+      install_command: OFFICIAL_CODEX_PLUGIN_INSTALL_COMMAND,
+      review_gate: "not-enabled-by-repo-harness",
+    };
+  }
+  const claude = resolvePathCommand("claude");
+  if (!claude) {
+    return {
+      name: "official_codex_plugin",
+      status: "missing",
+      required: true,
+      reason: "Claude Code CLI is unavailable, so the official plugin inventory cannot be read.",
+      plugin_id: OFFICIAL_CODEX_PLUGIN_ID,
+      install_command: OFFICIAL_CODEX_PLUGIN_INSTALL_COMMAND,
+      review_gate: "not-enabled-by-repo-harness",
+    };
+  }
+  const inventory = run(claude, ["plugin", "list", "--json"], { timeoutMs: 30000 });
+  if (!inventory.ok) {
+    return {
+      name: "official_codex_plugin",
+      status: "unavailable",
+      required: true,
+      reason: inventory.stderr.trim() || "Claude Code plugin inventory failed.",
+      plugin_id: OFFICIAL_CODEX_PLUGIN_ID,
+      install_command: OFFICIAL_CODEX_PLUGIN_INSTALL_COMMAND,
+      review_gate: "not-enabled-by-repo-harness",
+    };
+  }
+  let entries;
+  try {
+    entries = JSON.parse(inventory.stdout);
+  } catch (_error) {
+    entries = null;
+  }
+  if (!Array.isArray(entries)) {
+    return {
+      name: "official_codex_plugin",
+      status: "invalid",
+      required: true,
+      reason: "Claude Code plugin inventory returned malformed JSON.",
+      plugin_id: OFFICIAL_CODEX_PLUGIN_ID,
+      install_command: OFFICIAL_CODEX_PLUGIN_INSTALL_COMMAND,
+      review_gate: "not-enabled-by-repo-harness",
+    };
+  }
+  const matches = entries.filter((entry) => entry?.id === OFFICIAL_CODEX_PLUGIN_ID);
+  const plugin = matches.length === 1 ? matches[0] : null;
+  let installProblem = null;
+  if (plugin?.enabled === true) {
+    const version = typeof plugin.version === "string" && plugin.version.trim() ? plugin.version : null;
+    const installPath = typeof plugin.installPath === "string" && path.isAbsolute(plugin.installPath)
+      ? plugin.installPath
+      : null;
+    let root = null;
+    try {
+      if (!installPath || fs.lstatSync(installPath).isSymbolicLink() || !fs.statSync(installPath).isDirectory()) {
+        installProblem = `${OFFICIAL_CODEX_PLUGIN_ID} installPath is missing, unsafe, or not a directory.`;
+      } else {
+        root = fs.realpathSync(installPath);
+      }
+    } catch (error) {
+      installProblem = `${OFFICIAL_CODEX_PLUGIN_ID} installPath is unavailable: ${String(error?.message || error)}`;
+    }
+    const safeFile = (relativePath) => {
+      if (!root) return null;
+      const candidate = path.resolve(root, relativePath);
+      const rel = path.relative(root, candidate);
+      if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
+      try {
+        if (fs.lstatSync(candidate).isSymbolicLink() || !fs.statSync(candidate).isFile()) return null;
+        const canonical = fs.realpathSync(candidate);
+        const canonicalRel = path.relative(root, canonical);
+        return canonicalRel !== ".." && !canonicalRel.startsWith(`..${path.sep}`) && !path.isAbsolute(canonicalRel)
+          ? canonical
+          : null;
+      } catch (_error) {
+        return null;
+      }
+    };
+    if (!installProblem) {
+      const companion = safeFile("scripts/codex-companion.mjs");
+      const manifestPath = safeFile(".claude-plugin/plugin.json");
+      const schemaPath = safeFile("schemas/review-output.schema.json");
+      const manifest = manifestPath ? readJson(manifestPath) : null;
+      const schema = schemaPath ? readJson(schemaPath) : null;
+      const schemaRequired = schema?.required;
+      const verdicts = schema?.properties?.verdict?.enum;
+      const severities = schema?.properties?.findings?.items?.properties?.severity?.enum;
+      if (!version || !companion || !manifestPath || !schemaPath) {
+        installProblem = `${OFFICIAL_CODEX_PLUGIN_ID} install is missing a version, companion, manifest, or review schema.`;
+      } else if (manifest?.name !== "codex" || manifest?.version !== version || manifest?.author?.name !== "OpenAI") {
+        installProblem = `${OFFICIAL_CODEX_PLUGIN_ID} manifest identity/version does not match public inventory.`;
+      } else if (
+        !Array.isArray(schemaRequired)
+        || !["verdict", "summary", "findings", "next_steps"].every((key) => schemaRequired.includes(key))
+        || JSON.stringify(verdicts) !== JSON.stringify(["approve", "needs-attention"])
+        || JSON.stringify(severities) !== JSON.stringify(["critical", "high", "medium", "low"])
+      ) {
+        installProblem = `${OFFICIAL_CODEX_PLUGIN_ID} review schema is unsupported.`;
+      }
+    }
+  }
+  const status = matches.length === 0
+    ? "missing"
+    : matches.length > 1
+      ? "invalid"
+      : plugin.enabled !== true
+        ? "disabled"
+        : installProblem
+          ? "invalid"
+          : "present";
+  return {
+    name: "official_codex_plugin",
+    status,
+    required: true,
+    reason: status === "present"
+      ? `Detected enabled ${OFFICIAL_CODEX_PLUGIN_ID} version ${plugin.version}.`
+      : status === "disabled"
+        ? `${OFFICIAL_CODEX_PLUGIN_ID} is installed but disabled.`
+        : status === "invalid"
+          ? installProblem ?? `Expected one ${OFFICIAL_CODEX_PLUGIN_ID} entry; found ${matches.length}.`
+          : `${OFFICIAL_CODEX_PLUGIN_ID} is not installed.`,
+    plugin_id: OFFICIAL_CODEX_PLUGIN_ID,
+    version: plugin?.version ?? null,
+    enabled: plugin?.enabled === true,
+    install_path: typeof plugin?.installPath === "string" ? plugin.installPath : null,
+    install_command: OFFICIAL_CODEX_PLUGIN_INSTALL_COMMAND,
+    review_gate: "not-enabled-by-repo-harness",
+  };
+}
+
 const wazaReport = detectWaza();
 const report = {
   generated_at: new Date().toISOString(),
@@ -1653,6 +1994,8 @@ const report = {
   tools: {
     waza: wazaReport,
     codex_automation_profile: detectCodexAutomationProfile(),
+    official_codex_plugin: detectOfficialCodexPlugin(),
+    obsidian_runtime_skills: detectObsidianRuntimeSkills(),
     agent_fleet: detectAgentFleet(),
     codegraph: detectCodeGraph(),
     archctx: detectArchctx(),
@@ -1660,11 +2003,28 @@ const report = {
 };
 
 const strictFailures = [];
+if (strictReadiness && report.runtime_capabilities.herdr.status !== "present") {
+  const pinned = report.runtime_capabilities.herdr.min_version;
+  const floor = pinned ? `herdr >=${pinned}` : `the herdr version pinned in ${HERDR_PIN_KEY} (pin missing or malformed)`;
+  strictFailures.push(`herdr runtime is ${report.runtime_capabilities.herdr.status}; install ${floor} and verify herdr --version`);
+}
 if (strictReadiness && ["missing", "partial"].includes(report.tools.codegraph.status)) {
   strictFailures.push(`CodeGraph readiness is ${report.tools.codegraph.status}: ${report.tools.codegraph.reason}`);
 }
 if (strictReadiness && ["missing", "partial"].includes(report.tools.agent_fleet.status)) {
   strictFailures.push(`Agent fleet readiness is ${report.tools.agent_fleet.status}: ${report.tools.agent_fleet.reason}`);
+}
+if (strictReadiness && !["present", "not-applicable"].includes(report.tools.official_codex_plugin.status)) {
+  const plugin = report.tools.official_codex_plugin;
+  strictFailures.push(`Official Codex plugin readiness is ${plugin.status}: ${plugin.reason}`);
+}
+if (
+  strictReadiness
+  && report.tools.obsidian_runtime_skills.readiness === "managed"
+  && ["missing", "partial", "invalid"].includes(report.tools.obsidian_runtime_skills.status)
+) {
+  const obsidian = report.tools.obsidian_runtime_skills;
+  strictFailures.push(`Managed Obsidian companion Skill readiness is ${obsidian.status}: ${obsidian.reason}`);
 }
 if (
   strictReadiness
@@ -1741,6 +2101,30 @@ function printText(result) {
   }
   console.log(`  - Routes: health=${codexAutomation.routes.workflow_health}, check=${codexAutomation.routes.review_gate}, diagram=${codexAutomation.routes.architecture_diagram}`);
   console.log(`  - Vendoring: ${codexAutomation.vendoring_policy}`);
+  console.log("");
+
+  const officialPlugin = result.tools.official_codex_plugin;
+  console.log(`Official Codex plugin [${officialPlugin.status}]`);
+  console.log(`  - Required: ${officialPlugin.required}`);
+  console.log(`  - Plugin: ${officialPlugin.plugin_id}${officialPlugin.version ? `@${officialPlugin.version}` : ""}`);
+  console.log(`  - Review Gate: ${officialPlugin.review_gate}`);
+  console.log(`  - Install: ${officialPlugin.install_command}`);
+  console.log("");
+
+  const obsidianRuntime = result.tools.obsidian_runtime_skills;
+  console.log(`Obsidian runtime skills [${obsidianRuntime.status}]`);
+  console.log(`  - Required: ${obsidianRuntime.required_skills.join(", ")}`);
+  console.log(`  - Required by: ${obsidianRuntime.required_by}`);
+  console.log(`  - Mode: ${obsidianRuntime.mode} (${obsidianRuntime.readiness})`);
+  for (const host of SELECTED_HOSTS) {
+    const entry = obsidianRuntime.hosts[host];
+    console.log(`  - ${entry.label}: ${entry.status} (${entry.source})`);
+    if (entry.missing_skills.length) {
+      console.log(`    missing: ${entry.missing_skills.join(", ")}`);
+    }
+  }
+  if (obsidianRuntime.status !== "present") console.log(`  - Install: ${obsidianRuntime.install_command}`);
+  console.log(`  - Vendoring: ${obsidianRuntime.vendoring_policy}`);
   console.log("");
 
   const agentFleet = result.tools.agent_fleet;

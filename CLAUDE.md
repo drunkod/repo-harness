@@ -4,7 +4,7 @@ This repository self-hosts the `repo-harness` contract; the former `repo-harness
 
 ## Canonical Workflow Files
 
-- `tasks/current.md` for the tracked current-status snapshot derived from workflow artifacts
+- `tasks/current.md` for the ignored local current-status read model derived from workflow artifacts
 - `tasks/todos.md` for deferred medium/long-term goals, not active execution checklists
 - `plans/prds/` for upper-layer PRDs; `plans/sprints/` for ordered sprint backlogs operated through `repo-harness run sprint-backlog`; task contracts stay the execution slices
 - `.archcontext/model/nodes/*.yaml` for the capability nodes and longest-prefix context boundaries, selected by `.ai/harness/policy.json#context.capability_source`
@@ -31,20 +31,20 @@ This repository self-hosts the `repo-harness` contract; the former `repo-harness
 - Keep `CLAUDE.md` and `AGENTS.md` short; put detailed guidance in `docs/reference-configs/`.
 - Treat Codex auto-compact as a fallback only; use `.ai/harness/handoff/current.md` and `.ai/harness/handoff/resume.md` for long-task rollover.
 - Treat `.ai/harness/checks/*.latest.{json,md}` and `.ai/harness/runs/` as ignored runtime evidence cache; commit durable conclusions in `tasks/reviews/`, `tasks/contracts/`, `tasks/notes/`, or `docs/researches/` instead.
-- Treat architecture/spec/research docs as the human reading entrypoint. Before closing a workflow, promote durable conclusions into `docs/architecture/`, `docs/researches/`, `docs/spec.md`, or `tasks/lessons.md`; then archive fulfilled plan/contract/review/notes/todo artifacts so root workflow surfaces represent active work only. `.rgignore` hides archived workflow artifacts and runtime evidence from default `rg` searches; use explicit paths or `rg -uu` for audits.
+- Treat architecture/spec/research docs as the human reading entrypoint. Before closing a workflow, promote durable conclusions into `docs/architecture/`, `docs/researches/`, `docs/spec.md`, or `tasks/lessons.md`; then archive fulfilled plan/contract/review/notes/todo artifacts so root workflow surfaces represent active work only. When a brain root is configured, a durable conclusion worth reusing across projects may additionally be projected into the vault through an explicit `obsidian-memory` persist call; the vault layer is optional and never a prerequisite for closing a workflow. `.rgignore` hides archived workflow artifacts and runtime evidence from default `rg` searches; use explicit paths or `rg -uu` for audits.
 - Treat `_ref/` as an occasional ignored external reference checkout cache, not a commit surface or daily workflow. Agents may read or refresh it for comparison; when it influences a decision, cite the source repo plus commit/tag and path in `tasks/notes/` or `docs/researches/`.
 - Treat `deploy/` as the trackable deployment and operations surface for runbooks, submission materials, release checklists, helper scripts, ordered SQL files, and env examples; follow `.ai/harness/policy.json#operations.deploy_sql` for configured SQL roots and naming modes, otherwise keep SQL directly under `deploy/sql/` with 4-digit ascending prefixes.
 - Treat `_ops/` as ignored local operations state for secrets, real env files, provider state, artifacts, logs, and scratch files; do not commit or agent-edit `_ops/*`.
 - Treat contract-level task execution as worktree-first: `repo-harness run plan-to-todo --plan <approved-plan>` starts `repo-harness run contract-worktree start --plan <approved-plan>` when policy enables it, and completed blocks finish through Waza `/check` plus `repo-harness run contract-worktree finish`.
-- Treat the EXECUTION_BOUNDARY anti-extras clause as mandatory on every delegated runner surface (contract worker prompts, the Codex delegation advisor hook, subagent start context, and MCP `codex-goal` documents): absent requirements are forbidden design space, not permission to improve, and unrequested extras fail closed.
+- Treat the EXECUTION_BOUNDARY anti-extras clause as mandatory exactly once in each delegated runner's final rendered task packet: absent requirements are forbidden design space, not permission to improve, and unrequested extras fail closed. Each runner path names one injection owner and no other surface on that path may carry the clause — the Codex native-child path is owned by `SubagentStart.context` (contract- and writability-aware; generated personas and the delegation advisor carry none), the standalone contract worker path by its worker prompt, and the MCP path by the `codex-goal` document. Composed-path tests verify the count.
 - After Codex Plan mode, Waza `/think`, or `repo-harness-plan` produces a decision-complete work-package plan, capture it with `repo-harness run capture-plan --artifact-level work-package --slug <slug> --title <title>` so `plans/` becomes the file-backed source of truth; if the user has already approved implementation, capture with `--status Approved --execute --promotion-reason <merge_boundary|rollback_boundary|verification_boundary|risk_boundary|human_decision_boundary|worktree_boundary>` or run `repo-harness run plan-to-todo --plan <active-plan>`.
 - Promote work into a top-level `plans/plan-*.md` only when `Artifact Level: work-package` is justified by a merge/PR unit, rollback surface, independent verification boundary, review/acceptance boundary, high-risk surface, or otherwise cannot remain a checklist item in the current active plan or sprint backlog. Inline sprint rows and checklist rows stay in the sprint backlog or active plan `## Task Breakdown`; contract rows may expand into plan -> contract -> review -> notes only through the work-package gate.
 - If current repo state conflicts with the task, open an isolated `codex/<task-slug>` worktree, finish there, run Waza `/check`-style validation, then merge back to `main` without absorbing unrelated dirty changes.
 - Route product discovery and complex/design planning to the parent agent: use `geju` for pre-contract framing, complete P1/P2/P3 with the parent agent's own capabilities, and freeze the accepted direction into the plan and contract. Route daily small/medium planning, bug hunts, and checks to Waza `/think`, `/hunt`, and `/check`. Route a proactive multi-direction visual/UX choice mid-task to the design-options convention (`repo-harness docs show design-options`).
-- Codex automation profile is runtime-referenced, not vendored: required skills are `health`, `check`, and `diagram-design` from `~/.codex/skills`.
+- Codex automation profile is runtime-referenced, not vendored: required skills are `health`, `check`, and `mermaid` from `~/.codex/skills`.
 - Keep durable repo knowledge in `docs/researches/`, `tasks/lessons.md`, and the canonical workflow artifacts.
 - Treat `.ai/harness/brain-manifest.json` and `repo-harness run sync-brain-docs` as explicit operator-invoked export surfaces only; hooks and workflow checks must not read, write, or gate on external brain-vault state.
-- Treat Waza as Codex-first: `~/.codex/skills` is the Codex runtime source; `~/.agents/skills` is skills CLI staging/cache only. Update by staging upstream Waza, copying the eight managed `SKILL.md` files into Codex, and verifying with `cmp`.
+- Treat Waza as Codex-first: `~/.codex/skills` is the Codex runtime source; `~/.agents/skills` is skills CLI staging/cache only. The managed skills are `think`, `hunt`, `check`, and `health`; stage upstream Waza, copy their complete skill directories and shared rules into Codex, and verify with `diff`/`cmp` as described in `docs/reference-configs/external-tooling.md`.
 - Use `docs/reference-configs/external-tooling.md` and `bash scripts/check-agent-tooling.sh --host both --check-updates` for environment checks; this self-host repo vendors CodeGraph as a dev dependency while generated downstream repos keep the global MCP default unless local policy opts in.
 - When changing adoption planner or transaction code, verify `repo-harness init --repo . --dry-run` and a fixture apply use the same TS operation model.
 - Treat repo-local `.claude/settings.json` and `.codex/hooks.json` hook adapters as retired legacy config; migration may back them up locally, but they are not product deliverables.
@@ -58,50 +58,87 @@ This repository self-hosts the `repo-harness` contract; the former `repo-harness
 
 ## Required Checks
 
+Verification is risk-scoped. The active task contract's JSON `Verification Plan`
+owns executable checks; `exit_criteria` owns artifact requirements. Run focused
+tests for every changed behavior. The following repository-integrity checks are required for
+substantive repository changes; `check:hooks` and `check:helpers` catch a
+projection edited without its authoring source in `scripts/`, so that drift fails
+here instead of only in `scripts/check-ci.sh governance`:
+
 ```bash
-bun test
+bun run check:hooks
+bun run check:helpers
 bash scripts/check-deploy-sql-order.sh
 bash scripts/check-architecture-sync.sh
 bash scripts/check-task-sync.sh
-repo-harness run check-task-workflow --strict
+bash scripts/check-task-workflow.sh --strict
 bun scripts/inspect-project-state.ts --repo . --format text
 bun src/cli/index.ts init --repo . --dry-run
 ```
 
+Use focused regression tests and the repository-integrity checks above by
+default, including small code and test changes. Run the full
+`bun test --timeout 60000` suite only when the active contract or release gate
+explicitly requires it, or observed cross-module impact cannot be covered by
+named focused checks. A code/test path, diff size, review depth, or changed
+verification script alone is not sufficient justification. Before an expensive
+run, state the uncovered risk, why narrower checks are insufficient, and the
+expected cost. When authoring a contract, apply these same conditions before
+adding a full-suite criterion; copying an unconditional command is not a risk
+assessment.
+
+Freeze the implementation before final acceptance. Execute required expensive
+criteria through `verify-sprint --prepare-acceptance`; declare each executable
+check once in the JSON `Verification Plan`, including phase, cost, evidence
+policy, necessity, and environment inputs. Unchanged retries consume recorded
+execution evidence. Expensive input drift requires an explicit new plan or
+rerun reason; a cache miss never grants permission to rerun. Reviewers consume that evidence rather than
+independently rerunning the suite. Do not list the same test coverage twice in
+the final contract; focused development runs are separate from final acceptance.
+Record changed paths, checks run or reused, and why that coverage is sufficient.
+CI and explicit release gates retain their required checks.
+
+After a passing full suite, a subsequent bounded change does not automatically
+require another full run. Retain the baseline run identity, inspect the actual
+delta, and run its regression/affected checks. The parent updates the contract's
+final criteria to that delta coverage when the full-suite trigger no longer
+applies, recording the baseline and coverage rationale in Acceptance Notes.
+Do not waive an explicit user/release requirement. An old full-suite pass remains
+baseline evidence for its original subject, never a full-suite pass for the new
+subject. Repeat the full suite only for an uncovered integration risk or an
+explicit requirement for that new subject; a cache miss alone is not a trigger.
+
 <!-- BEGIN ARCHITECTURE CONTRACT -->
 ## Architecture Contract
 
-- Functional block: `scripts/verify-sprint.sh`
-- Capability ID: `verification-evals-checks`
-- Matched prefix: `scripts/verify-sprint.sh`
-- Architecture domain: `verification`
-- Architecture capability: `evals-checks`
-- Architecture module: `docs/architecture/modules/verification/evals-checks.md`
-- Last architecture event: 2026-08-05T00:46:11+0800
-- Last changed path: `tasks/workstreams/verification/evals-checks/github-issues-158-159.md`
-- Severity: medium
-- Change type: workstream-sync
+- Functional block: `src/effects/automation`
+- Capability ID: `runtime-harness-automation-budget`
+- Matched prefix: `src/effects/automation`
+- Architecture domain: `runtime-harness`
+- Architecture capability: `automation-budget`
+- Architecture module: `docs/architecture/modules/runtime-harness/automation-budget.md`
+- Last architecture event: 2026-09-08T05:10:12+0800
+- Last changed path: `src/effects/automation/campaign-capability-registry.ts`
+- Severity: low
+- Change type: source-change
 - Module responsibility: Keep this block aligned with the local boundary described by surrounding human-owned context.
-- Entrypoints: `scripts/verify-sprint.sh`
+- Entrypoints: `src/effects/automation`
 - Allowed dependencies: Follow root `AGENTS.md` / `CLAUDE.md` and this local contract.
 - Forbidden dependencies: Do not cross sibling app/service/package boundaries without an architecture snapshot or explicit plan.
-- Runtime path: `scripts/verify-sprint.sh`
+- Runtime path: `src/effects/automation`
 - LSP/tooling profile: `typescript-lsp`
 - Verification: Use root required checks plus local commands recorded in this capability contract.
 - Latest snapshot: `(none yet)`
-- Semantic diagram source: `docs/architecture/modules/verification/evals-checks.md`
-- Pending architecture request: `(none)`
+- Semantic diagram source: `docs/architecture/modules/runtime-harness/automation-budget.md`
+- Pending architecture request: `docs/architecture/requests/runtime-harness-automation-budget.md`
 
 ## Active Workstreams
 
-- `tasks/workstreams/verification/evals-checks/github-issues-158-159.md`
-  - status: completed
-  - current_slice: completed-20260805-deployed-emitter-binding
-  - source_plan: plans/plan-20260805-0001-github-issues-158-159.md
+- (none yet)
 
 ## Current Session Projection
 
-- Durable progress lives under `tasks/workstreams/verification/evals-checks`.
-- `tasks/current.md` is the tracked derived status snapshot; it is not a live lock or task source.
+- Durable progress lives under `tasks/workstreams/runtime-harness/automation-budget`.
+- `tasks/current.md` is the ignored local derived status read model; it is not a live lock or task source.
 - `tasks/todos.md` is the deferred-goal ledger; current execution slices stay in the active plan's `## Task Breakdown`.
 <!-- END ARCHITECTURE CONTRACT -->

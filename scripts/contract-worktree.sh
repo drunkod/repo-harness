@@ -7,9 +7,28 @@ GIT_BIN="${REPO_HARNESS_GIT_BIN:-/usr/bin/git}"
 BASH_BIN="${REPO_HARNESS_BASH_BIN:-/bin/bash}"
 BUN_BIN="${REPO_HARNESS_BUN_BIN:-}"
 WORKFLOW_STATE_LIB="${REPO_HARNESS_WORKFLOW_STATE_LIB:-.ai/hooks/lib/workflow-state.sh}"
-[[ "$GIT_BIN" == /* && -x "$GIT_BIN" ]] || { echo "contract-worktree: trusted git executable is unavailable" >&2; exit 1; }
-[[ "$BASH_BIN" == /* && -x "$BASH_BIN" ]] || { echo "contract-worktree: trusted bash executable is unavailable" >&2; exit 1; }
-if [[ -n "$BUN_BIN" ]] && [[ "$WORKFLOW_STATE_LIB" != /* || ! -f "$WORKFLOW_STATE_LIB" || -L "$WORKFLOW_STATE_LIB" ]]; then
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+  GIT_BIN="${GIT_BIN//\\//}"
+  BASH_BIN="${BASH_BIN//\\//}"
+  BUN_BIN="${BUN_BIN//\\//}"
+  WORKFLOW_STATE_LIB="${WORKFLOW_STATE_LIB//\\//}"
+  REPO_HARNESS_TARGET_REPO_ROOT="${REPO_HARNESS_TARGET_REPO_ROOT:-}"
+  REPO_HARNESS_TARGET_REPO_ROOT="${REPO_HARNESS_TARGET_REPO_ROOT//\\//}"
+  REPO_HARNESS_HELPER_SOURCE_PATH="${REPO_HARNESS_HELPER_SOURCE_PATH:-}"
+  REPO_HARNESS_HELPER_SOURCE_PATH="${REPO_HARNESS_HELPER_SOURCE_PATH//\\//}"
+fi
+is_absolute_host_path() {
+  case "$1" in
+    /*) return 0 ;;
+    [A-Za-z]:/*|[A-Za-z]:\\*) [[ "${OS:-}" == "Windows_NT" ]] && return 0 ;;
+  esac
+  return 1
+}
+is_trusted_executable() { is_absolute_host_path "$1" && [[ -f "$1" && ! -L "$1" && -x "$1" ]]; }
+is_trusted_regular_file() { is_absolute_host_path "$1" && [[ -f "$1" && ! -L "$1" ]]; }
+is_trusted_executable "$GIT_BIN" || { echo "contract-worktree: trusted git executable is unavailable" >&2; exit 1; }
+is_trusted_executable "$BASH_BIN" || { echo "contract-worktree: trusted bash executable is unavailable" >&2; exit 1; }
+if [[ -n "$BUN_BIN" ]] && ! is_trusted_regular_file "$WORKFLOW_STATE_LIB"; then
   echo "contract-worktree: trusted workflow-state library is unavailable" >&2
   exit 1
 fi
@@ -33,10 +52,15 @@ if [[ -n "${REPO_HARNESS_HELPER_SOURCE_PATH:-}" && -f "$REPO_HARNESS_HELPER_SOUR
 fi
 helper_dir="$(cd "$(dirname "$helper_source")" && pwd)"
 
+worktree_merge_lib="$helper_dir/worktree-merge-lib.sh"
+[[ -f "$worktree_merge_lib" ]] || { echo "contract-worktree: worktree merge library is unavailable: $worktree_merge_lib" >&2; exit 1; }
+# shellcheck source=worktree-merge-lib.sh
+. "$worktree_merge_lib"
+
 usage() {
   cat <<'USAGE_EOF'
 Usage:
-  repo-harness run contract-worktree start --plan <plan-file> [--path <worktree-path>] [--branch <branch-name>]
+  repo-harness run contract-worktree start --plan <plan-file> [--path <worktree-path>] [--branch <branch-name>] [--fresh] [--json]
   repo-harness run contract-worktree finish [--merge|--no-merge] [--target <branch>] [--gate-base <ref>] [--message <commit-message>]
   repo-harness run contract-worktree cleanup --slug <slug> [--target <branch>] [--dry-run]
   repo-harness run contract-worktree status
@@ -52,6 +76,86 @@ json_escape() {
   value="${value//$'\r'/\\r}"
   value="${value//$'\t'/\\t}"
   printf '%s' "$value"
+}
+
+start_notice() {
+  [[ "${contract_worktree_start_json:-0}" -eq 1 ]] || printf '%s\n' "$*"
+}
+
+write_start_json() {
+  local worktree_path="$1" branch_name="$2" plan_file="$3" disposition="$4"
+  printf '{"protocol":1,"kind":"repo-harness-contract-worktree-start","worktree_path":"%s","branch":"%s","plan_path":"%s","disposition":"%s"}\n' \
+    "$(json_escape "$worktree_path")" \
+    "$(json_escape "$branch_name")" \
+    "$(json_escape "$plan_file")" \
+    "$(json_escape "$disposition")"
+}
+
+now_ms() {
+  if command -v node >/dev/null 2>&1; then
+    node -e 'process.stdout.write(String(Date.now()))'
+  elif command -v bun >/dev/null 2>&1; then
+    bun -e 'process.stdout.write(String(Date.now()))'
+  else
+    printf '%s000' "$(date +%s)"
+  fi
+}
+
+# Coordination wait metrics sink. Rooted at the primary worktree (the parent of
+# the git common directory), not at this worktree: `finish` deletes its own
+# worktree on the success path, so a per-worktree ledger would lose exactly the
+# `merged` record it just wrote, and scatter the rest across linked worktrees.
+coordination_waits_file() {
+  local common_dir
+  common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/.ai/harness/runs/coordination/waits.jsonl' "$(dirname "$common_dir")"
+}
+
+# Append-only, single-line, no lock file: the same idiom the workstream-sync
+# event log uses. Interleaved writes from concurrent agents are the accepted
+# tradeoff; a torn record loses one measurement, never a host command. Every
+# failure path returns 0 so instrumentation can never change an exit status.
+coordination_wait_emit() {
+  local record="$1" file
+  file="$(coordination_waits_file 2>/dev/null)" || return 0
+  [[ -n "$file" ]] || return 0
+  mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+  printf '%s\n' "$record" >> "$file" 2>/dev/null || return 0
+  return 0
+}
+
+# One `finish_attempt` record per finish attempt. `finish_attempt_started_ms`
+# is set at finish entry and cleared by the emission, so the refusal sites that
+# call `finish_transaction_abort` right after emitting cannot double-count, and
+# an abort reached outside a finish attempt emits nothing.
+finish_attempt_started_ms=""
+finish_attempt_slug=""
+finish_attempt_frozen_base=""
+
+emit_finish_attempt() {
+  local outcome="$1" frozen_base="${2:-}" publication="${3:-}" publication_field
+  local ended_ms
+  [[ -n "$finish_attempt_started_ms" ]] || return 0
+  # A polluted `now_ms` stdout (a bare word instead of a millisecond timestamp)
+  # makes the elapsed arithmetic fail under `set -u`, which a trailing `|| true`
+  # cannot catch. The `merged` emission runs after publication is durable and
+  # after the abort trap is disarmed, so a crash here would orphan the worktree.
+  # Measurement is best effort: drop the record, keep the finish. No fallback
+  # timestamp is synthesized.
+  ended_ms="$(now_ms || true)"
+  if [[ ! "$ended_ms" =~ ^[0-9]+$ || ! "$finish_attempt_started_ms" =~ ^[0-9]+$ ]]; then
+    finish_attempt_started_ms=""
+    return 0
+  fi
+  if [[ -n "$publication" ]]; then
+    publication_field="\"$(json_escape "$publication")\""
+  else
+    publication_field="null"
+  fi
+  coordination_wait_emit "{\"protocol\":1,\"kind\":\"finish_attempt\",\"at\":\"$(json_escape "$(date '+%Y-%m-%dT%H:%M:%S%z')")\",\"slug\":\"$(json_escape "$finish_attempt_slug")\",\"ms\":$((ended_ms - finish_attempt_started_ms)),\"outcome\":\"$(json_escape "$outcome")\",\"frozen_base\":\"$(json_escape "$frozen_base")\",\"publication\":${publication_field}}" || true
+  finish_attempt_started_ms=""
+  return 0
 }
 
 policy_get() {
@@ -87,6 +191,46 @@ check_architecture_freshness() {
 
   echo "contract-worktree: WARN missing packaged check-architecture-sync helper; skipping advisory architecture freshness gate" >&2
   return 0
+}
+
+acknowledge_architecture_projection_publication() {
+  local target_worktree="$1" publication_sha="$2" apply_mode changed_paths output
+  local -a projection_cli=()
+
+  apply_mode="$(policy_get '.architecture.projection_apply' 'disabled')"
+  [[ "$apply_mode" == "automatic" ]] || return 0
+  if ! changed_paths="$(git -C "$target_worktree" diff-tree --no-commit-id --name-only -r \
+      "$publication_sha^" "$publication_sha")"; then
+    echo "contract-worktree: could not inspect the publication tree for architecture projection output" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$changed_paths" | grep -Fqx 'docs/architecture/.projection-manifest.json'; then
+    return 0
+  fi
+
+  # This acknowledgement mutates ignored cursor state only, after the exact
+  # accepted tree is already public. Prefer the just-published source CLI so a
+  # self-hosting repo does not depend on an older globally installed command.
+  if [[ -n "$BUN_BIN" ]] && is_trusted_executable "$BUN_BIN" && [[ -f "$target_worktree/src/cli/index.ts" ]]; then
+    projection_cli=("$BUN_BIN" "$target_worktree/src/cli/index.ts")
+  elif [[ -n "${REPO_HARNESS_CLI_BIN:-}" ]] && is_trusted_executable "$REPO_HARNESS_CLI_BIN"; then
+    projection_cli=("$REPO_HARNESS_CLI_BIN")
+  elif command -v repo-harness >/dev/null 2>&1; then
+    projection_cli=(repo-harness)
+  else
+    echo "contract-worktree: automatic projection publication acknowledgement requires the repo-harness CLI" >&2
+    return 1
+  fi
+
+  if ! output="$(cd "$target_worktree" \
+    && REPO_HARNESS_TARGET_REPO_ROOT="$target_worktree" \
+      "${projection_cli[@]}" architecture-projection acknowledge-publication \
+        --json --publication-sha "$publication_sha" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    echo "contract-worktree: could not acknowledge the manifest-bearing publication in the architecture drift cursor" >&2
+    return 1
+  fi
+  echo "[ContractWorktree] Architecture projection publication acknowledged: $publication_sha"
 }
 
 normalize_slug() {
@@ -257,7 +401,7 @@ remove_copied_untracked_source_plan() {
   if git ls-files --others --exclude-standard -- "$plan_file" | grep -Fxq "$plan_file" \
     && cmp -s "$plan_file" "$worktree_path/$plan_file"; then
     rm -f "$plan_file"
-    echo "[ContractWorktree] Moved untracked source plan into contract worktree: $plan_file"
+    start_notice "[ContractWorktree] Moved untracked source plan into contract worktree: $plan_file"
   fi
 }
 
@@ -276,8 +420,49 @@ clear_primary_markers_for_transferred_plan() {
 
   if marker_points_to_plan "$ACTIVE_PLAN_MARKER" "$plan_file"; then
     rm -f "$ACTIVE_PLAN_MARKER" "$ACTIVE_WORKTREE_MARKER"
-    echo "[ContractWorktree] Cleared primary active markers for transferred plan: $plan_file"
+    start_notice "[ContractWorktree] Cleared primary active markers for transferred plan: $plan_file"
   fi
+}
+
+bootstrap_worktree_runtime() {
+  # A fresh linked worktree starts without the gitignored runtime artifacts the
+  # verification gates depend on, and both resulting failures name neither cause.
+  # A missing dependency tree surfaces as `state=missing`, because
+  # check-architecture-sync resolves the provider through the candidate build,
+  # which requires archctx package-locally, while the globally installed CLI
+  # resolves it elsewhere and cheerfully reports ready. A missing code index
+  # surfaces as `unresolved-major-change` listing every capability, because
+  # archctx cannot prove a single flow without code facts. Seeding both here
+  # keeps that diagnosis from being re-derived once per worktree.
+  local worktree_path="$1"
+
+  if [[ -f "$worktree_path/package.json" ]] \
+    && { [[ -f "$worktree_path/bun.lock" ]] || [[ -f "$worktree_path/bun.lockb" ]]; } \
+    && command -v bun >/dev/null 2>&1 \
+    && [[ ! -d "$worktree_path/node_modules" ]]; then
+    [[ "${contract_worktree_start_json:-0}" -eq 1 ]] \
+      || printf '%s\n' "[ContractWorktree] Installing dependencies (gates resolve archctx package-locally)"
+    if ! (cd "$worktree_path" && bun install --frozen-lockfile >/dev/null); then
+      echo "[ContractWorktree] bun install --frozen-lockfile failed; no verification gate can run in this worktree" >&2
+      return 1
+    fi
+  fi
+
+  # Mirror only an adoption the primary worktree already made. No .codegraph
+  # directory means the operator did not opt into indexing, and start has no
+  # business opting in on their behalf.
+  if [[ -d "$REPO_ROOT/.codegraph" ]] \
+    && command -v codegraph >/dev/null 2>&1 \
+    && [[ ! -f "$worktree_path/.codegraph/codegraph.db" ]]; then
+    [[ "${contract_worktree_start_json:-0}" -eq 1 ]] \
+      || printf '%s\n' "[ContractWorktree] Indexing CodeGraph (architecture projection requires code facts)"
+    if ! (cd "$worktree_path" && codegraph init >/dev/null 2>&1); then
+      echo "[ContractWorktree] codegraph init failed; architecture projection will report unresolved-major-change for every capability" >&2
+      return 1
+    fi
+  fi
+
+  return 0
 }
 
 start_worktree() {
@@ -285,6 +470,8 @@ start_worktree() {
   local worktree_path=""
   local branch_name=""
   local run_plan_to_todo=1
+  local require_fresh=0
+  local output_json=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -307,6 +494,14 @@ start_worktree() {
         run_plan_to_todo=0
         shift
         ;;
+      --fresh)
+        require_fresh=1
+        shift
+        ;;
+      --json)
+        output_json=1
+        shift
+        ;;
       --help|-h)
         usage
         exit 0
@@ -322,37 +517,80 @@ start_worktree() {
   [[ -n "$plan_file" ]] || { echo "contract-worktree: start requires --plan" >&2; exit 2; }
   [[ -f "$plan_file" ]] || { echo "contract-worktree: plan file not found: $plan_file" >&2; exit 2; }
 
+  contract_worktree_start_json="$output_json"
+
   if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "contract-worktree: not inside a git repository" >&2
     exit 2
   fi
 
   if is_linked_worktree; then
-    echo "[ContractWorktree] Already in a linked worktree: $REPO_ROOT"
+    if [[ "$require_fresh" -eq 1 ]]; then
+      echo "contract-worktree: --fresh refuses to reuse the current linked worktree: $REPO_ROOT" >&2
+      return 1
+    fi
+    if [[ "$output_json" -eq 1 ]]; then
+      write_start_json "$(pwd -P)" "$(git branch --show-current 2>/dev/null || true)" \
+        "$(pwd -P)/$plan_file" "already_linked"
+    else
+      echo "[ContractWorktree] Already in a linked worktree: $REPO_ROOT"
+    fi
     return 0
   fi
 
-  local slug branch_prefix base_branch existing_worktree base_commit source_commit new_branch=0
+  local slug branch_prefix base_branch existing_worktree base_commit source_commit new_branch=0 disposition metadata_file
   slug="$(derive_slug_from_plan "$plan_file")"
   branch_prefix="$(policy_get '.worktree_strategy.branch_prefix' 'codex/')"
   base_branch="$(policy_get '.worktree_strategy.base_branch' 'main')"
   source_commit="$(git rev-parse HEAD)"
   branch_name="${branch_name:-${branch_prefix}${slug}}"
   worktree_path="${worktree_path:-$(default_worktree_path "$slug")}"
+  metadata_file="$REPO_ROOT/.ai/harness/worktrees/${slug}.json"
+
+  if [[ "$require_fresh" -eq 1 && ( -e "$metadata_file" || -L "$metadata_file" ) ]]; then
+    echo "contract-worktree: --fresh refuses residual worktree metadata: $metadata_file" >&2
+    return 1
+  fi
+  if [[ "$require_fresh" -eq 1 && ( -e "$worktree_path" || -L "$worktree_path" ) ]]; then
+    echo "contract-worktree: --fresh refuses residual worktree path: $worktree_path" >&2
+    return 1
+  fi
 
   existing_worktree="$(find_worktree_for_branch "$branch_name" || true)"
   if [[ -n "$existing_worktree" ]]; then
+    if [[ "$require_fresh" -eq 1 ]]; then
+      echo "contract-worktree: --fresh refuses existing worktree for branch $branch_name: $existing_worktree" >&2
+      return 1
+    fi
     worktree_path="$existing_worktree"
-    echo "[ContractWorktree] Reusing existing worktree: $worktree_path"
+    disposition="reused_existing_worktree"
+    start_notice "[ContractWorktree] Reusing existing worktree: $worktree_path"
   elif git show-ref --verify --quiet "refs/heads/$branch_name"; then
-    git worktree add "$worktree_path" "$branch_name"
-    echo "[ContractWorktree] Added worktree for existing branch: $worktree_path"
+    if [[ "$require_fresh" -eq 1 ]]; then
+      echo "contract-worktree: --fresh refuses existing branch: $branch_name" >&2
+      return 1
+    fi
+    if [[ "$output_json" -eq 1 ]]; then
+      git worktree add "$worktree_path" "$branch_name" >&2
+    else
+      git worktree add "$worktree_path" "$branch_name"
+    fi
+    disposition="attached_existing_branch"
+    start_notice "[ContractWorktree] Added worktree for existing branch: $worktree_path"
   else
-    git worktree add "$worktree_path" -b "$branch_name" HEAD
+    if [[ "$output_json" -eq 1 ]]; then
+      git worktree add "$worktree_path" -b "$branch_name" HEAD >&2
+    else
+      git worktree add "$worktree_path" -b "$branch_name" HEAD
+    fi
     new_branch=1
-    echo "[ContractWorktree] Created worktree: $worktree_path"
+    disposition="created"
+    start_notice "[ContractWorktree] Created worktree: $worktree_path"
   fi
 
+  worktree_path="$(cd "$worktree_path" && pwd -P)"
+
+  bootstrap_worktree_runtime "$worktree_path"
   copy_plan_into_worktree "$plan_file" "$worktree_path"
   remove_copied_untracked_source_plan "$plan_file" "$worktree_path"
   clear_primary_markers_for_transferred_plan "$plan_file"
@@ -367,12 +605,20 @@ start_worktree() {
     cd "$worktree_path"
     write_start_metadata "$slug" "$plan_file" "$branch_name" "$worktree_path" "$base_branch" "$base_commit"
     if [[ "$run_plan_to_todo" -eq 1 && -f "$helper_dir/plan-to-todo.sh" ]]; then
-      REPO_HARNESS_TARGET_REPO_ROOT="$worktree_path" REPO_HARNESS_CONTRACT_WORKTREE=1 bash "$helper_dir/plan-to-todo.sh" --plan "$plan_file"
+      if [[ "$output_json" -eq 1 ]]; then
+        REPO_HARNESS_TARGET_REPO_ROOT="$worktree_path" REPO_HARNESS_CONTRACT_WORKTREE=1 bash "$helper_dir/plan-to-todo.sh" --plan "$plan_file" >&2
+      else
+        REPO_HARNESS_TARGET_REPO_ROOT="$worktree_path" REPO_HARNESS_CONTRACT_WORKTREE=1 bash "$helper_dir/plan-to-todo.sh" --plan "$plan_file"
+      fi
     fi
   )
 
-  echo "[ContractWorktree] Branch: $branch_name"
-  echo "[ContractWorktree] Plan: $worktree_path/$plan_file"
+  if [[ "$output_json" -eq 1 ]]; then
+    write_start_json "$worktree_path" "$branch_name" "$worktree_path/$plan_file" "$disposition"
+  else
+    echo "[ContractWorktree] Branch: $branch_name"
+    echo "[ContractWorktree] Plan: $worktree_path/$plan_file"
+  fi
 }
 
 status_worktree() {
@@ -400,6 +646,10 @@ is_local_runtime_marker_path() {
   return 1
 }
 
+is_workflow_owned_projection_output() {
+  [[ "$1" == "docs/architecture/.projection-manifest.json" ]]
+}
+
 check_scope_against_contract() {
   local contract_file="$1"
   local changed_paths path blocked=0
@@ -422,7 +672,7 @@ check_scope_against_contract() {
 
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
-    if is_local_runtime_marker_path "$path"; then
+    if is_local_runtime_marker_path "$path" || is_workflow_owned_projection_output "$path"; then
       continue
     fi
     if ! workflow_contract_allows_path "$contract_file" "$path"; then
@@ -464,6 +714,7 @@ closeout_claim_dir=""
 closeout_claim_mode=""
 closeout_claim_operation=""
 closeout_claim_conflict_dir=""
+closeout_claim_target_ref=""
 
 closeout_journal_root() {
   local common_dir
@@ -500,7 +751,8 @@ closeout_claim_write_owner() {
     printf '  "operation": "%s",\n' "$(json_escape "$operation")"
     printf '  "worktree": "%s",\n' "$(json_escape "$closeout_journal_worktree")"
     printf '  "pid": "%s",\n' "$$"
-    printf '  "journal_key": "%s"\n' "$(json_escape "$journal_key")"
+    printf '  "journal_key": "%s",\n' "$(json_escape "$journal_key")"
+    printf '  "target_ref": "%s"\n' "$(json_escape "$closeout_claim_target_ref")"
     printf '}\n'
   } | closeout_journal_write "$target"
 }
@@ -553,12 +805,19 @@ closeout_claim_release() {
   closeout_claim_dir=""
   closeout_claim_mode=""
   closeout_claim_operation=""
+  closeout_claim_target_ref=""
   trap - EXIT
 }
 
 closeout_claim_on_exit() {
   local exit_code=$?
   trap - EXIT
+  if [[ "$exit_code" -ne 0 && "$sprint_lease_completion_open" -eq 1 ]]; then
+    if ! sprint_lease_abort_completion "$sprint_lease_target_ref"; then
+      echo "contract-worktree: sprint completion abort failed; retaining the closeout ownership claim for explicit recovery" >&2
+      exit 1
+    fi
+  fi
   closeout_claim_release || exit_code=1
   exit "$exit_code"
 }
@@ -630,16 +889,19 @@ closeout_claim_report() {
 # No closeout effect is possible in that window, so explicit `recover abort`
 # may remove only that orphan claim and any status-less journal directory.
 closeout_claim_abort_orphan() {
-  local operation="$1" claim journal_key journal_dir takeover_result=0
+  local operation="$1" claim journal_key journal_dir target_ref takeover_result=0
   claim="$(closeout_claim_path "$operation")" || return 1
   [[ -d "$claim" ]] || return 1
   journal_key="$(closeout_journal_field "$claim/owner.json" journal_key)"
+  target_ref="$(closeout_journal_field "$claim/owner.json" target_ref)"
   if [[ -n "$journal_key" ]]; then
     journal_dir="$(closeout_journal_root)/$operation/$journal_key"
     [[ ! -f "$journal_dir/status.json" ]] || return 4
   fi
   closeout_claim_takeover_for_recovery "$operation" || takeover_result=$?
   [[ "$takeover_result" -eq 0 ]] || return "$takeover_result"
+  resolve_sprint_claim_token || return 1
+  sprint_lease_abort_completion "$target_ref" || return 5
   if [[ -n "${journal_dir:-}" && -d "$journal_dir" ]]; then
     rm -rf "$journal_dir"
   fi
@@ -680,6 +942,25 @@ closeout_journal_phase_ref() {
   local file="$1/status.json" name="$2"
   [[ -f "$file" ]] || return 1
   sed -n "s/^    {\"phase\": \"${name}\", \"at\": \"[^\"]*\", \"ref\": \"\([^\"]*\)\"}.*\$/\1/p" "$file" | tail -1
+}
+
+# A complete ref identifies the durable external effect, not necessarily the
+# current source-worktree HEAD. Local/no-merge and ship transactions complete at
+# the source HEAD; single-publication finish completes at the synthesized target
+# commit, so replay must prove that exact target ref is still installed.
+closeout_journal_complete_effect_present() {
+  local dir="$1" complete_ref operation merge_back target_branch
+  complete_ref="$(closeout_journal_phase_ref "$dir" complete)"
+  [[ -n "$complete_ref" ]] || return 1
+  operation="$(closeout_journal_field "$dir/meta.json" operation)"
+  merge_back="$(closeout_journal_field "$dir/meta.json" merge_back)"
+  if [[ "$operation" == "finish" && "$merge_back" == "1" ]]; then
+    target_branch="$(closeout_journal_field "$dir/meta.json" target_branch)"
+    [[ -n "$target_branch" ]] || return 1
+    git merge-base --is-ancestor "$complete_ref" "refs/heads/$target_branch" >/dev/null 2>&1
+    return
+  fi
+  [[ "$(git rev-parse HEAD)" == "$complete_ref" ]]
 }
 
 # Rewrites the whole status document so the phase list has exactly one authority
@@ -765,7 +1046,7 @@ closeout_journal_begin() {
       # If HEAD has moved off the recorded completion the transaction was undone
       # afterwards (an outer rollback), so the same key must start fresh instead
       # of reporting success for work that no longer exists.
-      if [[ "$(git rev-parse HEAD)" == "$(closeout_journal_phase_ref "$dir" complete)" ]]; then
+      if closeout_journal_complete_effect_present "$dir"; then
         closeout_journal_dir="$dir"
         return 2
       fi
@@ -911,6 +1192,7 @@ finish_transaction_phase() {
 
 finish_transaction_abort() {
   local index path
+  emit_finish_attempt aborted "$finish_attempt_frozen_base" ""
   if [[ -n "$finish_transaction_original_head" ]] && [[ "$(git rev-parse HEAD)" != "$finish_transaction_original_head" ]]; then
     git reset --mixed "$finish_transaction_original_head"
   fi
@@ -922,6 +1204,10 @@ finish_transaction_abort() {
       cp -Rp "$finish_transaction_dir/$index/value" "$path"
     fi
   done
+  if ! sprint_lease_abort_completion "$sprint_lease_target_ref"; then
+    echo "contract-worktree: sprint completion abort failed; closeout journal retained for explicit recovery" >&2
+    return 1
+  fi
   finish_transaction_active=0
   finish_transaction_original_head=""
   trap - EXIT
@@ -935,8 +1221,8 @@ finish_transaction_abort() {
 }
 
 finish_transaction_commit() {
-  local head
-  head="$(git rev-parse HEAD)"
+  local head="${1:-}"
+  head="${head:-$(git rev-parse HEAD)}"
   finish_transaction_active=0
   trap - EXIT
   closeout_journal_record "$closeout_journal_dir" complete complete "$head"
@@ -950,21 +1236,32 @@ finish_transaction_on_exit() {
   local status=$?
   trap - EXIT
   if [[ "$finish_transaction_active" -eq 1 && "$status" -ne 0 ]]; then
-    finish_transaction_abort || status=1
+    if closeout_finish_effect_landed "$closeout_journal_dir"; then
+      echo "contract-worktree: finish failed after target publication landed; journal retained for 'recover reconcile'" >&2
+    else
+      finish_transaction_abort || status=1
+    fi
   fi
   exit "$status"
 }
 
-# True once finish's only external effect -- the fast-forward of the target
-# branch -- is observable, whether or not the `merged` phase was reached before
-# the interrupt. `abort` refuses on true, `reconcile` refuses on false, so the
-# window between the merge and its phase record cannot defeat either rule.
+# True once finish's only external effect -- publication on the target branch --
+# is observable, whether or not the `merged` phase was reached before the
+# interrupt. `abort` refuses on true, `reconcile` refuses on false, so the window
+# between the target update and its phase record cannot defeat either rule.
 closeout_finish_effect_landed() {
   local dir="$1" head target_branch base_sha
   closeout_journal_has_phase "$dir" merged && return 0
   [[ "$(closeout_journal_field "$dir/meta.json" merge_back)" == "1" ]] || return 1
-  head="$(closeout_journal_phase_ref "$dir" lifecycle_committed)"
-  [[ -n "$head" ]] || head="$(closeout_journal_phase_ref "$dir" implementation_committed)"
+  head="$(closeout_journal_phase_ref "$dir" publication_prepared)"
+  if [[ -z "$head" ]]; then
+    # Journals opened before single-publication cutover recorded the source
+    # branch head instead. Retain that exact landed-effect probe so an already
+    # applied legacy fast-forward can never be mistaken for an abortable local
+    # transaction.
+    head="$(closeout_journal_phase_ref "$dir" lifecycle_committed)"
+    [[ -n "$head" ]] || head="$(closeout_journal_phase_ref "$dir" implementation_committed)"
+  fi
   [[ -n "$head" ]] || return 1
   base_sha="$(closeout_journal_field "$dir/meta.json" base_sha)"
   [[ "$head" != "$base_sha" ]] || return 1
@@ -1000,7 +1297,7 @@ closeout_recover_select() {
 }
 
 recover_worktree() {
-  local action="${1:-}" key="" dir status last_phase head claim claim_result=0
+  local action="${1:-}" key="" dir status last_phase head claim claim_result=0 target_ref="" target_worktree=""
   shift || true
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1095,6 +1392,9 @@ recover_worktree() {
         echo "contract-worktree: closeout journal has no restorable snapshot: $dir" >&2
         return 1
       }
+      resolve_sprint_claim_token || return 1
+      target_ref="$(closeout_journal_field "$dir/meta.json" target_branch)"
+      sprint_lease_abort_completion "$target_ref" || return 1
       closeout_journal_record "$dir" aborted "" ""
       rm -rf "$dir/snapshot"
       closeout_claim_release
@@ -1121,8 +1421,24 @@ recover_worktree() {
         echo "contract-worktree: no landed merge to reconcile (last phase: $last_phase); run 'recover abort' instead" >&2
         return 1
       }
-      head="$(closeout_journal_phase_ref "$dir" lifecycle_committed)"
+      head="$(closeout_journal_phase_ref "$dir" publication_prepared)"
+      [[ -n "$head" ]] || head="$(closeout_journal_phase_ref "$dir" lifecycle_committed)"
       [[ -n "$head" ]] || head="$(closeout_journal_phase_ref "$dir" implementation_committed)"
+      # Only the synthesized-publication journal shape can carry the exact
+      # manifest-bearing tree proof required by the acknowledgement command.
+      # The documented pre-cutover journal shape remains reconcilable without
+      # inventing that proof.
+      if closeout_journal_has_phase "$dir" publication_prepared; then
+        target_ref="$(closeout_journal_field "$dir/meta.json" target_branch)"
+        target_worktree="$(find_worktree_for_branch "$target_ref" || true)"
+        [[ -n "$target_worktree" ]] || {
+          echo "contract-worktree: target branch has no checked-out worktree for projection acknowledgement: $target_ref" >&2
+          return 1
+        }
+        acknowledge_architecture_projection_publication "$target_worktree" "$head" || return 1
+        closeout_journal_has_phase "$dir" projection_acknowledged \
+          || closeout_journal_record "$dir" in_progress projection_acknowledged "$head"
+      fi
       closeout_journal_has_phase "$dir" merged || closeout_journal_record "$dir" in_progress merged "$head"
       closeout_journal_record "$dir" complete complete "$head"
       rm -rf "$dir/snapshot"
@@ -1242,7 +1558,7 @@ run_merge_gate() {
     echo "contract-worktree: merge-gate helper is missing: $helper_dir/merge-gate.ts" >&2
     exit 1
   }
-  [[ "$BUN_BIN" == /* && -x "$BUN_BIN" ]] || {
+  is_trusted_executable "$BUN_BIN" || {
     echo "contract-worktree: merge gate requires the trusted Bun runtime injected by repo-harness run" >&2
     exit 1
   }
@@ -1253,7 +1569,7 @@ run_merge_gate() {
 verify_merge_gate_seal() {
   local base_ref="$1"
   echo "[ContractWorktree] Revalidating local merge seal against $base_ref" >&2
-  [[ "$BUN_BIN" == /* && -x "$BUN_BIN" ]] || {
+  is_trusted_executable "$BUN_BIN" || {
     echo "contract-worktree: merge gate requires the trusted Bun runtime injected by repo-harness run" >&2
     exit 1
   }
@@ -1266,7 +1582,7 @@ verify_acceptance_receipt() {
     echo "contract-worktree: AcceptanceReceipt helper is missing: $helper_dir/acceptance-receipt.ts" >&2
     exit 1
   }
-  [[ "$BUN_BIN" == /* && -x "$BUN_BIN" ]] || {
+  is_trusted_executable "$BUN_BIN" || {
     echo "contract-worktree: AcceptanceReceipt requires the trusted Bun runtime injected by repo-harness run" >&2
     exit 1
   }
@@ -1296,7 +1612,195 @@ refresh_and_freeze_base() {
   git rev-parse "$base_ref^{commit}"
 }
 
+# --- shared sprint lease gate ------------------------------------------------
+# A contract worktree that holds a sprint claim token may publish only while it
+# still owns that lease. The gate is the real enforcement boundary for `steal`:
+# a stolen-from agent cannot publish, with or without any hook.
+#
+# A worktree holding no token is not executing a claimed sprint row (a plan
+# captured outside the sprint flow), so there is no ownership to compare and
+# nothing to gate.
+sprint_lease_claim_id=""
+sprint_lease_task_id=""
+sprint_lease_token_file=""
+sprint_lease_completion_open=0
+sprint_lease_target_ref=""
+SPRINT_CLI_RESOLVED=0
+SPRINT_CLI_CMD=()
+
+resolve_sprint_cli() {
+  [[ "$SPRINT_CLI_RESOLVED" -eq 0 ]] || return 0
+  if [[ -n "${REPO_HARNESS_CLI_BIN:-}" ]]; then
+    if ! is_trusted_executable "$REPO_HARNESS_CLI_BIN"; then
+      echo "contract-worktree: REPO_HARNESS_CLI_BIN is not an executable absolute path: $REPO_HARNESS_CLI_BIN" >&2
+      return 1
+    fi
+    SPRINT_CLI_CMD=("$REPO_HARNESS_CLI_BIN")
+  elif command -v repo-harness >/dev/null 2>&1; then
+    SPRINT_CLI_CMD=(repo-harness)
+  elif [[ -f "src/cli/index.ts" ]] && command -v bun >/dev/null 2>&1; then
+    SPRINT_CLI_CMD=(bun "src/cli/index.ts")
+  else
+    echo "contract-worktree: the repo-harness CLI is unavailable; the sprint lease cannot be verified" >&2
+    return 1
+  fi
+  SPRINT_CLI_RESOLVED=1
+}
+
+sprint_lease() {
+  resolve_sprint_cli || return 1
+  "${SPRINT_CLI_CMD[@]}" sprint "$@"
+}
+
+sprint_claim_dir() {
+  local marker
+  marker="$(policy_get '.sprints.active_marker_file' '.ai/harness/sprint/active-sprint')"
+  printf '%s/claims' "$(dirname "$marker")"
+}
+
+# One worktree executes one claimed row, so more than one token here is an
+# impossible state and fails closed instead of selecting one.
+resolve_sprint_claim_token() {
+  local dir token
+  sprint_lease_claim_id=""
+  sprint_lease_task_id=""
+  sprint_lease_token_file=""
+  dir="$(sprint_claim_dir)"
+  [[ -d "$dir" ]] || return 0
+  for token in "$dir"/*.claim; do
+    [[ -f "$token" ]] || continue
+    if [[ -n "$sprint_lease_token_file" ]]; then
+      echo "contract-worktree: more than one sprint claim token in this worktree: $dir" >&2
+      return 1
+    fi
+    sprint_lease_token_file="$token"
+  done
+  [[ -n "$sprint_lease_token_file" ]] || return 0
+  sprint_lease_claim_id="$(sed -n 's/^claim_id=//p' "$sprint_lease_token_file" | head -1)"
+  if [[ -z "$sprint_lease_claim_id" ]]; then
+    echo "contract-worktree: sprint claim token carries no claim id: $sprint_lease_token_file" >&2
+    return 1
+  fi
+  # The task id addresses the lease directly, which is what post-publication
+  # reconcile needs: by then the fencing token no longer resolves through a
+  # lease scan in every shape reconcile has to handle.
+  sprint_lease_task_id="$(sed -n 's/^task_id=//p' "$sprint_lease_token_file" | head -1)"
+  if [[ -z "$sprint_lease_task_id" ]]; then
+    echo "contract-worktree: sprint claim token carries no task id: $sprint_lease_token_file" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Claim id, worktree binding, and task revision, all inside the per-task lock,
+# before the publication tree is built.
+sprint_lease_begin_completion() {
+  local target_branch="$1" output
+  [[ -n "$sprint_lease_claim_id" ]] || return 0
+  if ! output="$(sprint_lease begin-completion \
+    --claim-id "$sprint_lease_claim_id" \
+    --worktree "$closeout_journal_worktree" \
+    --target-ref "$target_branch" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    echo "contract-worktree: this worktree no longer owns the sprint lease it claimed (claim $sprint_lease_claim_id); refusing to publish" >&2
+    return 1
+  fi
+  sprint_lease_completion_open=1
+  sprint_lease_target_ref="$target_branch"
+  echo "[ContractWorktree] Sprint lease verified for claim $sprint_lease_claim_id"
+  return 0
+}
+
+# Restore an unpublished completion window to `bound`. The caller must first
+# prove that publication did not land; the CLI then independently checks the
+# same fencing token, worktree binding, target ref, and canonical pending row.
+# The CLI transition is idempotent so recovery can be retried after a crash
+# between the lease write and the closeout journal update.
+sprint_lease_abort_completion() {
+  local target_ref="$1" output
+  [[ -n "$sprint_lease_claim_id" ]] || return 0
+  if [[ -z "$target_ref" ]]; then
+    echo "contract-worktree: sprint completion abort has no recorded target ref" >&2
+    return 1
+  fi
+  if ! output="$(sprint_lease abort-completion \
+    --claim-id "$sprint_lease_claim_id" \
+    --worktree "$closeout_journal_worktree" \
+    --target-ref "$target_ref" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    echo "contract-worktree: could not restore sprint lease $sprint_lease_claim_id to bound" >&2
+    return 1
+  fi
+  sprint_lease_completion_open=0
+  sprint_lease_target_ref=""
+  echo "[ContractWorktree] Restored sprint lease to bound after aborted completion (claim $sprint_lease_claim_id)"
+  return 0
+}
+
+# Stamp the closeout journal key onto the lease, so a crash inside the
+# publication window names the journal that has to be resolved.
+#
+# This is deliberately a second call rather than an argument to the gate above:
+# the journal key is derived from the frozen target base, and the ownership
+# gate runs before the base is frozen so a displaced agent stops before running
+# a verification pass it may not publish. `bound -> completing` is re-runnable
+# by the same token from the same worktree by design, so this is that same
+# transition, now carrying the key.
+sprint_lease_record_finish_transaction() {
+  local target_branch="$1" journal_key="$2" output
+  [[ -n "$sprint_lease_claim_id" ]] || return 0
+  if ! output="$(sprint_lease begin-completion \
+    --claim-id "$sprint_lease_claim_id" \
+    --worktree "$closeout_journal_worktree" \
+    --target-ref "$target_branch" \
+    --finish-transaction-key "$journal_key" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    echo "contract-worktree: could not record the closeout journal key on the sprint lease (claim $sprint_lease_claim_id); refusing to publish" >&2
+    return 1
+  fi
+  echo "[ContractWorktree] Sprint lease carries closeout journal key $journal_key"
+  return 0
+}
+
+# Clear the lease after publication, never before: no single atomic operation
+# spans a git publication and a filesystem lease.
+#
+# `reconcile`, not `release`. The lease is `completing` here, and release
+# refuses that state precisely because it cannot tell whether the publication
+# landed. Reconcile can: it reads the canonical row on the target ref, and a
+# row that already reads `[x]` is the proof that no execution ownership remains
+# to hold. A cleanup that does not land is reported, never fatal -- the
+# publication is already published, so a residual lease is a legal state a
+# later reconcile clears rather than a failed finish.
+sprint_lease_reconcile_after_publication() {
+  local target_branch="$1" output
+  [[ -n "$sprint_lease_claim_id" ]] || return 0
+  if ! output="$(sprint_lease reconcile \
+    --task-id "$sprint_lease_task_id" \
+    --expected-claim-id "$sprint_lease_claim_id" \
+    --target-ref "$target_branch" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    echo "[ContractWorktree] Warning: the sprint lease survived publication (claim $sprint_lease_claim_id); run 'repo-harness sprint reconcile --task-id $sprint_lease_task_id --target-ref $target_branch' to clear it" >&2
+    return 0
+  fi
+  if ! printf '%s' "$output" | grep -q '"action": "cleared_completed_lease"'; then
+    printf '%s\n' "$output" >&2
+    echo "[ContractWorktree] Warning: reconcile left the sprint lease in place (claim $sprint_lease_claim_id); the canonical row on $target_branch does not read [x] yet" >&2
+    return 0
+  fi
+  rm -f "$sprint_lease_token_file"
+  echo "[ContractWorktree] Reconciled sprint lease after publication (claim $sprint_lease_claim_id)"
+  return 0
+}
+
 finish_worktree() {
+  # The opening sample is measurement-only, and a polluted `now_ms` stdout must
+  # not abort the finish. An unusable sample is cleared here so `emit_finish_attempt`
+  # drops the record instead of the finish.
+  finish_attempt_started_ms="$(now_ms || true)"
+  [[ "$finish_attempt_started_ms" =~ ^[0-9]+$ ]] || finish_attempt_started_ms=""
+  finish_attempt_slug=""
+  finish_attempt_frozen_base=""
   local merge_back=1
   local target_branch
   local gate_base_ref
@@ -1359,6 +1863,7 @@ finish_worktree() {
     echo "contract-worktree: run 'repo-harness run contract-worktree recover inspect', then 'recover abort' or 'recover reconcile'" >&2
     return 1
   fi
+  closeout_claim_target_ref="$target_branch"
   if ! closeout_claim_acquire "finish"; then
     echo "contract-worktree: closeout already owned for this worktree and operation: $closeout_claim_conflict_dir" >&2
     echo "contract-worktree: run 'repo-harness run contract-worktree recover inspect', then 'recover abort' or 'recover reconcile'; 'recover abort' also clears a claim with no recorded journal phase" >&2
@@ -1371,6 +1876,7 @@ finish_worktree() {
   [[ -n "$current_branch" ]] || { echo "contract-worktree: detached HEAD is not supported" >&2; exit 1; }
   [[ "$current_branch" != "$target_branch" ]] || { echo "contract-worktree: already on target branch $target_branch" >&2; exit 1; }
   slug="$(normalize_slug "${current_branch##*/}")"
+  finish_attempt_slug="$slug"
   commit_message="${commit_message:-feat(contract): complete ${slug}}"
 
   if [[ -f "$WORKFLOW_STATE_LIB" ]]; then
@@ -1404,7 +1910,14 @@ finish_worktree() {
   [[ -n "$contract_file" && -f "$contract_file" ]] || { echo "contract-worktree: no active sprint contract found" >&2; exit 1; }
   [[ -n "$review_file" && -f "$review_file" ]] || { echo "contract-worktree: no active sprint review found" >&2; exit 1; }
 
+  # Sprint lease gate, before any verification or publication work: ownership
+  # is checked first so a displaced agent stops here rather than after running
+  # a full verification pass it may not publish.
+  resolve_sprint_claim_token || { closeout_claim_release; return 1; }
+  sprint_lease_begin_completion "$target_branch" || { closeout_claim_release; return 1; }
+
   frozen_base_sha="$(refresh_and_freeze_base "$gate_base_ref" "$target_branch")"
+  finish_attempt_frozen_base="$frozen_base_sha"
   verify_acceptance_receipt "$contract_file"
   check_architecture_freshness "$target_branch"
   REPO_HARNESS_TARGET_REPO_ROOT="$REPO_ROOT" bash "$helper_dir/verify-sprint.sh"
@@ -1420,6 +1933,17 @@ finish_worktree() {
       echo "contract-worktree: target worktree is dirty, refusing merge: $target_worktree" >&2
       exit 1
     fi
+    # The publication commit parents the frozen target base and carries this
+    # branch's tree verbatim. If the frozen base is not reachable from this
+    # branch, that tree never saw the target's newer commits, so publishing it
+    # would fast-forward the target onto content that silently reverts them.
+    if ! git merge-base --is-ancestor "$frozen_base_sha" "$current_branch"; then
+      echo "contract-worktree: target branch advanced past this worktree's fork point; refusing merge" >&2
+      echo "contract-worktree: frozen target base $frozen_base_sha ($target_branch) is not an ancestor of $current_branch" >&2
+      echo "contract-worktree: rebase this worktree onto $target_branch (or restart the contract worktree from the refreshed base), then re-run the closeout gates" >&2
+      emit_finish_attempt refused_stale_fork "$frozen_base_sha" ""
+      exit 1
+    fi
   fi
   local closeout_key closeout_original_head closeout_begin_status=0
   closeout_original_head="$(git rev-parse HEAD)"
@@ -1433,6 +1957,14 @@ finish_worktree() {
     "target_branch=$target_branch" \
     "base_sha=$frozen_base_sha")"
   closeout_claim_bind_journal "$closeout_key"
+  if ! sprint_lease_record_finish_transaction "$target_branch" "$closeout_key"; then
+    # The first begin-completion already opened the lease window. A target-ref
+    # drift or other second-gate refusal is still pre-publication here, so close
+    # that window before giving up the closeout claim.
+    sprint_lease_abort_completion "$target_branch" || return 1
+    closeout_claim_release
+    return 1
+  fi
   closeout_journal_begin "finish" "$closeout_key" \
     "branch=$current_branch" \
     "plan=${active_plan:-}" \
@@ -1478,7 +2010,7 @@ finish_worktree() {
     run_gate=1
   fi
 
-  local verified_sha current_head
+  local verified_sha current_head publication_sha publication_tree frozen_base_tree commit_gpgsign_raw commit_gpgsign config_status
   # Single timestamp authority: one `date` call for this whole finish run, shared
   # by the post-freeze allowlist prediction (Step 3, when a gate runs) and the
   # archive step's actual output (Step 4, unconditional), so the two cannot
@@ -1572,8 +2104,11 @@ finish_worktree() {
     return 0
   fi
 
-  # Step 7: re-validate the receipt against L (F plus only allowlisted drift) before
-  # the fast-forward merge; ff-merge uses the SHA this verify prints.
+  # Step 7: re-validate the receipt against L (F plus only allowlisted drift),
+  # then synthesize one publication commit P whose sole parent is the frozen
+  # target base and whose tree is byte-identical to L. Checkpoint and lifecycle
+  # commits remain on the source branch for recovery/audit but never become
+  # target first-parent history.
   if [[ -n "$(git -C "$target_worktree" status --porcelain=v1 --untracked-files=all)" ]]; then
     echo "contract-worktree: target worktree is dirty, refusing merge: $target_worktree" >&2
     exit 1
@@ -1582,10 +2117,92 @@ finish_worktree() {
   verified_sha="$(verify_merge_gate_seal "$gate_base_ref")"
   current_head="$(git rev-parse "$current_branch^{commit}")"
   [[ "$verified_sha" == "$current_head" ]] || { echo "contract-worktree: branch moved after merge-gate review" >&2; exit 1; }
-  git -C "$target_worktree" merge --ff-only "$verified_sha"
-  finish_transaction_phase merged "$verified_sha"
-  finish_transaction_commit
-  echo "[ContractWorktree] Merged $current_branch into $target_branch at $target_worktree"
+  [[ "$(git -C "$target_worktree" rev-parse "refs/heads/$target_branch^{commit}")" == "$frozen_base_sha" ]] || {
+    echo "contract-worktree: target branch moved after merge-gate review" >&2
+    exit 1
+  }
+  if ! git merge-base --is-ancestor "$frozen_base_sha" "$current_branch"; then
+    echo "contract-worktree: target branch advanced past this worktree's fork point; refusing merge" >&2
+    echo "contract-worktree: frozen target base $frozen_base_sha ($target_branch) is not an ancestor of $current_branch" >&2
+    echo "contract-worktree: rebase this worktree onto $target_branch (or restart the contract worktree from the refreshed base), then re-run the closeout gates" >&2
+    emit_finish_attempt refused_stale_fork "$frozen_base_sha" ""
+    finish_transaction_abort
+    return 1
+  fi
+  publication_tree="$(git rev-parse "$verified_sha^{tree}")"
+  frozen_base_tree="$(git rev-parse "$frozen_base_sha^{tree}")"
+  [[ "$publication_tree" != "$frozen_base_tree" ]] || {
+    echo "contract-worktree: verified lifecycle tree already equals frozen target; refusing empty publication" >&2
+    exit 1
+  }
+  config_status=0
+  commit_gpgsign_raw="$(git config --get commit.gpgsign 2>/dev/null)" || config_status=$?
+  case "$config_status" in
+    0)
+      if ! commit_gpgsign="$(git config --bool --get commit.gpgsign 2>/dev/null)"; then
+        echo "contract-worktree: commit.gpgsign is configured but is not a valid boolean" >&2
+        exit 1
+      fi
+      ;;
+    1) commit_gpgsign="false" ;;
+    *)
+      echo "contract-worktree: cannot read commit.gpgsign configuration" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$commit_gpgsign" == "true" ]]; then
+    publication_sha="$(git commit-tree "$publication_tree" -p "$frozen_base_sha" \
+      -m "$commit_message" \
+      -m "Source-Worktree-Head: $verified_sha" -S)"
+  else
+    publication_sha="$(git commit-tree "$publication_tree" -p "$frozen_base_sha" \
+      -m "$commit_message" \
+      -m "Source-Worktree-Head: $verified_sha")"
+  fi
+  [[ "$(git rev-parse "$publication_sha^")" == "$frozen_base_sha" ]] || {
+    echo "contract-worktree: synthesized publication parent does not match frozen target base" >&2
+    exit 1
+  }
+  [[ "$(git rev-parse "$publication_sha^{tree}")" == "$publication_tree" ]] || {
+    echo "contract-worktree: synthesized publication tree does not match verified lifecycle tree" >&2
+    exit 1
+  }
+  finish_transaction_phase publication_prepared "$publication_sha"
+  git -C "$target_worktree" merge --ff-only "$publication_sha"
+  [[ "$(git -C "$target_worktree" rev-parse "refs/heads/$target_branch^{commit}")" == "$publication_sha" ]] || {
+    echo "contract-worktree: target branch does not resolve to synthesized publication commit" >&2
+    exit 1
+  }
+  [[ "$(git -C "$target_worktree" rev-parse "refs/heads/$target_branch^{tree}")" == "$publication_tree" ]] || {
+    echo "contract-worktree: published target tree does not match verified lifecycle tree" >&2
+    exit 1
+  }
+  acknowledge_architecture_projection_publication "$target_worktree" "$publication_sha" || exit 1
+  finish_transaction_phase projection_acknowledged "$publication_sha"
+  finish_transaction_phase merged "$publication_sha"
+  finish_transaction_commit "$publication_sha"
+  sprint_lease_reconcile_after_publication "$target_branch"
+  emit_finish_attempt merged "$frozen_base_sha" "$publication_sha"
+  echo "[ContractWorktree] Merged $current_branch into $target_branch as single publication commit $publication_sha at $target_worktree"
+
+  # Cleanup runs after the transaction is committed and its EXIT trap disarmed,
+  # so a refusal here cannot reach finish_transaction_abort and unwind a
+  # publication that already landed. Nothing runs after this block, so deleting
+  # this process's own cwd is safe.
+  #
+  # cleanup_worktree is fail-closed and must run from the target primary
+  # worktree. The child needs the repo-root override as well as the cwd: this
+  # process exported REPO_HARNESS_TARGET_REPO_ROOT as the linked worktree, and
+  # the child would otherwise cd straight back here and refuse.
+  if (cd "$target_worktree" \
+    && REPO_HARNESS_TARGET_REPO_ROOT="$target_worktree" \
+      bash "$helper_dir/contract-worktree.sh" cleanup --slug "$slug" --target "$target_branch"); then
+    echo "[ContractWorktree] Worktree removed after merge; this shell's directory is gone -- cd $target_worktree"
+  else
+    echo "[ContractWorktree] merged; cleanup incomplete: publication=$publication_sha worktree=$REPO_ROOT branch=$current_branch" >&2
+    echo "[ContractWorktree] Do not repeat merge; run from $target_worktree: repo-harness run contract-worktree cleanup --slug $slug --target $target_branch" >&2
+    return 1
+  fi
 }
 
 # Plans captured via sprint-backlog start-task carry
@@ -1625,7 +2242,11 @@ backfill_sprint_backlog() {
   task_ref="${sprint_path#*#}"
   sprint_path="${sprint_path%%#*}"
 
-  if REPO_HARNESS_TARGET_REPO_ROOT="$REPO_ROOT" bash "$helper_dir/sprint-backlog.sh" complete-task --sprint "$sprint_path" --task "$task_ref" --plan "$archived_plan"; then
+  # --defer-lease-release: this back-fill only builds the publication tree. The
+  # lease is released after the publication commit lands, so the crash window
+  # in between stays a named, reconcilable state instead of a lease that was
+  # dropped before the work was published.
+  if REPO_HARNESS_TARGET_REPO_ROOT="$REPO_ROOT" bash "$helper_dir/sprint-backlog.sh" complete-task --sprint "$sprint_path" --task "$task_ref" --plan "$archived_plan" --defer-lease-release; then
     echo "[ContractWorktree] Sprint backlog updated: $sprint_path ($task_ref)"
   else
     echo "[ContractWorktree] Sprint backlog back-fill failed for $sprint_path ($task_ref); finish is incomplete." >&2
@@ -1638,6 +2259,7 @@ cleanup_worktree() {
   local slug=""
   local target_branch
   local dry_run=0
+  local expected_worktree="" expected_head="" expected_target="" expected_merge=""
 
   target_branch="$(policy_get '.worktree_strategy.merge_back.target' 'main')"
 
@@ -1651,6 +2273,16 @@ cleanup_worktree() {
       --target)
         [[ -n "${2:-}" ]] || { echo "contract-worktree: --target requires a value" >&2; exit 2; }
         target_branch="$2"
+        shift 2
+        ;;
+      --expected-worktree|--expected-head|--expected-target|--expected-merge)
+        [[ -n "${2:-}" ]] || { echo "contract-worktree: $1 requires a value" >&2; exit 2; }
+        case "$1" in
+          --expected-worktree) expected_worktree="$2" ;;
+          --expected-head) expected_head="$2" ;;
+          --expected-target) expected_target="$2" ;;
+          --expected-merge) expected_merge="$2" ;;
+        esac
         shift 2
         ;;
       --dry-run)
@@ -1705,30 +2337,38 @@ cleanup_worktree() {
     esac
   fi
 
+  if [[ -n "$expected_worktree$expected_head$expected_target$expected_merge" ]]; then
+    [[ -n "$expected_worktree" && "$expected_head" =~ ^[a-f0-9]{40,64}$ && "$expected_target" =~ ^[a-f0-9]{40,64}$ && "$expected_merge" =~ ^[a-f0-9]{40,64}$ ]] || { echo "contract-worktree: incomplete exact cleanup identity" >&2; exit 1; }
+    [[ "$(git rev-parse "$target_branch^{commit}")" == "$expected_target" ]] || { echo "contract-worktree: cleanup target changed" >&2; exit 1; }
+    git merge-base --is-ancestor "$expected_merge" "$expected_target" || { echo "contract-worktree: actual merge is unreachable" >&2; exit 1; }
+    if [[ -n "$worktree_path" ]]; then
+      [[ "$worktree_path" == "$expected_worktree" && "$(git -C "$worktree_path" rev-parse HEAD)" == "$expected_head" ]] || { echo "contract-worktree: cleanup worktree identity changed" >&2; exit 1; }
+    elif [[ -e "$expected_worktree" || -L "$expected_worktree" ]]; then
+      echo "contract-worktree: unregistered execution directory remains" >&2; exit 1
+    fi
+    if git show-ref --verify --quiet "refs/heads/$branch_name"; then
+      [[ "$(git rev-parse "refs/heads/$branch_name")" == "$expected_head" ]] || { echo "contract-worktree: cleanup branch moved" >&2; exit 1; }
+    fi
+  fi
+
   if git show-ref --verify --quiet "refs/heads/$branch_name"; then
-    if git merge-base --is-ancestor "$branch_name" "$target_branch" >/dev/null 2>&1; then
-      echo "[ContractWorktree] Merge check for $branch_name: ancestor of $target_branch"
-      merge_mode="ancestor"
-    else
-      # Squash-merge (this repo's house ship flow) never makes the branch
-      # tip an ancestor of the target. Fall back to an absorption check:
-      # a conflict-free `git merge-tree --write-tree` whose resulting tree
-      # exactly equals the target's tree proves the branch adds nothing
-      # target doesn't already have. Any other outcome (conflict, command
-      # failure, differing tree) keeps refusing -- fail-closed, no widening.
-      local target_tree merge_tree_output absorbed=0
-      target_tree="$(git rev-parse "$target_branch^{tree}")"
-      if merge_tree_output="$(git merge-tree --write-tree "$target_branch" "$branch_name" 2>/dev/null)"; then
-        [[ "$merge_tree_output" == "$target_tree" ]] && absorbed=1
-      fi
-      if [[ "$absorbed" -eq 1 ]]; then
+    # Merge state comes from the shared authority in worktree-merge-lib.sh --
+    # scripts/ship-worktrees.sh consumes the same function, so the batch and
+    # single-slug entrypoints cannot drift apart again. The lib is
+    # fail-closed: anything it cannot prove merged comes back `unmerged`.
+    merge_mode="$(worktree_merge_mode "$branch_name" "$target_branch")"
+    case "$merge_mode" in
+      ancestor)
+        echo "[ContractWorktree] Merge check for $branch_name: ancestor of $target_branch"
+        ;;
+      absorbed)
         echo "[ContractWorktree] Merge check for $branch_name: absorbed into $target_branch (squash-equivalent tree)"
-        merge_mode="absorbed"
-      else
+        ;;
+      *)
         echo "contract-worktree: branch $branch_name is not fully merged into $target_branch; refusing cleanup" >&2
         exit 1
-      fi
-    fi
+        ;;
+    esac
   else
     echo "[ContractWorktree] Branch already absent, skipping: $branch_name"
   fi
@@ -1740,6 +2380,14 @@ cleanup_worktree() {
       else
         echo "contract-worktree: linked worktree status unavailable after repair attempt, refusing cleanup: $worktree_path" >&2
         echo "contract-worktree: run git worktree repair '$worktree_path' and retry, or inspect the directory manually before removing it" >&2
+        exit 1
+      fi
+    fi
+    if [[ "$repair_needed" -eq 0 ]]; then
+      local lock_path
+      lock_path="$(git -C "$worktree_path" rev-parse --git-path locked)"
+      if [[ -e "$lock_path" ]]; then
+        echo "contract-worktree: linked worktree is locked, refusing cleanup: $worktree_path" >&2
         exit 1
       fi
     fi
@@ -1769,7 +2417,9 @@ cleanup_worktree() {
   fi
 
   if git show-ref --verify --quiet "refs/heads/$branch_name"; then
-    if [[ "$merge_mode" == "absorbed" ]]; then
+    if [[ -n "$expected_head" ]]; then
+      git update-ref -d "refs/heads/$branch_name" "$expected_head"
+    elif [[ "$merge_mode" == "absorbed" ]]; then
       # The absorption check above already proved this branch's tree is
       # identical to target's -- git's own ancestry-based `-d` safety check
       # is a guaranteed false positive here (squash-merge never makes the
@@ -1784,6 +2434,11 @@ cleanup_worktree() {
       git branch -d "$branch_name"
       echo "[ContractWorktree] Deleted branch: $branch_name (-d, ancestor)"
     fi
+  fi
+
+  if [[ -n "$expected_worktree" ]]; then
+    jq -cn --arg worktree "$expected_worktree" --arg branch "$branch_name" --arg head "$expected_head" --arg target "$expected_target" --arg merge "$expected_merge" '{protocol:1,kind:"repo-harness-exact-local-cleanup",worktree:$worktree,branch:$branch,head_sha:$head,target_oid:$target,merge_commit_sha:$merge,worktree_removed:true,branch_deleted:true}'
+    return 0
   fi
 
   if [[ -e "$metadata_file" ]]; then

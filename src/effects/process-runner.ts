@@ -2,7 +2,11 @@ import { spawnSync } from "child_process";
 import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { PROCESS_SUPERVISOR_TERMINATION_GRACE_MS } from "./process-supervisor";
+import {
+  PROCESS_SUPERVISOR_FLAG,
+  PROCESS_SUPERVISOR_TERMINATION_GRACE_MS,
+  taskkillAttemptSucceeded,
+} from "./process-supervisor";
 
 export interface ProcessOutputRedaction {
   readonly pattern: RegExp;
@@ -18,6 +22,7 @@ export interface RunProcessOptions {
   readonly maxOutputBytes?: number;
   readonly redactions?: readonly ProcessOutputRedaction[];
   readonly processGroup?: boolean;
+  readonly taskkillBin?: string;
   readonly expensiveRunLock?: {
     readonly cwd: string;
     readonly gitBin: string;
@@ -38,8 +43,21 @@ export interface ProcessRunResult {
 export const DEFAULT_PROCESS_TIMEOUT_MS = 120_000;
 export const DEFAULT_PROCESS_MAX_OUTPUT_BYTES = 64 * 1024;
 export const DEFAULT_PROCESS_MAX_BUFFER_BYTES = 1024 * 1024;
-const PROCESS_SUPERVISOR = join(import.meta.dir, "process-supervisor.ts");
+declare const REPO_HARNESS_BUNDLED_CLI_VERSION: string | undefined;
+const IS_SINGLE_FILE_HOOK_BUNDLE = typeof REPO_HARNESS_BUNDLED_CLI_VERSION === "string";
+const PROCESS_SUPERVISOR = IS_SINGLE_FILE_HOOK_BUNDLE
+  ? import.meta.path
+  : join(import.meta.dir, "process-supervisor.ts");
+const PROCESS_SUPERVISOR_PREFIX_ARGS = IS_SINGLE_FILE_HOOK_BUNDLE
+  ? [PROCESS_SUPERVISOR_FLAG]
+  : [];
 const PROCESS_SUPERVISOR_HARD_TIMEOUT_SLACK_MS = 1_000;
+const PROCESS_SUPERVISOR_HARD_TIMEOUT_OVERHEAD_MS = PROCESS_SUPERVISOR_TERMINATION_GRACE_MS
+  + PROCESS_SUPERVISOR_HARD_TIMEOUT_SLACK_MS;
+/** Worst-case wall-clock overhead after a supervised target timeout: the
+ * supervisor hard-timeout allowance plus the caller's TERM/KILL backstop. */
+export const PROCESS_GROUP_CALL_TIMEOUT_OVERHEAD_MS = PROCESS_SUPERVISOR_HARD_TIMEOUT_OVERHEAD_MS
+  + (2 * PROCESS_SUPERVISOR_TERMINATION_GRACE_MS);
 
 interface SupervisedProcessReceipt {
   readonly status: number;
@@ -76,30 +94,34 @@ function processGroupExists(pid: number): boolean {
   }
 }
 
-function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+function signalProcessGroup(pid: number, signal: NodeJS.Signals, taskkillBin?: string): boolean {
   try {
     if (process.platform === "win32") {
-      spawnSync("taskkill", ["/pid", String(pid), "/T", ...(signal === "SIGKILL" ? ["/F"] : [])], {
+      return taskkillAttemptSucceeded(spawnSync(taskkillBin ?? "taskkill", ["/pid", String(pid), "/T", ...(signal === "SIGKILL" ? ["/F"] : [])], {
         stdio: "ignore",
         windowsHide: true,
-      });
+      }));
     } else {
       process.kill(-pid, signal);
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
   }
+  return true;
 }
 
 function waitSynchronously(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function terminateAbandonedProcessGroup(pid: number): string {
+function terminateAbandonedProcessGroup(pid: number, taskkillBin?: string): string {
   try {
-    signalProcessGroup(pid, "SIGTERM");
+    const gracefulCleanupConfirmed = signalProcessGroup(pid, "SIGTERM", taskkillBin);
     waitSynchronously(PROCESS_SUPERVISOR_TERMINATION_GRACE_MS);
-    signalProcessGroup(pid, "SIGKILL");
+    const forcedCleanupConfirmed = signalProcessGroup(pid, "SIGKILL", taskkillBin);
+    if (process.platform === "win32" && !gracefulCleanupConfirmed && !forcedCleanupConfirmed) {
+      return `supervisor backstop taskkill could not confirm termination of process tree ${pid}`;
+    }
     const deadline = Date.now() + PROCESS_SUPERVISOR_TERMINATION_GRACE_MS;
     while (processGroupExists(pid) && Date.now() < deadline) waitSynchronously(10);
     return processGroupExists(pid)
@@ -137,6 +159,7 @@ function runSupervisedProcess(
   try {
     const supervisorArgs = [
       PROCESS_SUPERVISOR,
+      ...PROCESS_SUPERVISOR_PREFIX_ARGS,
       "--metadata", receiptPath,
       "--parent-pid", String(process.pid),
       "--timeout-ms", String(timeoutMs),
@@ -149,10 +172,9 @@ function runSupervisedProcess(
         "--git-bin", opts.expensiveRunLock.gitBin,
       );
     }
+    if (opts.taskkillBin) supervisorArgs.push("--taskkill-bin", opts.taskkillBin);
     supervisorArgs.push("--", command, ...args);
-    const supervisorHardTimeoutMs = timeoutMs
-      + PROCESS_SUPERVISOR_TERMINATION_GRACE_MS
-      + PROCESS_SUPERVISOR_HARD_TIMEOUT_SLACK_MS;
+    const supervisorHardTimeoutMs = timeoutMs + PROCESS_SUPERVISOR_HARD_TIMEOUT_OVERHEAD_MS;
     const result = spawnSync(process.execPath, supervisorArgs, {
       cwd: opts.cwd,
       encoding: stdio === "pipe" ? "utf8" : undefined,
@@ -191,7 +213,7 @@ function runSupervisedProcess(
       || receipt.completed !== true
       || (receipt.processGroupPid !== null && processGroupPid === null);
     if (envelopeMismatch) {
-      const cleanupError = processGroupPid === null ? "" : terminateAbandonedProcessGroup(processGroupPid);
+      const cleanupError = processGroupPid === null ? "" : terminateAbandonedProcessGroup(processGroupPid, opts.taskkillBin);
       const envelopeError = supervisorTimedOut
         ? `process supervisor exceeded hard timeout after ${supervisorHardTimeoutMs}ms`
         : [

@@ -72,6 +72,7 @@ function input(overrides: Partial<EffectiveStateInputs> = {}): EffectiveStateInp
     currentWorktree: '/repo',
     worktreeOwner: '/repo',
     worktreeOwnerIsCurrent: true,
+    isolatedContractWorktree: false,
     handoffPath: '.ai/harness/handoff/current.md',
     handoffText: null,
     resumePath: '.ai/harness/handoff/resume.md',
@@ -90,6 +91,36 @@ function input(overrides: Partial<EffectiveStateInputs> = {}): EffectiveStateInp
 }
 
 describe('pure Effective State projection', () => {
+  test('approved work can be edited before tasks finish, but cannot ship', () => {
+    for (const planStatus of ['approved', 'executing'] as const) {
+      const state = projectEffectiveState(input({ planStatus }));
+      expect(state.readiness?.ok && state.readiness.allowedToEdit.decision).toBe('allow');
+      expect(state.readiness?.ok && state.readiness.readyToShip.decision).toBe('block');
+      if (state.readiness?.ok) {
+        expect(state.readiness.requirements.ship.find(r => r.key === 'complete_approved_work_package')?.satisfied).toBe(false);
+      }
+    }
+  });
+
+  test('missing plan content or approval never authorizes editing', () => {
+    for (const overrides of [{ planStatus: 'draft' as const }, { planText: null }, { planText: '' }]) {
+      const state = projectEffectiveState(input(overrides));
+      expect(state.readiness?.ok && state.readiness.allowedToEdit.decision).toBe('block');
+    }
+  });
+
+  test('ship requires completed tasks even with fresh evidence', () => {
+    const evidence = {
+      reviewSubject: { available: true, reviewSubjectSha256: SUBJECT, targetRevision: TARGET, targetOverlapCount: 0 },
+      checksText: JSON.stringify({ status: 'pass', active_plan: PLAN, review_subject_sha256: SUBJECT }),
+    };
+    for (const [planText, expected] of [['# Plan\n- [ ] implement\n', 'block'], ['# Plan\n- [x] implement\n', 'allow']] as const) {
+      const state = projectEffectiveState(input({ ...evidence, planText }));
+      expect(state.readiness?.ok && state.readiness.allowedToEdit.decision).toBe('allow');
+      expect(state.readiness?.ok && state.readiness.readyToShip.decision).toBe(expected);
+    }
+  });
+
   test('projects phase, profile, contract, and first open task without I/O', () => {
     const state = projectEffectiveState(input());
     expect(state.phase).toBe('executing');
@@ -303,9 +334,10 @@ describe('pure Effective State projection', () => {
         contractOverride: profile,
       }));
       expect(state.workflow_profile).toBe(profile);
-      expect(state.guidance).toBe(profile === 'lite'
-        ? 'brief -> edit -> targeted test; do not author plan, contract, notes, todos, or checks files (zero ceremony)'
+      expect(state.guidance).toContain(profile === 'lite'
+        ? 'no workflow artifacts are required for the currently observed scope. User-requested planning is allowed'
         : 'full envelope: plan, contract, notes, and checks as required');
+      expect(state.guidance).toContain('Current edit-time requirements supersede earlier snapshot guidance');
     }
   });
 
@@ -419,4 +451,16 @@ describe('state-snapshot compatibility projection', () => {
     expect(stale.paths).toEqual({ active_plan: PLAN, contract: null });
     expect(stale.marker.problem).toBe('deleted');
   });
+});
+
+
+test('verifier missing_artifact is blocked separately from contract test failures', () => {
+  const state = projectEffectiveState(input({
+    checksText: JSON.stringify({status:'fail',active_plan:PLAN,review_subject_sha256:SUBJECT,failure_class:'missing_artifact'}),
+    reviewSubject:{available:true,reviewSubjectSha256:SUBJECT,targetRevision:TARGET,targetOverlapCount:0},
+    editTargetPaths:[CONTRACT],
+  }));
+  expect(state.blockers).toContain('checks_artifact_invalid');
+  expect(state.blockers).not.toContain('checks_failed');
+  expect(state.readiness?.ok && state.readiness.allowedToEdit.decision).toBe('block');
 });

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,18 +10,23 @@ import {
   projectionResultReceiptDigest,
   projectionResultIssues,
   type ArchitectureProjectionPolicy,
+  type ArchitectureRefreshSignalV1,
   type ProjectionRequestV1,
 } from '../src/core/architecture/projection';
 import {
+  archctxCapabilities,
   inspectArchitectureProjectionReadiness,
   captureArchitectureProjectionSnapshot,
   resolveCompatibleNodeRuntime,
   resolvePackageLocalArchctx,
   runArchitectureProjection,
+  type ArchitectureProjectionProviderDiagnostic,
   type ArchctxProcessResult,
   type RunArchctxProcess,
 } from '../src/effects/architecture/archctx-provider';
+import { trustedNodeCandidates } from '../src/effects/runtime/node-candidates';
 import { architectureProjectionExitCode, buildArchitectureProjectionCommand } from '../src/cli/commands/architecture-projection';
+import { consumeArchitectureRefreshSignals } from '../src/effects/architecture/refresh-consumer';
 
 const roots: string[] = [];
 const digest = (value: string) => `sha256:${value.repeat(64).slice(0, 64)}` as const;
@@ -41,14 +46,14 @@ function fixture() {
   mkdirSync(join(repoRoot, '.ai', 'harness'), { recursive: true });
   mkdirSync(join(repoRoot, '.archcontext', 'model', 'nodes'), { recursive: true });
   mkdirSync(join(repoRoot, 'src', 'core'), { recursive: true });
-  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'archctx', version: '0.4.2', engines: { node: '>=24 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
+  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'archctx', version: '0.5.10', engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
   const binary = join(packageRoot, 'bin', 'archctx');
   writeFileSync(binary, '#!/bin/sh\nexit 99\n');
   chmodSync(binary, 0o755);
   symlinkSync(join('..', 'archctx', 'bin', 'archctx'), join(binRoot, 'archctx'));
   writeFileSync(join(repoRoot, '.ai', 'harness', 'policy.json'), `${JSON.stringify({
     context: { capability_source: 'archcontext' },
-    architecture: { projection_provider: 'archctx', projection_apply: 'manual', projection_version: '0.4.2', projection_timeout_ms: 120000 },
+    architecture: { projection_provider: 'archctx', projection_apply: 'manual', projection_version: '0.5.10', projection_timeout_ms: 120000 },
   })}\n`);
   writeFileSync(join(repoRoot, '.archcontext', 'model', 'nodes', 'capability.test.core.yaml'), `schemaVersion: archcontext.node/v2
 kind: capability
@@ -79,17 +84,27 @@ extensions:
   return { root, consumerRoot, repoRoot, binary };
 }
 
-function capabilities() {
+function vendorArchctx(root: string, version: string): string {
+  const packageRoot = join(root, 'node_modules', 'archctx');
+  mkdirSync(join(packageRoot, 'bin'), { recursive: true });
+  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'archctx', version, engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
+  const binary = join(packageRoot, 'bin', 'archctx');
+  writeFileSync(binary, '#!/bin/sh\nexit 99\n');
+  chmodSync(binary, 0o755);
+  return binary;
+}
+
+function capabilities(version = '0.5.10') {
   return {
     schemaVersion: 'archcontext.capabilities/v1',
-    package: { name: 'archctx', version: '0.4.2' },
+    package: { name: 'archctx', version },
     protocols: {
       projectionRequest: 'archcontext.projection-request/v1',
-      projectionResult: 'archcontext.projection-result/v1',
+      projectionResult: 'archcontext.projection-result/v2',
       architectureRefreshSignal: 'archcontext.architecture-refresh-signal/v1',
     },
-    renderers: { architectureDocs: 'archcontext.docs-renderer/v2', agentContext: 'archcontext.agent-context-renderer/v1' },
-    features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'projection-protocol-v1'],
+    renderers: { architectureDocs: 'archcontext.docs-renderer/v4', agentContext: 'archcontext.agent-context-renderer/v1' },
+    features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'projection-apply-receipt-v1', 'projection-prior-committed-applies-v1', 'projection-protocol-v2'],
   };
 }
 
@@ -115,12 +130,12 @@ function projectionEnvelope(expected: ProjectionRequestV1['expected']) {
     codeGraphDigest: digest('4'),
     indexedWorktreeDigest: digest('1'),
     projectionInputDigest: digest('5'),
-    rendererVersion: 'archcontext.docs-renderer/v2' as const,
+    rendererVersion: 'archcontext.docs-renderer/v4' as const,
     layoutVersion: 'archcontext.docs-layout/v1' as const,
     generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.5.0' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
   };
   const withoutReceipt = {
-    schemaVersion: 'archcontext.projection-result/v1' as const,
+    schemaVersion: 'archcontext.projection-result/v2' as const,
     requestId: 'request.axr5',
     status: 'planned' as const,
     inputSnapshot: { ...snapshot },
@@ -133,6 +148,58 @@ function projectionEnvelope(expected: ProjectionRequestV1['expected']) {
   return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.run', data: { ...withoutReceipt, receiptDigest: projectionResultReceiptDigest(withoutReceipt) } };
 }
 
+function applyEnvelope(
+  requestId: string,
+  originalExpected: ProjectionRequestV1['expected'],
+  acceptedChange: NonNullable<ProjectionRequestV1['acceptedChange']>,
+  status: 'applied-reconcile-required' | 'applied' | 'noop',
+) {
+  const snapshot = {
+    ...originalExpected,
+    baseHeadSha: originalExpected.headSha,
+    sourceTreeDigest: digest('2'), modelDigest: digest('3'), codeGraphDigest: digest('4'), indexedWorktreeDigest: digest('1'), projectionInputDigest: digest('5'),
+    rendererVersion: 'archcontext.docs-renderer/v4' as const,
+    layoutVersion: 'archcontext.docs-layout/v1' as const,
+    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.5.0' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
+  };
+  const applyReceipt = {
+    schemaVersion: 'archcontext.projection-apply-identity/v1' as const,
+    applyId: digest('a'), lookupKey: digest('b'), repositoryId: originalExpected.repositoryId, workspaceId: originalExpected.workspaceId,
+    acceptedChange,
+    semanticCommit: { changeSetId: 'changeset.docs-projection-test', idempotencyKey: 'idem_changeset.docs-projection-test' },
+    ownedFilesDigest: digest('c'), refreshSignalsDigest: digest('d'),
+  };
+  const signal: ArchitectureRefreshSignalV1 = {
+    schemaVersion: 'archcontext.architecture-refresh-signal/v1', signalId: digest('e'), idempotencyKey: digest('f'), mode: 'refresh-required',
+    repository: { repositoryId: originalExpected.repositoryId },
+    worktree: { workspaceId: originalExpected.workspaceId, headSha: originalExpected.headSha, worktreeDigest: originalExpected.worktreeDigest },
+    cause: 'accepted-semantic-delta', acceptedChange,
+    reasonCodes: [...acceptedChange.reasonCodes], affectedNodeIds: [...acceptedChange.affectedNodeIds], refreshTargets: ['architecture-readiness'],
+    baseDigests: { modelDigest: digest('0'), sourceTreeDigest: digest('1'), flowProofDigest: digest('2'), projectionDigest: digest('3') },
+    resultingDigests: { modelDigest: digest('4'), sourceTreeDigest: digest('5'), flowProofDigest: digest('6'), projectionDigest: digest('7') },
+    projectionReceiptDigest: digest('0'),
+  };
+  const withoutReceipt = {
+    schemaVersion: 'archcontext.projection-result/v2' as const,
+    requestId,
+    status,
+    inputSnapshot: snapshot,
+    outputSnapshot: snapshot,
+    affectedNodeIds: ['capability.test.core'],
+    files: [{ path: 'docs/architecture/index.md', action: 'update' as const, preimageDigest: digest('8'), outputDigest: digest('9') }],
+    humanActions: [],
+    refreshSignals: status === 'applied' ? [signal] : [],
+    applyReceipt,
+  };
+  const receiptDigest = projectionResultReceiptDigest(withoutReceipt);
+  const data = {
+    ...withoutReceipt,
+    refreshSignals: withoutReceipt.refreshSignals.map((entry) => ({ ...entry, projectionReceiptDigest: receiptDigest })),
+    receiptDigest,
+  };
+  return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.run', data };
+}
+
 function runner(calls: Array<{ binary: string; args: readonly string[] }>, docs: ReturnType<typeof projectionEnvelope>): RunArchctxProcess {
   return (binary, args): ArchctxProcessResult => {
     calls.push({ binary, args });
@@ -141,7 +208,67 @@ function runner(calls: Array<{ binary: string; args: readonly string[] }>, docs:
 }
 
 describe('package-local ArchContext projection provider', () => {
-  test('does not expose caller-authored architecture acceptance as CLI authority', () => {
+  test('bounds a real provider process tree whose descendant keeps captured pipes open', () => {
+    const f = fixture();
+    const descendantPidPath = join(f.root, 'descendant.pid');
+    const node = resolveCompatibleNodeRuntime(process.env);
+    writeFileSync(f.binary, [
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      "const child = spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)\"], { stdio: ['ignore', 'inherit', 'inherit'] });",
+      "writeFileSync(process.env.ARCHCTX_DESCENDANT_PID_PATH, String(child.pid));",
+      "setInterval(() => {}, 1000);",
+      '',
+    ].join('\n'));
+    const providerModule = join(import.meta.dir, '..', 'src', 'effects', 'architecture', 'archctx-provider.ts');
+    const script = join(f.root, 'provider-timeout.ts');
+    writeFileSync(script, [
+      `import { archctxCapabilities } from ${JSON.stringify(providerModule)};`,
+      `const started = Date.now();`,
+      `try {`,
+      `  archctxCapabilities(${JSON.stringify(f.repoRoot)}, { consumerRoot: ${JSON.stringify(f.consumerRoot)}, policy: { provider: 'archctx', applyMode: 'manual', failureGate: 'advisory', requiredVersion: '${ARCHCTX_REQUIRED_VERSION}', timeoutMs: 500 }, env: { ...process.env, REPO_HARNESS_NODE_BIN: ${JSON.stringify(node)}, ARCHCTX_DESCENDANT_PID_PATH: ${JSON.stringify(descendantPidPath)} }, deadlineMs: Date.now() + 500 });`,
+      `  process.exitCode = 2;`,
+      `} catch (error) {`,
+      `  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);`,
+      `  const pid = Number((await import('node:fs')).readFileSync(${JSON.stringify(descendantPidPath)}, 'utf8'));`,
+      `  let descendantAlive = true;`,
+      `  try { process.kill(pid, 0); } catch { descendantAlive = false; }`,
+      `  if (descendantAlive) try { process.kill(pid, 'SIGKILL'); } catch { descendantAlive = false; }`,
+      `  console.log(String(error));`,
+      `  console.log('descendant_alive=' + descendantAlive);`,
+      `  console.log('elapsed=' + (Date.now() - started));`,
+      `}`,
+      '',
+    ].join('\n'));
+    const result = spawnSync(process.execPath, [script], { cwd: f.repoRoot, encoding: 'utf8', timeout: 4_000, killSignal: 'SIGKILL' });
+    expect((result.error as NodeJS.ErrnoException | undefined)?.code).not.toBe('ETIMEDOUT');
+    if (result.status !== 0) throw new Error(`provider timeout fixture failed: ${result.stderr || result.stdout}`);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('descendant_alive=false');
+  });
+
+  test('charges Node runtime selection to the caller deadline', () => {
+    const f = fixture();
+    const slowNode = join(f.root, 'slow-node');
+    writeFileSync(slowNode, '#!/bin/sh\n/bin/sleep 2\necho v24.18.0\n');
+    chmodSync(slowNode, 0o755);
+    const providerModule = join(import.meta.dir, '..', 'src', 'effects', 'architecture', 'archctx-provider.ts');
+    const script = join(f.root, 'node-deadline.ts');
+    writeFileSync(script, [
+      `import { resolveCompatibleNodeRuntime } from ${JSON.stringify(providerModule)};`,
+      `try {`,
+      `  resolveCompatibleNodeRuntime({ PATH: '', REPO_HARNESS_NODE_BIN: ${JSON.stringify(slowNode)} }, () => [], { deadlineMs: Date.now() + 100 });`,
+      `  process.exitCode = 2;`,
+      `} catch (error) { console.log(String(error)); }`,
+      '',
+    ].join('\n'));
+    const result = spawnSync(process.execPath, [script], { cwd: f.repoRoot, encoding: 'utf8', timeout: 4_000, killSignal: 'SIGKILL' });
+    expect((result.error as NodeJS.ErrnoException | undefined)?.code).not.toBe('ETIMEDOUT');
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('architecture projection timeout before Node runtime selection');
+  });
+
+  test('exposes only signal-bound acceptance, proof reconciliation, and approved stale retirement as CLI authorities', () => {
     const command = buildArchitectureProjectionCommand();
     for (const name of ['check', 'plan', 'apply', 'adopt']) {
       const subcommand = command.commands.find((candidate) => candidate.name() === name);
@@ -151,6 +278,27 @@ describe('package-local ArchContext projection provider', () => {
       expect(subcommand!.options.map((option) => option.long)).not.toContain('--accepted-reason');
       expect(subcommand!.options.map((option) => option.long)).not.toContain('--accepted-node-id');
     }
+    const accept = command.commands.find((candidate) => candidate.name() === 'accept');
+    expect(accept).toBeDefined();
+    expect(accept!.options.map((option) => option.long)).toEqual([
+      '--json',
+      '--signal-id',
+      '--approval-reference',
+      '--adoption-plan-id',
+    ]);
+    const reconcile = command.commands.find((candidate) => candidate.name() === 'reconcile');
+    expect(reconcile).toBeDefined();
+    expect(reconcile!.options.map((option) => option.long)).toEqual([
+      '--json',
+      '--signal-id',
+    ]);
+    const retireStale = command.commands.find((candidate) => candidate.name() === 'retire-stale');
+    expect(retireStale).toBeDefined();
+    expect(retireStale!.options.map((option) => option.long)).toEqual([
+      '--json',
+      '--signal-id',
+      '--approval-reference',
+    ]);
 
     const invalid = request(fixture().repoRoot);
     invalid.acceptedChange = {
@@ -180,7 +328,7 @@ describe('package-local ArchContext projection provider', () => {
     const resolved = resolvePackageLocalArchctx(f.consumerRoot);
     expect(resolved.binaryPath).toBe(realpathSync(f.binary));
     writeFileSync(join(f.consumerRoot, 'node_modules', 'archctx', 'package.json'), '{"name":"archctx","version":"0.3.0"}\n');
-    expect(() => resolvePackageLocalArchctx(f.consumerRoot)).toThrow('expected archctx@0.4.2');
+    expect(() => resolvePackageLocalArchctx(f.consumerRoot)).toThrow('expected archctx@0.5.10');
   });
 
   test('resolves a hoisted package from an installed repo-harness package root', () => {
@@ -188,6 +336,40 @@ describe('package-local ArchContext projection provider', () => {
     const installedHarnessRoot = join(f.consumerRoot, 'node_modules', 'repo-harness');
     mkdirSync(installedHarnessRoot, { recursive: true });
     expect(resolvePackageLocalArchctx(installedHarnessRoot).binaryPath).toBe(realpathSync(f.binary));
+  });
+
+  test('resolves the target repo dependency tree before the running CLI package root', () => {
+    const f = fixture();
+    const repoBinary = vendorArchctx(f.repoRoot, '9.9.9');
+    const handshake = archctxCapabilities(f.repoRoot, {
+      policy: { ...policy, requiredVersion: '9.9.9' },
+      run: () => ({ status: 0, signal: null, stdout: JSON.stringify(capabilities('9.9.9')), stderr: '' }),
+    });
+    expect(handshake.resolved.binaryPath).toBe(realpathSync(repoBinary));
+    expect(handshake.resolved.version).toBe('9.9.9');
+  });
+
+  test('fails closed when the target repo vendors a mismatching archctx', () => {
+    const f = fixture();
+    vendorArchctx(f.repoRoot, '0.0.1');
+    expect(() => archctxCapabilities(f.repoRoot, { policy, run: () => ({ status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' }) }))
+      .toThrow(`expected archctx@${ARCHCTX_REQUIRED_VERSION}, got archctx@0.0.1 (resolved from repo root ${f.repoRoot})`);
+  });
+
+  test('fails closed when the pinned version omits the prior-committed-applies feature', () => {
+    const f = fixture();
+    const payload = capabilities();
+    const withoutFeature = { ...payload, features: payload.features.filter((feature) => feature !== 'projection-prior-committed-applies-v1') };
+    expect(withoutFeature.features).not.toContain('projection-prior-committed-applies-v1');
+    expect(() => archctxCapabilities(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run: () => ({ status: 0, signal: null, stdout: JSON.stringify(withoutFeature), stderr: '' }) }))
+      .toThrow('archctx required feature set mismatch');
+  });
+
+  test('resolves from the running CLI package root when the target repo vendors no archctx', () => {
+    const f = fixture();
+    const handshake = archctxCapabilities(f.repoRoot, { policy, run: () => ({ status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' }) });
+    expect(handshake.resolved.version).toBe(ARCHCTX_REQUIRED_VERSION);
+    expect(handshake.resolved.packageRoot).toBe(realpathSync(join(import.meta.dir, '..', 'node_modules', 'archctx')));
   });
 
   test('disabled readiness performs zero subprocess calls', () => {
@@ -211,28 +393,100 @@ describe('package-local ArchContext projection provider', () => {
     expect(readiness.apply.enabled).toBe(false);
   });
 
-  test('fails closed when PATH has no Node runtime compatible with archctx', () => {
+  test('fails closed when neither PATH nor the trusted candidates carry a compatible Node runtime', () => {
     const f = fixture();
     const fakeBin = join(f.root, 'bin');
     mkdirSync(fakeBin, { recursive: true });
     const node = join(fakeBin, 'node');
-    writeFileSync(node, '#!/bin/sh\necho v22.14.0\n');
+    writeFileSync(node, '#!/bin/sh\necho v22.21.0\n');
     chmodSync(node, 0o755);
+    const pathOnlyEnv: NodeJS.ProcessEnv = { ...process.env, PATH: fakeBin };
+    // An exported runtime authority must not rescue this failure mode.
+    delete pathOnlyEnv.REPO_HARNESS_NODE_BIN;
     const readiness = inspectArchitectureProjectionReadiness(f.repoRoot, {
       consumerRoot: f.consumerRoot,
       policy,
-      env: { ...process.env, PATH: fakeBin },
+      env: pathOnlyEnv,
+      trustedNodeCandidateSource: () => [],
     });
     expect(readiness.projectionProvider.state).toBe('error');
-    expect(readiness.projectionProvider.reason).toContain('requires Node >=24 <26');
+    expect(readiness.projectionProvider.reason).toContain('requires Node >=22.22 <26');
+    expect(readiness.projectionProvider.reason).toContain('trusted candidates ((none))');
   });
 
-  test('uses the protected helper exact Node authority without widening PATH', () => {
+  test('enumerates fixed system paths then sorted nvm versions in the shared trusted-candidate scan', () => {
+    const f = fixture();
+    const home = join(f.root, 'home');
+    const nvmRoot = join(home, '.nvm', 'versions', 'node');
+    for (const version of ['v20.11.0', 'v24.18.0']) {
+      mkdirSync(join(nvmRoot, version, 'bin'), { recursive: true });
+      const binary = join(nvmRoot, version, 'bin', 'node');
+      writeFileSync(binary, `#!/bin/sh\necho ${version}\n`);
+      chmodSync(binary, 0o755);
+    }
+    const candidates = trustedNodeCandidates(home);
+    expect(candidates.slice(0, 3)).toEqual(['/usr/bin/node', '/usr/local/bin/node', '/opt/homebrew/bin/node']);
+    expect(candidates.filter((candidate) => candidate.startsWith(home))).toEqual([
+      join(home, '.local', 'bin', 'node'),
+      join(nvmRoot, 'v20.11.0', 'bin', 'node'),
+      join(nvmRoot, 'v24.18.0', 'bin', 'node'),
+    ]);
+  });
+
+  test('resolves a scrubbed-env Node runtime through the shared nvm scan when PATH has none', () => {
+    const f = fixture();
+    const fakeBin = join(f.root, 'bin');
+    mkdirSync(fakeBin, { recursive: true });
+    const incompatiblePathNode = join(fakeBin, 'node');
+    writeFileSync(incompatiblePathNode, '#!/bin/sh\necho v22.21.0\n');
+    chmodSync(incompatiblePathNode, 0o755);
+    const home = join(f.root, 'home');
+    const nvmRoot = join(home, '.nvm', 'versions', 'node');
+    for (const version of ['v20.11.0', 'v22.22.0', 'v24.18.0']) {
+      mkdirSync(join(nvmRoot, version, 'bin'), { recursive: true });
+      const binary = join(nvmRoot, version, 'bin', 'node');
+      writeFileSync(binary, `#!/bin/sh\necho ${version}\n`);
+      chmodSync(binary, 0o755);
+    }
+    // The scrubbed bounded-verifier shape: REPO_HARNESS_NODE_BIN stripped whole.
+    const scrubbedEnv: NodeJS.ProcessEnv = { PATH: fakeBin, HOME: home };
+    const scoped = () => trustedNodeCandidates(home).filter((candidate) => candidate.startsWith(`${home}/`));
+    expect(resolveCompatibleNodeRuntime(scrubbedEnv, scoped))
+      .toBe(realpathSync(join(nvmRoot, 'v22.22.0', 'bin', 'node')));
+  });
+
+  test('applies the archctx Node range to trusted candidates and reports every scanned source', () => {
+    const f = fixture();
+    const fakeBin = join(f.root, 'bin');
+    mkdirSync(fakeBin, { recursive: true });
+    const incompatiblePathNode = join(fakeBin, 'node');
+    writeFileSync(incompatiblePathNode, '#!/bin/sh\necho v22.21.0\n');
+    chmodSync(incompatiblePathNode, 0o755);
+    const home = join(f.root, 'home');
+    const nvmRoot = join(home, '.nvm', 'versions', 'node');
+    mkdirSync(join(nvmRoot, 'v20.11.0', 'bin'), { recursive: true });
+    const staleNode = join(nvmRoot, 'v20.11.0', 'bin', 'node');
+    writeFileSync(staleNode, '#!/bin/sh\necho v20.11.0\n');
+    chmodSync(staleNode, 0o755);
+    const scrubbedEnv: NodeJS.ProcessEnv = { PATH: fakeBin, HOME: home };
+    const scoped = () => trustedNodeCandidates(home).filter((candidate) => candidate.startsWith(`${home}/`));
+    expect(() => resolveCompatibleNodeRuntime(scrubbedEnv, scoped)).toThrow(/requires Node >=22.22 <26/);
+    expect(() => resolveCompatibleNodeRuntime(scrubbedEnv, scoped)).toThrow(/REPO_HARNESS_NODE_BIN \(unset\)/);
+    expect(() => resolveCompatibleNodeRuntime(scrubbedEnv, scoped)).toThrow(new RegExp(`PATH \\(${fakeBin}\\)`));
+    expect(() => resolveCompatibleNodeRuntime(scrubbedEnv, scoped)).toThrow(new RegExp(`trusted candidates \\(${join(home, '.local', 'bin', 'node')}, ${staleNode}\\)`));
+  });
+
+  test('rejects Node 22.21 and uses the protected helper exact Node 22.22 authority without widening PATH', () => {
     const f = fixture();
     const fakeBin = join(f.root, 'protected-node');
     mkdirSync(fakeBin, { recursive: true });
-    const node = join(fakeBin, 'node');
-    writeFileSync(node, '#!/bin/sh\necho v24.18.0\n');
+    const staleNode = join(fakeBin, 'node-22.21');
+    writeFileSync(staleNode, '#!/bin/sh\necho v22.21.0\n');
+    chmodSync(staleNode, 0o755);
+    expect(() => resolveCompatibleNodeRuntime({ PATH: '/usr/bin:/bin', REPO_HARNESS_NODE_BIN: staleNode }))
+      .toThrow('must satisfy Node >=22.22 <26');
+    const node = join(fakeBin, 'node-22.22');
+    writeFileSync(node, '#!/bin/sh\necho v22.22.0\n');
     chmodSync(node, 0o755);
     expect(resolveCompatibleNodeRuntime({ PATH: '/usr/bin:/bin', REPO_HARNESS_NODE_BIN: node })).toBe(realpathSync(node));
     expect(() => resolveCompatibleNodeRuntime({ PATH: '/usr/bin:/bin', REPO_HARNESS_NODE_BIN: 'node' })).toThrow('must be an absolute path');
@@ -322,13 +576,79 @@ describe('package-local ArchContext projection provider', () => {
     expect(() => runArchitectureProjection(projectionRequest, f.repoRoot, { consumerRoot: f.consumerRoot, policy: { ...policy, applyMode: 'disabled' }, run: runner([], projectionEnvelope(projectionRequest.expected)) })).toThrow('apply is disabled');
   });
 
+  test('reports added, modified and deleted snapshot paths after the provider without retrying', () => {
+    const f = fixture();
+    writeFileSync(join(f.repoRoot, 'src/core/obsolete.ts'), 'old bytes\n');
+    const projectionRequest = request(f.repoRoot);
+    const diagnostics: ArchitectureProjectionProviderDiagnostic[] = [];
+    let calls = 0;
+    const run: RunArchctxProcess = (_binary, args) => {
+      if (args[0] === 'capabilities') return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
+      calls++;
+      mkdirSync(join(f.repoRoot, 'dist'), { recursive: true });
+      mkdirSync(join(f.repoRoot, '.archcontext/generated'), { recursive: true });
+      writeFileSync(join(f.repoRoot, 'dist/hook-entry.js'), 'private generated bytes\n');
+      writeFileSync(join(f.repoRoot, '.archcontext/generated/ARCHITECTURE.md'), 'private generated bytes\n');
+      writeFileSync(join(f.repoRoot, 'src/core/index.ts'), 'private source bytes\n');
+      rmSync(join(f.repoRoot, 'src/core/obsolete.ts'));
+      return { status: 0, signal: null, stdout: JSON.stringify(projectionEnvelope(projectionRequest.expected)), stderr: '' };
+    };
+    expect(() => runArchitectureProjection(projectionRequest, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, onDiagnostic: (d) => diagnostics.push(d) })).toThrow('snapshot mismatch after projection');
+    expect(calls).toBe(1);
+    expect(diagnostics).toHaveLength(1);
+    const diagnostic = diagnostics[0] as any;
+    expect(diagnostic).toMatchObject({ code: 'snapshot-drift', phase: 'after-provider', baseline: 'provider-entry', totalChanges: 4, truncated: false });
+    expect(diagnostic.changes.map((c: any) => [c.path, c.change])).toEqual([
+      ['.archcontext/generated/ARCHITECTURE.md', 'added'], ['dist/hook-entry.js', 'added'],
+      ['src/core/index.ts', 'modified'], ['src/core/obsolete.ts', 'deleted'],
+    ]);
+    expect(diagnostic.changes[0].before).toBeNull();
+    expect(diagnostic.changes[0].after.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(diagnostic.changes[2].before.digest).not.toBe(diagnostic.changes[2].after.digest);
+    expect(diagnostic.changes[3].after).toBeNull();
+    expect(JSON.stringify(diagnostic)).not.toContain('private generated bytes');
+    expect(JSON.stringify(diagnostic)).not.toContain('private source bytes');
+  });
+
+  test.each([false, true])('reports pre-provider drift without inventing a missing capture baseline (serialized=%s)', (serialized) => {
+    const f = fixture();
+    const captured = request(f.repoRoot);
+    const projectionRequest = serialized ? JSON.parse(JSON.stringify(captured)) : captured;
+    writeFileSync(join(f.repoRoot, 'src/core/index.ts'), 'changed before provider\n');
+    const diagnostics: ArchitectureProjectionProviderDiagnostic[] = [];
+    const run: RunArchctxProcess = (_binary, args) => args[0] === 'capabilities'
+      ? { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' }
+      : { status: 1, signal: null, stdout: '', stderr: 'expected snapshot is stale' };
+    expect(() => runArchitectureProjection(projectionRequest, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, onDiagnostic: (d) => diagnostics.push(d) })).toThrow('expected snapshot is stale');
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ code: 'snapshot-drift', phase: 'before-provider', baseline: serialized ? 'unavailable' : 'request-capture', totalChanges: serialized ? null : 1 });
+    expect((diagnostics[0] as any).changes).toEqual(serialized ? null : [expect.objectContaining({ path: 'src/core/index.ts', change: 'modified' })]);
+  });
+
+  test('bounds snapshot diagnostics and preserves provider failures', () => {
+    const f = fixture();
+    const projectionRequest = request(f.repoRoot);
+    const diagnostics: ArchitectureProjectionProviderDiagnostic[] = [];
+    const run: RunArchctxProcess = (_binary, args) => {
+      if (args[0] === 'capabilities') return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
+      for (let i = 0; i < 25; i++) writeFileSync(join(f.repoRoot, `src/core/added-${i}.ts`), 'added\n');
+      return { status: 1, signal: null, stdout: '', stderr: 'provider failed after writes' };
+    };
+    expect(() => runArchitectureProjection(projectionRequest, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, onDiagnostic: (d) => diagnostics.push(d) })).toThrow('provider failed after writes');
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({ code: 'snapshot-drift', phase: 'after-provider', totalChanges: 25, truncated: true });
+    expect((diagnostics[0] as any).changes).toHaveLength(20);
+  });
+
   test('tracks the packed node/v2 integration proof without a stale node/v1 dependency', () => {
     const manifest = JSON.parse(readFileSync(join(import.meta.dir, '..', 'package.json'), 'utf8')) as any;
     const readback = JSON.parse(readFileSync(join(import.meta.dir, '..', 'docs', 'verification', 'axr5-archctx-clean-room-readback.json'), 'utf8')) as any;
     expect(manifest.devDependencies?.['archctx-contracts']).toBeUndefined();
     expect(manifest.scripts?.['check:archctx-integration']).toBe('bun scripts/axr5-archctx-clean-room.ts');
     expect(readback.status).toBe('verified');
-    expect(readback.packages.contracts.version).toBe('0.4.2');
+    expect(readback.packages.contracts.version).toBe('0.5.7');
+    expect(Object.keys(readback.packages.contracts).sort()).toEqual(['file', 'name', 'version']);
+    expect(Object.keys(readback.packages.archctx).sort()).toEqual(['file', 'name', 'version']);
     expect(readback.consumer.authoritativeNodeSchema).toBe('archcontext.node/v2');
     expect(readback.consumer.authoritativeNodeSchemaDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(readback.source.dirtySourceUsed).toBe(false);
@@ -354,5 +674,93 @@ describe('package-local ArchContext projection provider', () => {
     const forged = structuredClone(validEnvelope) as any;
     forged.data.receiptDigest = digest('f');
     expect(() => runArchitectureProjection(projectionRequest, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run: runner([], forged) })).toThrow('receiptDigest mismatch');
+
+    const legacy = structuredClone(validEnvelope) as any;
+    legacy.data.schemaVersion = 'archcontext.projection-result/v1';
+    expect(() => runArchitectureProjection(projectionRequest, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run: runner([], legacy) })).toThrow('projection result schemaVersion mismatch');
+  });
+
+  test('distinguishes pre-write failure, committed reconciliation, refresh delivery, and consumed noop', () => {
+    const f = fixture();
+    const acceptedChange: NonNullable<ProjectionRequestV1['acceptedChange']> = {
+      changeSetId: 'changeset.user-accepted', eventId: 'event.user-accepted',
+      reasonCodes: ['responsibility-changed'],
+      affectedNodeIds: ['capability.test.core'],
+    };
+    const initial = request(f.repoRoot);
+    initial.mode = 'apply';
+    initial.requestId = 'request.apply.initial';
+    initial.acceptedChange = acceptedChange;
+    const originalExpected = initial.expected;
+    const diagnostics: Array<{ code: string; message: string }> = [];
+    let projectionCalls = 0;
+    let ownedWrites = 0;
+    let humanAcceptances = 0;
+    const run: RunArchctxProcess = (_binary, args) => {
+      if (args[0] === 'capabilities') return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
+      projectionCalls += 1;
+      const wireRequest = JSON.parse(args[3]!) as ProjectionRequestV1;
+      if (projectionCalls === 1) {
+        ownedWrites += 1;
+        humanAcceptances += 1;
+        writeFileSync(join(f.repoRoot, 'src', 'core', 'concurrent.ts'), 'export const concurrent = true;\n');
+        return { status: 0, signal: null, stdout: JSON.stringify(applyEnvelope(wireRequest.requestId, originalExpected, acceptedChange, 'applied-reconcile-required')), stderr: 'warning: projection post-apply worktree digest diverged from the accepted snapshot' };
+      }
+      return {
+        status: 0,
+        signal: null,
+        stdout: JSON.stringify(applyEnvelope(wireRequest.requestId, originalExpected, acceptedChange, projectionCalls === 2 ? 'applied' : 'noop')),
+        stderr: '',
+      };
+    };
+
+    const first = runArchitectureProjection(initial, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, onDiagnostic: (value) => diagnostics.push(value) });
+    expect(first.status).toBe('applied-reconcile-required');
+    expect(first.refreshSignals).toEqual([]);
+    expect(first.applyReceipt?.applyId).toBe(digest('a'));
+    expect(diagnostics[0]).toMatchObject({ code: 'snapshot-drift', phase: 'after-provider', totalChanges: 1 });
+    expect(diagnostics[0]?.message).toContain('src/core/concurrent.ts');
+    expect(diagnostics[1]).toMatchObject({ code: 'post-apply-reconciliation-required' });
+    expect(diagnostics[1]?.message).toContain('worktreeDigest');
+    expect(diagnostics[1]?.message).toContain('projection post-apply worktree digest diverged');
+
+    const retry = { ...initial, requestId: 'request.apply.retry', expected: captureArchitectureProjectionSnapshot(f.repoRoot) };
+    const second = runArchitectureProjection(retry, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, onDiagnostic: (value) => diagnostics.push(value) });
+    expect(second.status).toBe('applied');
+    expect(second.refreshSignals).toHaveLength(1);
+    expect(diagnostics[2]).toMatchObject({ code: 'apply-receipt-reconciled' });
+    const mismatchedSignal = structuredClone(second);
+    mismatchedSignal.refreshSignals[0]!.acceptedChange!.eventId = 'event.other-acceptance';
+    const { receiptDigest: _oldReceipt, ...mismatchedPayload } = mismatchedSignal;
+    mismatchedSignal.receiptDigest = projectionResultReceiptDigest(mismatchedPayload);
+    mismatchedSignal.refreshSignals[0]!.projectionReceiptDigest = mismatchedSignal.receiptDigest;
+    expect(projectionResultIssues(mismatchedSignal)).toContain('refreshSignals[0].acceptedChange must match applyReceipt.acceptedChange');
+    let refreshCalls = 0;
+    const refreshRun = () => { refreshCalls += 1; return []; };
+    consumeArchitectureRefreshSignals(f.repoRoot, second.refreshSignals, initial.changedPaths, { run: refreshRun });
+    consumeArchitectureRefreshSignals(f.repoRoot, second.refreshSignals, initial.changedPaths, { run: refreshRun });
+    expect(refreshCalls).toBe(1);
+
+    const third = runArchitectureProjection({ ...retry, requestId: 'request.apply.noop' }, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, onDiagnostic: (value) => diagnostics.push(value) });
+    expect(third.status).toBe('noop');
+    expect(third.refreshSignals).toEqual([]);
+    expect(diagnostics[3]).toMatchObject({ code: 'apply-receipt-reconciled' });
+    expect(diagnostics).toHaveLength(4);
+    expect(projectionCalls).toBe(3);
+    expect(ownedWrites).toBe(1);
+    expect(humanAcceptances).toBe(1);
+  });
+
+  test('pre-write provider failure remains fail-closed and emits no reconciliation diagnostic', () => {
+    const f = fixture();
+    const projectionRequest = request(f.repoRoot);
+    projectionRequest.mode = 'apply';
+    projectionRequest.acceptedChange = { changeSetId: 'changeset.stale', eventId: 'event.stale', reasonCodes: ['responsibility-changed'], affectedNodeIds: ['capability.test.core'] };
+    const diagnostics: unknown[] = [];
+    const run: RunArchctxProcess = (_binary, args) => args[0] === 'capabilities'
+      ? { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' }
+      : { status: 1, signal: null, stdout: '', stderr: 'AC_PRECONDITION_FAILED: expected snapshot is stale' };
+    expect(() => runArchitectureProjection(projectionRequest, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, onDiagnostic: (value) => diagnostics.push(value) })).toThrow('expected snapshot is stale');
+    expect(diagnostics).toEqual([]);
   });
 });

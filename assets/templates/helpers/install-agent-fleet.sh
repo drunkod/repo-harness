@@ -1,14 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
-MIN_BUN_VERSION="1.1.35"
+MIN_BUN_VERSION="1.4.0"
 
 bun_version_is_supported() {
   local version="$1"
-  [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]] &&
-    (( BASH_REMATCH[1] > 1 ||
-      (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] > 1) ||
-      (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] == 1 && BASH_REMATCH[3] >= 35) ))
+  [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]] || return 1
+  local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}"
+  local minimum_major minimum_minor minimum_patch
+  IFS=. read -r minimum_major minimum_minor minimum_patch <<< "$MIN_BUN_VERSION"
+  (( major > minimum_major ||
+    (major == minimum_major && minor > minimum_minor) ||
+    (major == minimum_major && minor == minimum_minor && patch >= minimum_patch) ))
 }
 
 RUNTIME_BIN=""
@@ -105,19 +108,11 @@ const CODEX_TARGET_DIR = path.join(HOME, ".codex", "agents");
 const USER_MANAGED_RECEIPT_PATH = path.join(HOME, ".repo-harness", "agent-fleet-user-managed.json");
 const SOURCE_DIR = process.env.REPO_HARNESS_AGENT_FLEET_SOURCE_DIR;
 
-// Canonical anti-extras clause. Must stay byte-identical to the EXECUTION_BOUNDARY
-// constant in scripts/contract-run.ts (tests/install-agent-fleet.test.ts asserts
-// parity) so every generated Codex agent carries the same boundary as the Claude
-// worker prompts, the MCP codex-goal path, and the Codex delegation advisor hook.
-const EXECUTION_BOUNDARY = [
-  "Execution boundary: implement exactly the Goal, In scope items, Allowed Paths, and Exit Criteria in this brief. Treat absent requirements as forbidden design space, not as permission to improve.",
-  "",
-  "Do not add optional features, alternate UX, extra integrations, migration paths, compatibility behavior, fallback behavior, telemetry, broad cleanup, refactors, new abstractions, extra docs, or polish unless that work is explicitly listed under In scope or required by Exit Criteria.",
-  "",
-  "If you discover useful additional work, record it under Out of scope / Future work in the notes or review artifact. Do not implement it. Do not end with unsolicited offers to do more work.",
-  "",
-  "If the requested outcome cannot be completed without expanding scope, fail closed: stop, name the missing decision, and cite the exact file/section that blocks execution.",
-].join("\n");
+// A generated persona carries role identity only. The anti-extras execution
+// boundary belongs to the runtime task packet (SubagentStart context in
+// src/cli/hook/subagent-handler.ts), which is the only surface that knows
+// whether the child is contract-bound and writable; a read-only persona must
+// never be told to implement anything.
 
 // Provider-native source tuples project deterministically to Codex-native labels.
 // Validation remains fail-closed; reasoning effort is carried through unchanged.
@@ -143,14 +138,13 @@ const MODEL_EFFORT_MAP = {
   fable: buildFamilyEffortMap("Fable", "gpt-5.6-sol", "GPT-5.6 Sol"),
 };
 
-// Per-agent Codex target overrides — the only effort remaps in the fleet.
-// fast-worker trades the opus/terra default down to Luna at max; deep-worker
-// and gatekeeper bump terra effort to xhigh. Everything else follows the
-// family default.
+// Per-agent Codex target overrides — the only model/effort remaps in the fleet.
+// fast-worker targets Astra at low reasoning; deep-worker and gatekeeper
+// target Astra at medium. Everything else follows the family default.
 const AGENT_TARGET_OVERRIDES = {
-  "fast-worker": { model: "gpt-5.6-luna", effort: "max", targetDescription: "GPT-5.6 Luna at max reasoning" },
-  "deep-worker": { model: "gpt-5.6-terra", effort: "xhigh", targetDescription: "GPT-5.6 Terra at xhigh reasoning" },
-  gatekeeper: { model: "gpt-5.6-terra", effort: "xhigh", targetDescription: "GPT-5.6 Terra at xhigh reasoning" },
+  "fast-worker": { model: "gpt-6-astra", effort: "low", targetDescription: "GPT-6 Astra at low reasoning" },
+  "deep-worker": { model: "gpt-6-astra", effort: "medium", targetDescription: "GPT-6 Astra at medium reasoning" },
+  gatekeeper: { model: "gpt-6-astra", effort: "medium", targetDescription: "GPT-6 Astra at medium reasoning" },
 };
 
 function readSource(agent) {
@@ -253,8 +247,7 @@ function generateToml(agent, parsed, mapped) {
   } else {
     lines.push(`sandbox_mode = "read-only"`);
   }
-  const developerInstructions = `${parsed.body}\n\n${EXECUTION_BOUNDARY}`;
-  lines.push(`developer_instructions = '''${developerInstructions}'''`);
+  lines.push(`developer_instructions = '''${parsed.body}'''`);
   return `${lines.join("\n")}\n`;
 }
 

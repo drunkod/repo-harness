@@ -63,6 +63,14 @@
     ],
     "rule": "PRDs live in plans/prds as the upper planning layer. Sprints live in plans/sprints as long-task execution backlogs; each sprint row is expanded with Waza $think into a detailed plans/plan-*.md before the plan -> contract -> worktree flow; tasks/todos.md stays the deferred-goal ledger"
   },
+  "external_sources": {
+    "version": 1,
+    "mode": "off"
+  },
+  "development_campaign": {
+    "version": 1,
+    "mode": "off"
+  },
   "reference_material": {
     "dir": "_ref",
     "mode": "external-ignored",
@@ -127,7 +135,7 @@
     "projection_provider": "archctx",
     "projection_apply": "automatic",
     "projection_failure_gate": "strict",
-    "projection_version": "0.4.2",
+    "projection_version": "0.5.10",
     "projection_timeout_ms": 120000,
     "freshness_gate": "strict",
     "gate_min_severity": "medium",
@@ -138,6 +146,38 @@
     "contract_block_begin": "<!-- BEGIN ARCHITECTURE CONTRACT -->",
     "contract_block_end": "<!-- END ARCHITECTURE CONTRACT -->",
     "rule": "hooks record architecture queue cards and sync controlled local context blocks; agents author semantic snapshots and diagrams"
+  },
+  "refactor": {
+    "mode": "off",
+    "provider": "archctx",
+    "proposal_author": "local",
+    "stages": {
+      "scan": {
+        "provider_version": "0.5.10",
+        "required_features": [
+          "module-statistics-v1",
+          "refactor-assessment-v1",
+          "recommendation-v3"
+        ]
+      },
+      "verify": {
+        "provider_version": "0.5.10",
+        "required_features": [
+          "refactor-resolution-v1"
+        ]
+      }
+    },
+    "workflow_routing": {
+      "module_refactor": "work_package",
+      "cross_module_refactor": "refactor_sprint",
+      "architecture_intervention": "human_architecture_approval",
+      "proof_required": "investigation_only",
+      "no_action": "record_and_stop"
+    },
+    "maximum_modules_per_program": 10,
+    "maximum_parallel_modules": 3,
+    "require_cutover_closure": true,
+    "require_post_merge_measurement": false
   },
   "workstreams": {
     "dir": "tasks/workstreams",
@@ -216,6 +256,20 @@
     ],
     "rule": "pre-edit-guard blocks implementation edits (non-workflow paths) unless an active plan is Approved/Executing; prompt-layer plan gates are advisory routing only"
   },
+  "collaboration": {
+    "mode": "off"
+  },
+  "agent_runtime": {
+    "mode": "off",
+    "adapters": {
+      "codex-app-thread": {
+        "enabled": false
+      },
+      "herdr-cli-agent": {
+        "enabled": false
+      }
+    }
+  },
   "delegation": {
     "mode": "explicit",
     "max_agents": 2,
@@ -242,6 +296,7 @@
   },
   "documentation": {
     "profile": "minimal-agentic",
+    "language": "en",
     "reference_source": "user-level-runtime-docs",
     "reference_stub_marker": "<!-- repo-harness: reference-config-stub v1 -->",
     "reference_resolver": "repo-harness docs path <doc-id>",
@@ -334,6 +389,11 @@
     "handoff": "artifact-aware",
     "recovery": "hybrid",
     "state": "file-backed"
+  },
+  "tooling": {
+    "codegraph": {
+      "enabled": true
+    }
   },
   "external_tooling": {
     "routing": {
@@ -441,6 +501,15 @@
       "model_dir": ".archcontext/model",
       "nodes_dir": ".archcontext/model/nodes",
       "capability_source_key": ".ai/harness/policy.json#context.capability_source"
+    },
+    "herdr": {
+      "min_version": "0.9.0",
+      "release_assets": {
+        "linux-x86_64": {
+          "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-linux-x86_64",
+          "sha256": "4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f"
+        }
+      }
     }
   },
   "agentic_development": {
@@ -471,10 +540,10 @@
   },
   "minimal_change": {
     "version": 1,
-    "mode": "advice",
+    "mode": "enforce",
     "session_context": true,
     "prompt_advice": true,
-    "post_edit_observer": false,
+    "post_edit_observer": true,
     "stop_review": true,
     "max_findings": 5,
     "max_context_words": 180,
@@ -496,6 +565,7 @@
   "circuit_breakers": {
     "guard_repeat": 2,
     "review": { "lite": 1, "standard": 1, "strict": 2 },
+    "semantic_reviews_per_work_package": 1,
     "subagents": { "default": 2, "strict_explicit_contract": 3 },
     "repair_loops": 2,
     "cross_model_consults_default": 0

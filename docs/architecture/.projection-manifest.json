@@ -1,17 +1,17 @@
 {
   "schemaVersion": "archcontext.architecture-docs-projection-manifest/v1",
-  "rendererVersion": "archcontext.docs-renderer/v2",
+  "rendererVersion": "archcontext.docs-renderer/v4",
   "profile": "repo-harness/v1",
-  "sourceDigest": "sha256:dfeee72dd6b65c11c5410cf52261499a156ed11386d32cb5121711b63684470d",
+  "sourceDigest": "sha256:b859983f97115344cb2d922ace1e8499d648eeca197ec66cf58b3775378e135d",
   "provenance": {
     "schemaVersion": "archcontext.architecture-docs-projection-provenance/v1",
-    "baseHeadSha": "c30f08fcf306b15911f300288bd10cbff03d5377",
-    "worktreeDigest": "sha256:9bcab037eaa7cff2044b3df32c06e809c653657224e1faade513b522b2e12757",
-    "sourceTreeDigest": "sha256:8b6f26a73485c54d703b4cf8b5123a5c5360fe3cdb879fd4277af0a3cc9fc433",
-    "modelDigest": "sha256:e7e1a02e1fb8c6e0732999db19c5ab1541d8529ffb270b2be1eb96af579fa4cb",
-    "codeGraphDigest": "sha256:8a5e43f36801ee9e41b55dc3c9ee379c902bc14b00309837d9afad0bac4f9d43",
-    "indexedWorktreeDigest": "sha256:d2af27b6f02dfba6fd61147ee541f2e73892568c8d184af356f6e92f0dab897c",
-    "rendererVersion": "archcontext.docs-renderer/v2",
+    "baseHeadSha": "4ce4d6405b06202fb2184dcbd7056dfc7710a5fd",
+    "worktreeDigest": "sha256:e9f605c82764511c0babd32d129ffdd2cab45e83c4dbd9a9ebb8f608a023f848",
+    "sourceTreeDigest": "sha256:046ef49cc0a2bc1d156bf8119246ae55c7fefb342d1bdc60fc810896a4257f13",
+    "modelDigest": "sha256:a11afbf16edf9e822bf02222d331beb8c050ef0b659ae605c23183193b10bbd5",
+    "codeGraphDigest": "sha256:b574a3561f63e0e87a7cfce55462e55cbcd3e80007fcecef7b8b50dbec8f4f31",
+    "indexedWorktreeDigest": "sha256:ccab7eb050eb8ebed1191547f231e89924162c94cb56e8383c7798148120d4b2",
+    "rendererVersion": "archcontext.docs-renderer/v4",
     "layoutVersion": "archcontext.docs-layout/v1",
     "generatedFrom": {
       "codeGraphPackage": "@colbymchenry/codegraph",
@@ -19,9 +19,9 @@
       "codeGraphBinaryDigest": "sha256:e4be48573fdf16196ca0d2867be2790aa161534e9973dcb89bc70465100ea537",
       "codeGraphStatus": "ready"
     },
-    "projectionInputDigest": "sha256:f78e12c31b9b2278b29255e2277081e0feedf37caac8b2fd90333d77254b7b2f"
+    "projectionInputDigest": "sha256:d63b6971c05e16b28b7183b0cc3605947812fe8c1d4275210341ae22bdd28c9d"
   },
-  "projectionDigest": "sha256:7a73eb549e24e0f599359ebcef879e7b148721a577a9453e071a150e285206b7",
+  "projectionDigest": "sha256:a825ade60a98557be07aa1e9fe75bda46c19e43508e65228b75a00a4007ecf00",
   "semanticBaseline": {
     "semanticState": {
       "schemaVersion": "archcontext.architecture-semantic-state/v1",
@@ -102,6 +102,282 @@
           }
         },
         {
+          "capabilityId": "capability.runtime-harness.agent-runtime-effects",
+          "memberNodeIds": [
+            "capability.runtime-harness.agent-runtime-effects",
+            "component.agent-runtime-effects.journal"
+          ],
+          "semanticFingerprint": "sha256:d6f2dddda9c0f581cc20a8174b2b3819dbaeb482a8fe80af344256399c139370",
+          "flowProofFingerprint": "sha256:ac3c28cd084b0d197fa3b7feb6f310cb425cb2156425388a7a45e9f6df12e08e",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:c37fea3dca921e5268e690f887726e8e830d5ef338ff75616bfbbc5173ce9330",
+            "entrypoints": "sha256:e7b3ce0be22ecc1618b5282769c8d13396175241cb042023c062b3f9452a84a0",
+            "interfaces": "sha256:285f882aa4c70cd50ca5d304156318756bd15bba38473dfdb9e7b9cd8f84cc7c",
+            "lifecycle": "sha256:915c0389b0b600eef14b6b7f6dc5efcc415454a267ecd7cba525e92264826d09",
+            "names": "sha256:5f9b9506d46834b2f6296f98a42fdc63ecdbae4cdead00e5dc315bdac18423ec",
+            "ownership": "sha256:41b2b87d4e2d5c87fd59b5f01c4675bcc4d3bb0f89237bb2a5a0693698dfc466",
+            "placement": "sha256:8590e12e7640509b9f1a2ce75296afdf0e873800d1ee8ba0bef5a0a8911e72b6",
+            "relations": "sha256:c2b3802744b51dddc6338e418a6e0e5ad0c2d94d19f50418e0f11b63f10bf32d",
+            "responsibilities": "sha256:3fe377a751067b062147e1b2a4305d0d91c52ac3fe1e8d7ffa5df0d15de491ef",
+            "riskBoundaries": "sha256:c99f10692dff8f75a14f79d97d750f76aea333f3f8213a4adac6543276068e1a"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.automation-budget",
+          "memberNodeIds": [
+            "capability.runtime-harness.automation-budget",
+            "component.automation-budget.ledger",
+            "component.automation-controller.journal"
+          ],
+          "semanticFingerprint": "sha256:f5a641498a320c75fe40c5404cba2a02ba39b14e002b91ff19f0c6d1daa5a48d",
+          "flowProofFingerprint": "sha256:96229e37f4a0acdc75754c80f56cbe556c11c654a021bd12a906d6200889687f",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:9ddf5d67772ddbf339039ee7a1c4f13f24e6848cab0f2fc5c9310142d8781aa6",
+            "entrypoints": "sha256:8e816e29cada465557260a57a59964c721a6fcf1a1cab7670d94fc59d9318a55",
+            "interfaces": "sha256:abc03107526559ccaee444c783f7c41ced7edf2eb907332a98099a2db3024412",
+            "lifecycle": "sha256:12be6c071d9e49c4caac46334e696bc87fc3eec18da40ee5179d48d6b06701f2",
+            "names": "sha256:4f3a6acbfbb1b3ec976a5abd9415e0a2491db7671cf6339d0a8ee0e04d9d8f7c",
+            "ownership": "sha256:c637237438f355872e1c158d9f241b2bc50d1b1b4c3ca88cb8ab0a4afc6a5ccc",
+            "placement": "sha256:bd316573c1ba59a0db8daf469264b8eab583535360942d041e11f1692a7f06b9",
+            "relations": "sha256:41b0817228628346199df99b5cdb8d5825eb46d28f6557bffbfbb3cfadceafd4",
+            "responsibilities": "sha256:cc501ffe26e46bbbae22721d03f93eb7a2e1c36f26ee1243086ca2f105031faa",
+            "riskBoundaries": "sha256:ae2c68db8c9a0a50c584dd1579cf30afab40be210ec1c81b405ba8bdca9f60d0"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.bound-task-freezes",
+          "memberNodeIds": [
+            "capability.runtime-harness.bound-task-freezes",
+            "component.bound-task-freezes.primary"
+          ],
+          "semanticFingerprint": "sha256:3387db3f520ab180b30b68abe5700cc97653e4f400cf176fee8f22975af5f2d5",
+          "flowProofFingerprint": "sha256:870371b8140d4537510c4c49f8c85e61c5f3b4866768f52443915794347db718",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:9267128481daee59a18523f5dd04e4be38daf434ea0ce627c815d6df2281afac",
+            "entrypoints": "sha256:e76760ee7ef380d66b216723690076ab721f66eba65845c3191b752ea5039cb3",
+            "interfaces": "sha256:b81f8f27c6727d33d6e987ec3eb77c599a7a6ece93c272c08b8fdf4131e37d43",
+            "lifecycle": "sha256:a087a49e2eef73bc6b61a7053053949789853144035fdb7e6aafd289c1cb6b6e",
+            "names": "sha256:406b1f516a57294c4bfceb00df7bc2f45cd5c9fe81cfbc990e6f236752d1a75b",
+            "ownership": "sha256:009f78251957de4e0b48f1fe3d1358c69f7d929beb6249ab695fbd027258f541",
+            "placement": "sha256:031b99b603393d7e339278a01698a75e5db37dc1dc7d4ea8a0e8837abea24507",
+            "relations": "sha256:613b5732f7bee39d012aaaacb2abbd867aa48e7bc9ce761b5ed54cc56f4e5881",
+            "responsibilities": "sha256:9b9f33ac936fbbb0ca33adc7bd0109207193cc70c358651c164be6412c7fbe4b",
+            "riskBoundaries": "sha256:6b2f55490a06f4eee014f662e434cb408c80fb48344d4a89c5d1f9a32ae2848b"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.collaboration",
+          "memberNodeIds": [
+            "capability.runtime-harness.collaboration",
+            "component.collaboration.primary"
+          ],
+          "semanticFingerprint": "sha256:d88dfcf1a4b68fb194e8b06a4f3ddd22edd3a1731e9ebb5726b74f740cdb5383",
+          "flowProofFingerprint": "sha256:e38d9433d968f5f6a5ca074cea4bd193ff918f4f9666613348013162e362bb0e",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:070d3f0dd4997e2237582fae2524a8fcad4bd4bc1831a3a69040762756a64655",
+            "entrypoints": "sha256:1ad600fdaa03e9c0219ca8cc549a946ad59044255a430b45f711d1ed88b57bab",
+            "interfaces": "sha256:43a2cd8ff73ede380f4045611a88e951c09e560179ce745b664a9380b9a68485",
+            "lifecycle": "sha256:a4870b6e2c168e2bce510c3c696f2bf3b5ff5dda26cc1f3e3280ac85aa2e55e1",
+            "names": "sha256:8455374770d764b62f5c8f0b772567c933a19c3de9aa85dc69e2012cdd2d5a18",
+            "ownership": "sha256:901537ed62edac5ae5b82c4e8fd8e32f4ffeb62355b7a66558a88d73f1c33083",
+            "placement": "sha256:2af9fcd98d31b32a26f3cca7378c4db6b9cade761f21843c832ca40188faa343",
+            "relations": "sha256:370cf660f6b9c32f26355a3857bfc715a72cb5d35f26aa08d245ab441124d2c9",
+            "responsibilities": "sha256:0b6a27fac26b181fe78f1053e5fd9e7a939d2c943b12016d891e017b9575e7cb",
+            "riskBoundaries": "sha256:3a851a9b5b5f14222a3055e4aeeac25238b13ab85c19fcabd14baf7034602e6f"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.delegated-runs",
+          "memberNodeIds": [
+            "capability.runtime-harness.delegated-runs",
+            "component.delegated-runs.primary"
+          ],
+          "semanticFingerprint": "sha256:a519a5e5423622564dc1dc7dc095a3fa095c37b52681850b27a7a49c5f9a0cd4",
+          "flowProofFingerprint": "sha256:0a137b0f1a2bc4019fd5fda1333bce132182ba22a3a07fe7c6f9bcb2fd9d5268",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:90a18d37109ab7b91fabdb030fcfc03811bc85659f02669bc168bce978802409",
+            "entrypoints": "sha256:241c0ee57be532ac48db0d7478b73608a79d0aabbf821233a5dbbfaaa1741720",
+            "interfaces": "sha256:84bc84f5708b31f9b938680d67c9e7d875b3cd3e4c32196be09433a8c2981b9f",
+            "lifecycle": "sha256:58e06c9b18e3d32a57895260d27514b24a9cb1e811de99f0cf4de6c0a2c7b761",
+            "names": "sha256:b4a43d877d00010e29534db64009d9977027b01ece9e19aeac03b53a95c59a5a",
+            "ownership": "sha256:c9c300415b9c80b6e4b8e5c5ff70673a43f45f462789c92f7ad5270966d2859c",
+            "placement": "sha256:bc85d65f37fc4bfc1e0f2b27d25e535a420e234e447cdf8db665516cf47ed496",
+            "relations": "sha256:7149b24e39cdb6a5afdc45f89d34872a45bdd3fcbb0e984851a8208be302d2db",
+            "responsibilities": "sha256:ec932fa79e2b88346530f9262cdd3a36ee45c8cb38764695b78dc0adc70d542a",
+            "riskBoundaries": "sha256:bdcbeb6514f701bdda2222b76f2f53044b164bd5b6e5a1bdda3864ade6b1e4da"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.development-campaign",
+          "memberNodeIds": [
+            "capability.runtime-harness.development-campaign",
+            "component.development-campaign.journal"
+          ],
+          "semanticFingerprint": "sha256:020ae72febf12fa01edd1431233fa2a1d1c1ba0c6df6b6f4af1c042e65e8c0d2",
+          "flowProofFingerprint": "sha256:c35f78740f4fe07883d52c3ee0dfb074ca3026365646061072c56a8e064d086d",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:cc39fac733c3adc3a8d4e39b4456bece4ef662bd8fe3be92e2b8c714ed82e079",
+            "entrypoints": "sha256:cefc1af708e7fece666554e27055be11cca32dcf6ae80c8eaea891e631bed21f",
+            "interfaces": "sha256:93c62b3fbd599907a860c7a25ae77156958a7fe3bcccbf6d9d60e2b1356490d2",
+            "lifecycle": "sha256:1ea41ebd97629fa60a172d7d516d8a9d946eab7013e8af8a96c1f447e4157af2",
+            "names": "sha256:cd0d767f1a4b14d8a5b98983d276be80d20620a2df439c6da936e566a9858f37",
+            "ownership": "sha256:45d6192f71dbdd774224d8296eaf9211f51e47c8755074f2dbc9b646175e9b3b",
+            "placement": "sha256:353ad524b7fbfc66184d6104a0168a770438d6f62f3498ff2c7b88526afd21b5",
+            "relations": "sha256:89a302ef8ce25ebb0b61e067d6ed303a073d6d252fafeb18d8ecf1537932d78e",
+            "responsibilities": "sha256:3f5eb9e58ad6eb7490d7fb5b35b36b88b87dd34d34513e156d2a3b5a36475536",
+            "riskBoundaries": "sha256:e6dcd4497dd1166cec74d2b946483d5f27b2af1c89b3d6783a07d28316000302"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.engineer-bindings",
+          "memberNodeIds": [
+            "capability.runtime-harness.engineer-bindings",
+            "component.engineer-bindings.primary"
+          ],
+          "semanticFingerprint": "sha256:3468fd1b1351125dd01d9c4cc841f5cd3d360370eedd0de4922a51b0bd7dd793",
+          "flowProofFingerprint": "sha256:3e5446b0655e275a82b8d27ef6b3f4d15c8d751756dbe0f26b54e9319f131a5b",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:cc2ff54f2c503566ae4d7e3c5fba0cec90f8af564f75676f6882dc0f15743153",
+            "entrypoints": "sha256:115cbeb40036170f2f47b29a099c42b1737c8ac1a6ef41e97a8e23935d8f0165",
+            "interfaces": "sha256:8aaa4d299321894b282ed9f3d66c73c7a2ff7488363dabc89cb253b358a6aa70",
+            "lifecycle": "sha256:a3d710d5c10d2abf9444e8ffacf746ba77e2c7cdcde26df0830a16c2fa38b8e5",
+            "names": "sha256:ee7b44f07807d80f85723289984cd7db4cc1cdb62d1df9b556bf63e69f764e0a",
+            "ownership": "sha256:2c0b4dbdcc93afa0fae08da404b69abed727a96851039324231bcacc7e8b0e7e",
+            "placement": "sha256:454a340981d367389bb1e84a488e05c03d56282977bda3d7c2280555498956af",
+            "relations": "sha256:b8f58dab8113b0374565d91b88656ab77bd9eeac5e1192107bb475471cc65376",
+            "responsibilities": "sha256:e4646f38f93b9016b6f8a479d981eeb16c354c16f79339af3bbb265775359737",
+            "riskBoundaries": "sha256:cd689224b36bc11e065140995eb7d2b20e9f69954402d89b0b3b491369303f14"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.engineer-messages",
+          "memberNodeIds": [
+            "capability.runtime-harness.engineer-messages",
+            "component.engineer-messages.primary"
+          ],
+          "semanticFingerprint": "sha256:3f70de06e7f5d64cd4d6e171efe8f2dfd587bbcc7f43d55a67f27b9f2017a8a3",
+          "flowProofFingerprint": "sha256:28a3517417639550b88152aa1cf7312f44c50a9064e3c56528272b21548d932c",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:5727c39d9be5c45c317a1838d20fa0646ee9596355aa225298aaa9e85c6b5cc2",
+            "entrypoints": "sha256:f51abb35751fc6c05d107cc09478d60cd6f2de91bdcf81654795f552d2d9027b",
+            "interfaces": "sha256:bbc821d752ae2dac5c9fdba6520ec3c0f455eb7c93950947cc5b21ead6eea5b0",
+            "lifecycle": "sha256:b55b222bc81873d98ecf317f48ad47f79042b9e61e7841442adbfb38ee58fd91",
+            "names": "sha256:44d39bcf528c9c05b53c38fe250bc54dc8acac6fc4015add389b01462adddf99",
+            "ownership": "sha256:d43383b06635a263357d859091c5690ed371382089513c8bd7a1beff60f0b153",
+            "placement": "sha256:e43b4c7cb5fedf9a97f483b1484c6963ef5be6104e0bc8e2d1b5e76b5678f451",
+            "relations": "sha256:d33bd46acf4a1cdaacb2e3a9d272188f21c93ba6e9cdb69cbddc2eeaf221a6e5",
+            "responsibilities": "sha256:024f958d72e374ad2eb46bc18ef163221d03bc7491f9b91f2ed423395b0d39cb",
+            "riskBoundaries": "sha256:4bd90bce99517552f4b117f8186368e6bd4b23a50856ccca3635536a93a24406"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.engineer-scheduling",
+          "memberNodeIds": [
+            "capability.runtime-harness.engineer-scheduling",
+            "component.engineer-scheduling.primary"
+          ],
+          "semanticFingerprint": "sha256:360a36b6fd3ad4505ae2dfcdba71845542c099d8574c78a4f3df813f8c9271b7",
+          "flowProofFingerprint": "sha256:b4c64cac51bae76157d11bf5b80fc0337f69fc7df42beaef552f3d6969198a14",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:aa58ba3e2d291a131f6226de4e14374a3a2c565aa25dc8c7cbdd62f746dcaf0f",
+            "entrypoints": "sha256:c6068ac8c91c5c16b39d2be8d25237ead65e007a05e01ff22d53483599ebbb63",
+            "interfaces": "sha256:3f3d633fb2b321e7bd81bc10060d2f9443aa7bcbe887918b61e7c2e10fd45893",
+            "lifecycle": "sha256:8479d8ce95e8c833ef0e427d503a7825df64eeafff953243a41257e748828629",
+            "names": "sha256:84cdc33cbbd62c172798d6a1b125e36485d962fdeaa5afd6ad466fd567e1dfdb",
+            "ownership": "sha256:7b4a7f082a4c907291a6c328d61372342504465a1cfc2294199d04d5ec16a917",
+            "placement": "sha256:32512b6d81dddea5f09ce9c1732916d457e12d2fd053972733aa6427c55930ff",
+            "relations": "sha256:7df83ac58e91e8f27e06467c5d07dc46d1153a5c5cc600f722fd698fb0213634",
+            "responsibilities": "sha256:2ddf5e59a1ccd94e626a6f34eee66f9b5503e7cbd21c2078b25cef881c554bb5",
+            "riskBoundaries": "sha256:ce501117dfbcfbb0a864af55427ef8c55b35597a20184fa296bcad749ca72ce9"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.engineering-overlay",
+          "memberNodeIds": [
+            "capability.runtime-harness.engineering-overlay",
+            "component.engineering-overlay.primary"
+          ],
+          "semanticFingerprint": "sha256:b9c0b1c4fe6cb9d995537d9722f4c8764c900c17b849578cc0ff4bd2db71e545",
+          "flowProofFingerprint": "sha256:05cbc97f7c4fdab534d7b9a1223f08a1f8acc4352b85e7319a7f3df36d8e317a",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:f0fd6c8d8ba09a17f1592782d3cde72daff5e9941e81741ec0cf2d8ca0584e6e",
+            "entrypoints": "sha256:94bcea1d4e4ea5ab6687737f74c488804277cb12977313a5c5702a1d301867a7",
+            "interfaces": "sha256:41730d3781ab00ea24962d8bddc87ab94506303d92767a9bf60ea4c2584e014c",
+            "lifecycle": "sha256:2dc7a18b6d7d83b0a88ca777b932b44a5d95ef5ebe7d952a1636b8c1ff2a3f72",
+            "names": "sha256:24e11122106e8ba5cc03c4c3b9cd3e55a6d63706819528c673ae2f3c2c52a88e",
+            "ownership": "sha256:8b46cb061cfedee542766bb48a9b5e3db0ca81cc52dcdad89c9f4bf97cc2a99b",
+            "placement": "sha256:f642c8a71b567931fc0371ea28e4e725e7b899a0eb8daeba86f12166c93a6cfa",
+            "relations": "sha256:6dbc29fdd5791f20b091745e77d81926a2edd6f8d5c54733e817bf44445d1474",
+            "responsibilities": "sha256:bae3699329190f228cbb86dcc12d8caab1d5e8557cfa37dd000ce4c97aea56bd",
+            "riskBoundaries": "sha256:184da6ee5480142eeaefb8314f6d3262e7a32adb9e6b4beac2b6d7265d0c4b09"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.external-source-intake",
+          "memberNodeIds": [
+            "capability.runtime-harness.external-source-intake",
+            "component.external-source-intake.immutable-evidence"
+          ],
+          "semanticFingerprint": "sha256:d4a332fcb6baa13ddcdde15e3e4bc168a097edc565649cd207648e9a3ba4b41f",
+          "flowProofFingerprint": "sha256:7a2ba5a2560f60e521da816293ac0d0f83676cd5f1ffa4c30b3abb154cb364ab",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:461f1f2ae432afb04c26409369cf7806093b5b2eafcad757b0c2223312d69b7e",
+            "entrypoints": "sha256:53a95c58c0e29f575e5cd619303e12824ac93db57184c9230520b3636915ff52",
+            "interfaces": "sha256:fb22aff26437f982bc878d04d97cfe5817862397152c5c515f7c8e148d3b3902",
+            "lifecycle": "sha256:11edc38f8a9cda9fac33dc7e8eb31886f17da3d9f2faf5e704a9b56706cf94a4",
+            "names": "sha256:389fcd5669412c101dbc86e15aa476cea2114f1de33f07647219684964232a0e",
+            "ownership": "sha256:c5fd0faa51228d65564d78317371298b62784efa38e733a7210ef2b91ff33b7d",
+            "placement": "sha256:34d95c7539d6ffc39f5c3bb97b79251efe18da6bd4f112a7e3902b34eafe5a59",
+            "relations": "sha256:a95becf42a4a5807ff9dd9e27802b9cf0f6fb8f13716bf1ce4b75352f06e8fe7",
+            "responsibilities": "sha256:3c5f86a3b7c45e2b0b069791237e7baffdf33ddc756e2190186334e93194a52f",
+            "riskBoundaries": "sha256:134430acdfd321cb20e55d095353e8f69eb52b58f712663a111c34456223d8e7"
+          }
+        },
+        {
           "capabilityId": "capability.runtime-harness.global-runtime-reconciliation",
           "memberNodeIds": [
             "capability.runtime-harness.global-runtime-reconciliation",
@@ -152,28 +428,154 @@
           }
         },
         {
+          "capabilityId": "capability.runtime-harness.integration-acceptance",
+          "memberNodeIds": [
+            "capability.runtime-harness.integration-acceptance",
+            "component.integration-acceptance.primary"
+          ],
+          "semanticFingerprint": "sha256:667a858c4d8988f49982cbc7a32ae57efbb5afe708d291bfe923df6aade694a0",
+          "flowProofFingerprint": "sha256:43bf97162723fa5951f52fb02bbc1d0125b0b834b0b9b74801eab926735984b7",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:90922f11904f9a2129e4615426372799078b69288f6bae8567b4cd5d06f6e33c",
+            "entrypoints": "sha256:44964a26e9a0c1169c2490752396dd9e75242e1954dddba551b63ea7323ab3f2",
+            "interfaces": "sha256:306ec26653275db5764e5506d55ae6a43d9d63785196386af9c3b422ac1b07c9",
+            "lifecycle": "sha256:267f890f2edd195ce74c5333151a731f1f480f6a56128383841a9649251653a2",
+            "names": "sha256:b307e601b4f298ea37381af884ec31d165db3d727f1d6ae683d62dec716cf3de",
+            "ownership": "sha256:3ea40297199bd423c5044bc6e291123a0eb2651c43e90acb91d6efef6686b9fe",
+            "placement": "sha256:768c58286880a16efadf61087699e4d9aecffbb5a4511a39afe8e547cc7bbca1",
+            "relations": "sha256:76dc97e7750c8a4e7faef5add3de1660d7854fbb78072ac9275d1cd06e3dcaa2",
+            "responsibilities": "sha256:c8aab9a49f015de6599d30c19e9e750aebafecd565a22fd06b491c6859914d64",
+            "riskBoundaries": "sha256:3dee523c9cde3260768401f3ed77c0528ce2242d2443c581f713c4117696f45b"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.interface-change",
+          "memberNodeIds": [
+            "capability.runtime-harness.interface-change",
+            "component.interface-change.primary"
+          ],
+          "semanticFingerprint": "sha256:d59fa260b4de6dd0bc211676b6509ece4fe2e34ba9aad9f8f7aca8341c71886b",
+          "flowProofFingerprint": "sha256:2d1b077074562b052287f63df025354241f64d45b47f1fd9f4156480f0dffea5",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:b631e6f3138e80d70078c239a35c872653ea7917451b0dee1638a7b6384e1fa2",
+            "entrypoints": "sha256:ca7cd9a43fe64f5e40713aa7df4f19bb0ce77ee49a06f79f967c4f0abca52296",
+            "interfaces": "sha256:10e5637de9a33e3fc0e248c7dde4e7538ee26db0413ae925157737fcc559e99c",
+            "lifecycle": "sha256:17e533e5ba4ee4c39be9f8bd3e65f2f4ddb3855718dca8c9e598a96d4f40c30d",
+            "names": "sha256:ff3d26b116ef5a190185d4a5b17ca2eff910b27aa77086f2af77899893eb954f",
+            "ownership": "sha256:f6ceba549772d2c107cac5657fd8c6e06bfc2ff25c7ea69771cab9b0d1f4dd85",
+            "placement": "sha256:996d2781d0131927caed761c88ede55008dcc411379fcc34c50d7caa2fcd5915",
+            "relations": "sha256:6d31882239d5fe0942710b979c7a2fad0c543a8779c6cb33b59cc947062c108e",
+            "responsibilities": "sha256:4907cdc7ee0ee52dfd192856c2e7d4993a9670b26dc7c2360883ffd0d9431b6f",
+            "riskBoundaries": "sha256:761e4f2796684259efa5d128a2a485489fd7d9a5452b45ce3541beffc337d131"
+          }
+        },
+        {
           "capabilityId": "capability.runtime-harness.mcp-sidecar",
           "memberNodeIds": [
             "capability.runtime-harness.mcp-sidecar",
             "component.mcp-sidecar.primary"
           ],
-          "semanticFingerprint": "sha256:fc957305889f922452cd0993f785035d0b1304e14b4fded6a357d3b651085bb3",
-          "flowProofFingerprint": "sha256:5bdbffa50bc1fc7565f98f4de5aa28c22b43634152464b18378a997b45a0380d",
+          "semanticFingerprint": "sha256:fb2da5f86ec67ab08a86f8e6e58753a233540216762c2cf4ae00701e9bdad1d1",
+          "flowProofFingerprint": "sha256:7185ec452448a7ca7032a83eb7f2e9faaa5283cf0f22046b7f2cc110b6eec2b6",
           "proofStatus": {
             "p1": "proven",
             "p2": "proven"
           },
           "facets": {
             "constraints": "sha256:4107ba282d518a7064930ef21c8eeb81f12f6c91957a13f0774c60ace0348ca8",
-            "entrypoints": "sha256:6c03bdd374fded12084de0bc1088b7b58d52b32228785d6e7ab4c7b775ad01ca",
+            "entrypoints": "sha256:5548cc77ee0d8e88b0bc33346a0d8e69cfbc9a891239c34bcc1f1a00b1d2b2c8",
             "interfaces": "sha256:fa929d3e8ef3be2e04151c6c16a5b527fa2f3e875d334a42844a42c54c78ad5f",
             "lifecycle": "sha256:131ac60058f13dbaf6257d95fbc29da62a7f4278ca35ad22c7ed04679347d2d2",
             "names": "sha256:eeec01c663edb4650d8eb44c93f6a6cc5a51260e563c884176710e691ba5fa58",
             "ownership": "sha256:08ad0e3f8e3c1921923d4aca3966c19b586849dba40f233af199eb1a6dae200f",
             "placement": "sha256:171aec0752131da5ed2922b581614975990c32f262c451ba35083a3eddf074fe",
-            "relations": "sha256:94bbe39b911f9331a82302d647a4e45de056ed0899b512f3aa5801116a202ebb",
-            "responsibilities": "sha256:c2621296418671e7456ecc4d8226dbd7a6de18a4e7ffe04c0f01f40e766f8785",
+            "relations": "sha256:0b669f32aa268b329eb44986b9e3833df93e4f0b4e4b0bd29a4574bd0e8aae92",
+            "responsibilities": "sha256:23730074096da19a63b919da1404d0928daaf483d466eee2d1d448174ab9a8e4",
             "riskBoundaries": "sha256:f0b032790bb094b35c1d372dbe8e9b91b6eebe1a7479338f6a289cb5946b4b18"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.refactor-program",
+          "memberNodeIds": [
+            "capability.runtime-harness.refactor-program",
+            "component.refactor-program.archctx-provider",
+            "component.refactor-program.lifecycle"
+          ],
+          "semanticFingerprint": "sha256:75a5d8c4f5d0da79c6326493d218fcef0b3562aa9a875e789bf7e4a6b7ef1c57",
+          "flowProofFingerprint": "sha256:0454448310292e7342d0d9dc5d4aa48a20a0b9aef6fd306f3527abd4586c2c72",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:3c8fc60f22df931336a115a78201e40e572a3b7b84ef8a2559fc543e98ea030f",
+            "entrypoints": "sha256:944a46e691b8dfff496d88ac7c7733779c47aa83ce6c43e27c798596cefc5136",
+            "interfaces": "sha256:2d3c2821ad8a879e18a0f0ca26438a4a1fd90606214c9e18e897fcea456802cd",
+            "lifecycle": "sha256:0a66c6e3591854aed9c1d106b4c869d1783554b545e5cff04795888f408ba381",
+            "names": "sha256:31ea74f2f59248f3ef9fe214394ca7cd9bdebd6b31d94c63324380f4679042fc",
+            "ownership": "sha256:9007133a450e7d1d0ae33c68bcf8856543a86d7d6ae5680153020b61fa902f83",
+            "placement": "sha256:e2ac39735798bddf41f0f126e5cfb992f03ca3baf15223527c3555ce34950f31",
+            "relations": "sha256:2b727950ec34d7624899809247b8fa9f7fbc445d878fbea3558fea5dd7747df8",
+            "responsibilities": "sha256:88871453ad94c35c68ef3ac918279fc2194d1a838bb3237552492f5837bbb5ff",
+            "riskBoundaries": "sha256:8d862caf4f6f5b53520d574819d1ba91f571943528d4fb144902da310dab052f"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.verified-context",
+          "memberNodeIds": [
+            "capability.runtime-harness.verified-context",
+            "component.verified-context.primary"
+          ],
+          "semanticFingerprint": "sha256:a923041b82f0d78c73fbccbd1c873786008ff7fea576e6ea0020c113d28d85f4",
+          "flowProofFingerprint": "sha256:80fdd702935f7822ac960b825fe503dae6e2609176f7f945ffaaa7dbf69b63c3",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:f9ec3f5f7feb6bc8c17723aa883ad9865e08ec9232cb6e214c1cc2794b8944d1",
+            "entrypoints": "sha256:58820e5e0db8465a6daa13b6e98335487f1178ba1b7c5074be3dc70de8a59804",
+            "interfaces": "sha256:ebc30f19e2718f9fb55745d1f82fbf1bf353150cc3a21feb4668bc39db891934",
+            "lifecycle": "sha256:8e051f594fe9bc8a2dcce34c226d7d88192486bc7f26cceb8be0e52567cd711f",
+            "names": "sha256:b0cafe095ab5f368f78128755adeef600675aa4e514dbe2747b8fc5ef5736872",
+            "ownership": "sha256:83069269588ffbf953d7825d499908feaf0a2e1170b827ed023e8e435ef1ce58",
+            "placement": "sha256:bee24da0df7d0e4fa53947c057e991b22614cb44806f4cfc5c40c0e1748d1e6f",
+            "relations": "sha256:b73c8b2d5b777bbe39c8f7f0082f4cf4c5b818084d42beca5d33b0abf6d4edd9",
+            "responsibilities": "sha256:dc63362e5fda9d7909c92974408bf3ae250170a583d5e7f63b97c43ce3bfcfb2",
+            "riskBoundaries": "sha256:e998e371793f8dd43a4f2f83a04ef120dc80c0b20ed3bd374a2a8dee09f83c9b"
+          }
+        },
+        {
+          "capabilityId": "capability.runtime-harness.work-demand",
+          "memberNodeIds": [
+            "capability.runtime-harness.work-demand",
+            "component.work-demand.primary"
+          ],
+          "semanticFingerprint": "sha256:ac69be2ca07d5ce5c56936e970635ae14cee7df744fce4c75fb6ff9199075ce0",
+          "flowProofFingerprint": "sha256:0eb531a66fe993b838196ffe8b335ea5d9b8aa5e00594dcd4ce0d0b1a0c51348",
+          "proofStatus": {
+            "p1": "proven",
+            "p2": "proven"
+          },
+          "facets": {
+            "constraints": "sha256:34e91d4133994097eb03d651f5de351deb00c1f2827a2e7d570fa3d340a50a50",
+            "entrypoints": "sha256:ce5970dc280ed526a537009c7dd26ee194ecf1bc9bbb587569e9691cac0bff4b",
+            "interfaces": "sha256:5be2b46edb9354e99bab8ced4406d7a1799da5b992d936df3e9a96d74ca03415",
+            "lifecycle": "sha256:d6e54a8e76dada664c3020ac26622f22d9a1209ddb674fa65de3a54da814c2e1",
+            "names": "sha256:27d82609fac8ae24c98de7fe189cf6a3d07cc8d12d7e5d98bac6416db44b7e0a",
+            "ownership": "sha256:3962bac3a0af2feb98c4df260408b09e11a8b9bea11dfa5c5b2e0f0191db0f69",
+            "placement": "sha256:05a15c5a152c9dc0ffaf9109a8b9fff4116570f43c3fc293dea4cf62d572ee0a",
+            "relations": "sha256:2444007f838999801c2e8a62bc4ab0937467b91d5a03c96951a80dc69ff55006",
+            "responsibilities": "sha256:3fa5d3d23ce2f07020410d98b7895cb50eb4d271493f373c2e7fb2cca62b1f2a",
+            "riskBoundaries": "sha256:ddea914d7fde4cbd18315cc7f45647ca47b43419037cb2b116f8869c095803ef"
           }
         },
         {
@@ -257,7 +659,7 @@
             "capability.workflow-engine.contract-assets",
             "component.contract-assets.primary"
           ],
-          "semanticFingerprint": "sha256:b7dc5aae64333eb9380da5053300eda55013615d2527c0ab18c2fd678bde38e5",
+          "semanticFingerprint": "sha256:ca628cfe2db2b47e1b9f160e7169b0d033a39570831d7a3c4f3c5705dfa779dc",
           "flowProofFingerprint": "sha256:7aff700fff069cba9cfe751b7043a5659ec51c3cd57ca37c5bfae0302bb36ca5",
           "proofStatus": {
             "p1": "proven",
@@ -269,7 +671,7 @@
             "interfaces": "sha256:ed74f47a1470eda0cf5d08f723f3e74a64982905408576a22644186ab21f1cf0",
             "lifecycle": "sha256:bf3c4d394ff9ff932058b430624c78c6c9829facec43ec4c07d9927073f00849",
             "names": "sha256:e31899d9e186d148454e81c4e8bdbcd2b101881960ca4d20ee6bf07602fa91e6",
-            "ownership": "sha256:d732a82e99bba8f7a09d6b1b8e15484b333b3ec2aac05660cd463e2831683a0d",
+            "ownership": "sha256:8f99d6d53df194a60c2c01f1803c080f35997bded1b948e75bf99959b6aede7e",
             "placement": "sha256:671d5cc250bbd86f61953e7123805ce5cd5ef63870883f353fdc7c8fdd61c436",
             "relations": "sha256:5ea345c271e1ea605cdcbe01a74824fb4a94caf5a0a5eda3b3416e2ad09880d5",
             "responsibilities": "sha256:3a83d2b5a627791cb1b9fc903de926b872d674d1159a0691f8e72afd6b881ea7",
@@ -302,20 +704,20 @@
           }
         }
       ],
-      "semanticFingerprint": "sha256:0de8074b26088dc5530e16dc7ca6bbb0d18b399a09d60a7377c7c49c16416d19",
-      "flowProofFingerprint": "sha256:f61c06c8566ec4ff22ec096ee22c06e91a046ceefa8fcd2f1d9faf436763a457"
+      "semanticFingerprint": "sha256:a8b2d5a9d9e8d021cc53a72366dcb297a987c5d1e681412467da07f96628fd19",
+      "flowProofFingerprint": "sha256:938dadfc988b732b6a67413ece104c062bb257ffd9f67caaf7db04dbc957b983"
     },
     "digests": {
-      "modelDigest": "sha256:e7e1a02e1fb8c6e0732999db19c5ab1541d8529ffb270b2be1eb96af579fa4cb",
-      "sourceTreeDigest": "sha256:8b6f26a73485c54d703b4cf8b5123a5c5360fe3cdb879fd4277af0a3cc9fc433",
-      "flowProofDigest": "sha256:f61c06c8566ec4ff22ec096ee22c06e91a046ceefa8fcd2f1d9faf436763a457",
-      "projectionDigest": "sha256:7a73eb549e24e0f599359ebcef879e7b148721a577a9453e071a150e285206b7"
+      "modelDigest": "sha256:a11afbf16edf9e822bf02222d331beb8c050ef0b659ae605c23183193b10bbd5",
+      "sourceTreeDigest": "sha256:046ef49cc0a2bc1d156bf8119246ae55c7fefb342d1bdc60fc810896a4257f13",
+      "flowProofDigest": "sha256:938dadfc988b732b6a67413ece104c062bb257ffd9f67caaf7db04dbc957b983",
+      "projectionDigest": "sha256:a825ade60a98557be07aa1e9fe75bda46c19e43508e65228b75a00a4007ecf00"
     }
   },
-  "receiptDigest": "sha256:361ef72c13c41ceb038dd769ca04bccb48f5110e401c29503d55ecdb47cee76d",
+  "receiptDigest": "sha256:faac90ebbde568e9e6c723ec4afe704207ba7021bf32f9ca1de82162ed552780",
   "refreshSignalIds": [],
-  "targetCount": 17,
-  "fileCount": 17,
+  "targetCount": 33,
+  "fileCount": 33,
   "targets": [
     {
       "targetId": "projection_target.architecture.index",
@@ -325,10 +727,10 @@
       },
       "path": "docs/architecture/index.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:dfeee72dd6b65c11c5410cf52261499a156ed11386d32cb5121711b63684470d",
-      "outputDigest": "sha256:b06c6e04a526077cd1c45aed4cac83fbbab0e57227b7d8a2a0d06329ef2cd392"
+      "sourceDigest": "sha256:b859983f97115344cb2d922ace1e8499d648eeca197ec66cf58b3775378e135d",
+      "outputDigest": "sha256:2aaf8d426181a5d8bc11b51d018598e6151607326bc5d67af8db8da84de734eb"
     },
     {
       "targetId": "projection_target.entity.capability-public-surface-action-commands",
@@ -340,14 +742,14 @@
       },
       "path": "docs/architecture/modules/public-surface/action-commands.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41",
-      "outputDigest": "sha256:69e0cf2353ee72153aba1dc5d7be5d9aa662b4bfa1481410dcf81c6ff8e37dfc",
+      "sourceDigest": "sha256:6c1d5494a41634fd28f9685b325b1d79d2bb95fac249f5c57dc5519e35c5c307",
+      "outputDigest": "sha256:5c61debb2a48e091cde2de1f88b22066a8e4fb7b2e6fc18e4e98fbc2e1f0aa56",
       "verifiedAgainst": {
-        "branch": "main",
-        "commit": "1495a1d6d3b60b8b442061a420f443432e140791",
-        "committedAt": "2026-08-12T21:59:27+08:00"
+        "branch": "codex/verification-execution-lifecycle",
+        "commit": "3356ddcf6fc6bebf5db07410042efb7c26df4b01",
+        "committedAt": "2026-09-06T16:09:35+08:00"
       }
     },
     {
@@ -360,14 +762,14 @@
       },
       "path": "docs/architecture/modules/public-surface/adoption.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41",
-      "outputDigest": "sha256:3420e72e468102a33802963fe2581a400dc1e29499d9350677f2567afd7f64f7",
+      "sourceDigest": "sha256:70f7c537b3943cfc93d02e71670d31413d6676835a0e7d7d51b9ba81083b9397",
+      "outputDigest": "sha256:8cdc5490865571f4fc7682b1fcd6f5a75cd436fb08df42f8c5c18da2e8794afe",
       "verifiedAgainst": {
-        "branch": "main",
-        "commit": "1495a1d6d3b60b8b442061a420f443432e140791",
-        "committedAt": "2026-08-12T21:59:27+08:00"
+        "branch": "codex/brc1415-adopted-continuation",
+        "commit": "33f2f1bc110056337e5dbd5414f7ca8dee69f402",
+        "committedAt": "2026-09-09T04:43:46+08:00"
       }
     },
     {
@@ -380,14 +782,234 @@
       },
       "path": "docs/architecture/modules/public-surface/root-router.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41",
-      "outputDigest": "sha256:c5cb0b2ca29531b67cadba6d98c2ddf588176a4d4c48cf7cb2b231713d12fee3",
+      "sourceDigest": "sha256:5c192000c887502bac2e9787d6ffb992e49a57f955b4e7b4655b7c01d18c6dd0",
+      "outputDigest": "sha256:c831589b4ccffcbd58d0502102abfbecc01025326f7fa0f0e9ba60fc3dbd0cb4",
       "verifiedAgainst": {
-        "branch": "main",
-        "commit": "1495a1d6d3b60b8b442061a420f443432e140791",
-        "committedAt": "2026-08-12T21:59:27+08:00"
+        "branch": "codex/campaign-worker-record-scope",
+        "commit": "e2737265b6a50a79201aa37ac558bf18808c1a1a",
+        "committedAt": "2026-09-10T03:05:04+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-agent-runtime-effects",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.agent-runtime-effects",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/agent-runtime-effects.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:db8da263beff4735f851a015c0616de22f34fe1698e4ea62047644dbed269619",
+      "outputDigest": "sha256:4d5538edaea6cbd11f8bb81dfd525c116a0c74264f5adc9c1c10a7cb79afecfb",
+      "verifiedAgainst": {
+        "branch": "codex/brc1415-adopted-continuation",
+        "commit": "33f2f1bc110056337e5dbd5414f7ca8dee69f402",
+        "committedAt": "2026-09-09T04:43:46+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-automation-budget",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.automation-budget",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/automation-budget.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:543f7c79d43d479d08639c5792896807e7702751ffdaec1d57c4255d53223da4",
+      "outputDigest": "sha256:4e22f748955143711e4ba6b02638a978e6a785040dd1cd5efc1747cdc79d1193",
+      "verifiedAgainst": {
+        "branch": "codex/campaign-reconciliation-recovery",
+        "commit": "527dd118124743a843ac193b84bde1b6658c169b",
+        "committedAt": "2026-09-10T16:45:08+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-bound-task-freezes",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.bound-task-freezes",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/bound-task-freezes.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:50bf95c298d1eb462bd2b05a273f7a34ea8be649f18ea2562b25433e1462eca5",
+      "outputDigest": "sha256:557ff7976d47c8f901ab758192325809b7d4808fa7cb991eadba32878cb0e89e",
+      "verifiedAgainst": {
+        "branch": "codex/c6-collaborative-work-exchange-context-packet",
+        "commit": "d672e1f20e928107c53f57fe3e621f0613735366",
+        "committedAt": "2026-08-30T10:52:50+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-collaboration",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.collaboration",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/collaboration.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:973d35624db31c3aa05e5e80286f0dca2353df48cd031d45264fbf478dbce240",
+      "outputDigest": "sha256:a0c4f25001b2f5308a3ceb0fea7a4777ac5062c38a161aa07f61f34128ccae86",
+      "verifiedAgainst": {
+        "branch": "codex/brc-issues-342-351",
+        "commit": "0058350c21fa147b58d80e255dd0e0878386b6da",
+        "committedAt": "2026-09-08T03:34:45+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-delegated-runs",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.delegated-runs",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/delegated-runs.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:9a17b11dee07f93c3cda04f994717a40f5330066c4dae95e91d4c69cd53cc712",
+      "outputDigest": "sha256:76b4aff3968ba4aa46f6981e195b859b576308b02b1a4cc66d5647caca734fc9",
+      "verifiedAgainst": {
+        "branch": "codex/brc5-heartbeat-observation-slot-reconciliation",
+        "commit": "fbfde48302599be2d609885b7c067ff5b83cb5c8",
+        "committedAt": "2026-09-05T15:06:07+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-development-campaign",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.development-campaign",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/development-campaign.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:e821c9e6e681ff519632fc2b3f385e0d78005fd6d46cf098f0657cf7fb6ae9cf",
+      "outputDigest": "sha256:564ee2aced00ea97c72f8993668751ad2eba769dca74ae0575a2ddfe67abbc40",
+      "verifiedAgainst": {
+        "branch": "codex/campaign-reconciliation-recovery",
+        "commit": "527dd118124743a843ac193b84bde1b6658c169b",
+        "committedAt": "2026-09-10T16:45:08+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-engineer-bindings",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.engineer-bindings",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/engineer-bindings.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:cdf567032caddaaed39c7205a7243dbf1f35ced90d92af584cfececc9ffd3a4d",
+      "outputDigest": "sha256:5b8d7ca0d2bfe132fa3c68512637adcf53e5864f762cb12553fbecccf7d49b5b",
+      "verifiedAgainst": {
+        "branch": "codex/brc1415-adopted-continuation",
+        "commit": "33f2f1bc110056337e5dbd5414f7ca8dee69f402",
+        "committedAt": "2026-09-09T04:43:46+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-engineer-messages",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.engineer-messages",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/engineer-messages.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:4f24f8a7d8aba2a3b7c222c3032065930c98bf3329ecb25885410df83880d9dc",
+      "outputDigest": "sha256:bfa509d1f06a5f75632a5f8de0741ebbf35aedc27cdce6387211ae4f6aac090c",
+      "verifiedAgainst": {
+        "branch": "codex/archived-acceptance-cli-finalization",
+        "commit": "1bdff1e4a8025206146d0acaa4524f300ec0310b",
+        "committedAt": "2026-08-31T10:58:41+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-engineer-scheduling",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.engineer-scheduling",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/engineer-scheduling.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:70042f55f0ec27c526fc3a80fae84a590cff8f3cf206f39dbab61af7e28654ae",
+      "outputDigest": "sha256:4508e9d7b733fe992773c9d95d5aa9a6049aa207946ad541b9b64e7084ce8392",
+      "verifiedAgainst": {
+        "branch": "codex/brc9-attempt-prerequisite",
+        "commit": "1e2072bc65514c5cc68b0eb76da6de7ed2ee49ab",
+        "committedAt": "2026-09-06T18:26:34+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-engineering-overlay",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.engineering-overlay",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/engineering-overlay.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:f9ab4635d72a1716c09c6070af18e58da67bdbb87773350d6986680dfaf7988e",
+      "outputDigest": "sha256:9bae1e0d6199be40d080e00c13cb97f3ef8cb4d1068a029af5dc7c58716edd66",
+      "verifiedAgainst": {
+        "branch": "codex/refactor-provider-readback",
+        "commit": "e4892cf0bdcc33745ab2a6f0af0a154229da7444",
+        "committedAt": "2026-09-04T07:38:02+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-external-source-intake",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.external-source-intake",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/external-source-intake.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:9110cbd9bf052fe6fbbe39626d2fb63aa2897853f064c4039407bb1973974cc3",
+      "outputDigest": "sha256:9583e5410a03e9fe02eb9d7b8acfedc4acd6cc6dae751b94c0f04a93d7daa8b7",
+      "verifiedAgainst": {
+        "branch": "codex/brc1415-active-acceptance",
+        "commit": "35e6e8e0dc11df5290dbefaf32a424dac9143af2",
+        "committedAt": "2026-09-09T00:44:05+08:00"
       }
     },
     {
@@ -400,14 +1022,14 @@
       },
       "path": "docs/architecture/modules/runtime-harness/global-runtime-reconciliation.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41",
-      "outputDigest": "sha256:03e585accd98063fab131c2df6eb96132fe58826930c1f5b5a241c67f7e3208c",
+      "sourceDigest": "sha256:183d7a9ef531bb200e573b337911d503eac0d86741a87b02d5d0b60896930782",
+      "outputDigest": "sha256:2e93a1f59017a07da7860cf0073e6911d9f75032b5af8be503c56087f394466a",
       "verifiedAgainst": {
-        "branch": "main",
-        "commit": "c30f08fcf306b15911f300288bd10cbff03d5377",
-        "committedAt": "2026-08-12T23:03:40+08:00"
+        "branch": "codex/retention-release-0-19-0",
+        "commit": "0f347c0bb0c1934e2cd8772568cf144a65e344d5",
+        "committedAt": "2026-09-10T18:47:38+08:00"
       }
     },
     {
@@ -420,14 +1042,54 @@
       },
       "path": "docs/architecture/modules/runtime-harness/hook-adapters.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41",
-      "outputDigest": "sha256:2dde6bdcf15b642140f6aeaa8a8b9c3a17557b14ec46b6d9d933d23f000410e9",
+      "sourceDigest": "sha256:132d8cab10d94dc2d5add313cea2a2cfa120b63b2d180ff084f4d9a0fae044bf",
+      "outputDigest": "sha256:49427c6729ca7883ed1d9f6f3b23ac6c4ed307748a6344c0e24a4bed00b701ce",
       "verifiedAgainst": {
-        "branch": "main",
-        "commit": "1495a1d6d3b60b8b442061a420f443432e140791",
-        "committedAt": "2026-08-12T21:59:27+08:00"
+        "branch": "codex/architecture-drift-recovery",
+        "commit": "822309dbd6fd0ed286cd7d0b297e1b26d991b6d0",
+        "committedAt": "2026-09-09T01:54:22+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-integration-acceptance",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.integration-acceptance",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/integration-acceptance.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:fbd133786d816af6cecd0d34cd259a5d6bec58bb3ac958b1afef89cf549feee3",
+      "outputDigest": "sha256:48452c6ff7afeafe086d9268ee898c8f9a6503573bf13f4c384066ce4abe2fea",
+      "verifiedAgainst": {
+        "branch": "codex/brc3-development-campaign-core",
+        "commit": "8a2e5f444c2da7e147295fd3f59e079179aed2d2",
+        "committedAt": "2026-09-05T01:15:13+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-interface-change",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.interface-change",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/interface-change.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:75efb06638143eb3cefbe43209117391ab0cba8a352cf85bdbd760984c3770c1",
+      "outputDigest": "sha256:60a77edc9d80143bba47f685fc5bbd20b4c096e2b732fe6401669c52f50dba3a",
+      "verifiedAgainst": {
+        "branch": "codex/me4b-interface-change",
+        "commit": "e57df6fc25049ae580272da0ed1390c83de6cf78",
+        "committedAt": "2026-08-28T03:14:35+08:00"
       }
     },
     {
@@ -440,14 +1102,74 @@
       },
       "path": "docs/architecture/modules/runtime-harness/mcp-sidecar.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41",
-      "outputDigest": "sha256:400b46d8b2baf481c8d333adc3746d268c777030035a19c2827651e413a7f2fa",
+      "sourceDigest": "sha256:98aca01f5972a801ccbed7b23063276724226233393bfd9d69dda2743eb9a26f",
+      "outputDigest": "sha256:f77e33f1153051b1b06a584faf6bd25a8581694d6b6148650dc66c9160b0cf2c",
       "verifiedAgainst": {
-        "branch": "main",
-        "commit": "1495a1d6d3b60b8b442061a420f443432e140791",
-        "committedAt": "2026-08-12T21:59:27+08:00"
+        "branch": "codex/campaign-acceptance-preflight",
+        "commit": "0da73e0f550d1a040c6509b12fccb1378807d703",
+        "committedAt": "2026-09-10T04:21:51+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-refactor-program",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.refactor-program",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/refactor-program.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:e62d682d1acc2005b21ec95c10b7d564f58d7974b9190f8bd2352ae2f89574b9",
+      "outputDigest": "sha256:281710e8acc1b2e7fa7a7e0521833566e98430f128f36147674832cef046126d",
+      "verifiedAgainst": {
+        "branch": "codex/retention-release-0-19-0",
+        "commit": "0f347c0bb0c1934e2cd8772568cf144a65e344d5",
+        "committedAt": "2026-09-10T18:47:38+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-verified-context",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.verified-context",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/verified-context.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:232fb84e3e51720488a93ca7ca6fbbbe81ce15ac07e031faf4a85f6dcc780e7e",
+      "outputDigest": "sha256:669d3a41e2c42efc35d361452189af9c49a0d680210775c55ba10d9d1cfc57ad",
+      "verifiedAgainst": {
+        "branch": "codex/me2-acceptance-followup",
+        "commit": "1544a1849018b27e46bb2a0e5e9908fad265a95e",
+        "committedAt": "2026-08-28T01:59:46+08:00"
+      }
+    },
+    {
+      "targetId": "projection_target.entity.capability-runtime-harness-work-demand",
+      "type": "entity-summary",
+      "scope": {
+        "kind": "entity",
+        "id": "capability.runtime-harness.work-demand",
+        "entityKind": "capability"
+      },
+      "path": "docs/architecture/modules/runtime-harness/work-demand.md",
+      "ownership": "mixed",
+      "rendererVersion": "archcontext.docs-renderer/v4",
+      "format": "markdown",
+      "sourceDigest": "sha256:192e17844f0c2df68cffa64821e48ec677a357bd1989480ef3954a76f687c4ea",
+      "outputDigest": "sha256:ff7b43266866c78e6b4e488acd21a1484ce086bdace242e3415ab5bf39de2726",
+      "verifiedAgainst": {
+        "branch": "codex/brc5-heartbeat-observation-slot-reconciliation",
+        "commit": "fbfde48302599be2d609885b7c067ff5b83cb5c8",
+        "committedAt": "2026-09-05T15:06:07+08:00"
       }
     },
     {
@@ -460,14 +1182,14 @@
       },
       "path": "docs/architecture/modules/runtime-mcp/general-repo-access.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41",
-      "outputDigest": "sha256:a710d9acbc0dee9f94a37afd55cb14325dc04df8b8ee5e86ea0b969438963196",
+      "sourceDigest": "sha256:42b8f1e808805a06b5f8a604796875cd15075125ad6aae37781b919fc795e9e0",
+      "outputDigest": "sha256:88c96e6dda01a1222e85a989f6049b5b6b0018f769029b42e4f6029f49e66d72",
       "verifiedAgainst": {
-        "branch": "main",
-        "commit": "1495a1d6d3b60b8b442061a420f443432e140791",
-        "committedAt": "2026-08-12T21:59:27+08:00"
+        "branch": "codex/external-source-intake-p0",
+        "commit": "127bfbb7c2e5f946aa2e9f4567193de743f21bc3",
+        "committedAt": "2026-09-01T00:48:39+08:00"
       }
     },
     {
@@ -480,14 +1202,14 @@
       },
       "path": "docs/architecture/modules/verification/codegraph-readiness.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41",
-      "outputDigest": "sha256:1af958a8b6ada36932d9ea94067c8dfbef6aa3ed3ba2f0342f354615c5970609",
+      "sourceDigest": "sha256:d7227e9a523c174482329de071e53fca93c9d0936dbdcc5be70065a006d7783f",
+      "outputDigest": "sha256:385eae056b2e6fa98d5d9d85d6acd36191d5a705c20f9dcfd0bb5d5d2ad2e8f1",
       "verifiedAgainst": {
-        "branch": "main",
-        "commit": "1495a1d6d3b60b8b442061a420f443432e140791",
-        "committedAt": "2026-08-12T21:59:27+08:00"
+        "branch": "codex/user-config-uninstall",
+        "commit": "79527ec512c343450c00c6a3a1d8abd80496aea2",
+        "committedAt": "2026-09-08T23:13:52+08:00"
       }
     },
     {
@@ -500,14 +1222,14 @@
       },
       "path": "docs/architecture/modules/verification/evals-checks.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41",
-      "outputDigest": "sha256:7b0fbb9eca77918bc2cdf77cfa9ca05b01cb19bb6de8cce2925869e8f4b15e8a",
+      "sourceDigest": "sha256:463d4ebee4c32feaf8e98dca3f6862530d876ff145ab4a6c0d1e83b9acd6d4b7",
+      "outputDigest": "sha256:966f7438cd7b385cb411a2ef8c2de18c0b1e71eb067941c97375a4b284a873b9",
       "verifiedAgainst": {
-        "branch": "main",
-        "commit": "c30f08fcf306b15911f300288bd10cbff03d5377",
-        "committedAt": "2026-08-12T23:03:40+08:00"
+        "branch": "codex/retention-release-0-19-0",
+        "commit": "4ce4d6405b06202fb2184dcbd7056dfc7710a5fd",
+        "committedAt": "2026-09-10T22:23:35+08:00"
       }
     },
     {
@@ -520,14 +1242,14 @@
       },
       "path": "docs/architecture/modules/workflow-engine/contract-assets.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41",
-      "outputDigest": "sha256:4ed97fc0617f36e832189a37a20f4ee0ef42f852f710578ba512170012b2371e",
+      "sourceDigest": "sha256:6f1d8c7839dc83c16c80bee79ee8c6b3b3131e523928d2d0e957180fd0541c02",
+      "outputDigest": "sha256:beaaa466d51cbd8f929fd6acd6645c6f5136cccf539f09b63a273e5ab38519fa",
       "verifiedAgainst": {
-        "branch": "main",
-        "commit": "c30f08fcf306b15911f300288bd10cbff03d5377",
-        "committedAt": "2026-08-12T23:03:40+08:00"
+        "branch": "codex/retention-release-0-19-0",
+        "commit": "18c2ca1c866e8e53b3253862c9b7c11f1b9d7841",
+        "committedAt": "2026-09-10T19:01:11+08:00"
       }
     },
     {
@@ -540,14 +1262,14 @@
       },
       "path": "docs/architecture/modules/workflow-engine/inspection-migration.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41",
-      "outputDigest": "sha256:fb0b69b71f101f4071866e6458f1c471e66ee79ba0f4bde3d0ff2efae76b4a4b",
+      "sourceDigest": "sha256:654f7236e2e51fd19e64129d48fe05f974f3172f6f69c671a78f31ba896198ae",
+      "outputDigest": "sha256:a148fc8868cf1e59ce9fe25484555aff2c06e611ed559c709c045b9cde19ab0a",
       "verifiedAgainst": {
-        "branch": "main",
-        "commit": "1495a1d6d3b60b8b442061a420f443432e140791",
-        "committedAt": "2026-08-12T21:59:27+08:00"
+        "branch": "codex/retention-release-0-19-0",
+        "commit": "18c2ca1c866e8e53b3253862c9b7c11f1b9d7841",
+        "committedAt": "2026-09-10T19:01:11+08:00"
       }
     },
     {
@@ -558,9 +1280,9 @@
       },
       "path": "docs/architecture/decisions/index.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:dfeee72dd6b65c11c5410cf52261499a156ed11386d32cb5121711b63684470d",
+      "sourceDigest": "sha256:b859983f97115344cb2d922ace1e8499d648eeca197ec66cf58b3775378e135d",
       "outputDigest": "sha256:34055a2aa0fbe868ce5dea7df5354de5da63830e5972ff683d9647f97374ec26"
     },
     {
@@ -571,9 +1293,9 @@
       },
       "path": "docs/architecture/changelog.md",
       "ownership": "mixed",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "markdown",
-      "sourceDigest": "sha256:dfeee72dd6b65c11c5410cf52261499a156ed11386d32cb5121711b63684470d",
+      "sourceDigest": "sha256:b859983f97115344cb2d922ace1e8499d648eeca197ec66cf58b3775378e135d",
       "outputDigest": "sha256:1f723aeb74466aae7d607eeab8c438a830c36f49a48e6622f868a8151afabea6"
     },
     {
@@ -585,10 +1307,10 @@
       },
       "path": "docs/architecture/diagrams/architecture.mmd",
       "ownership": "generated",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "mermaid",
-      "sourceDigest": "sha256:dfeee72dd6b65c11c5410cf52261499a156ed11386d32cb5121711b63684470d",
-      "outputDigest": "sha256:b1ee3ddc27e5448bbe83462cf54a235b213cb4a46091224883b40b988f1c72f3"
+      "sourceDigest": "sha256:b859983f97115344cb2d922ace1e8499d648eeca197ec66cf58b3775378e135d",
+      "outputDigest": "sha256:24e6f9db6ff79a6af1fafac176732944ae07cd8b887e14270b1a7cf30a6bd470"
     },
     {
       "targetId": "projection_target.diagram.structurizr",
@@ -599,10 +1321,10 @@
       },
       "path": "docs/architecture/diagrams/architecture.structurizr.json",
       "ownership": "generated",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "structurizr-json",
-      "sourceDigest": "sha256:dfeee72dd6b65c11c5410cf52261499a156ed11386d32cb5121711b63684470d",
-      "outputDigest": "sha256:2a7471ae324271ace7dd0a9380b4ddb2b97a91cbd83c996501b47cf897ba5d05"
+      "sourceDigest": "sha256:b859983f97115344cb2d922ace1e8499d648eeca197ec66cf58b3775378e135d",
+      "outputDigest": "sha256:7337ddd80453b2a526b722f3addfc9ed16351a1a65483117ea5f42e7866357b0"
     },
     {
       "targetId": "projection_target.diagram.likec4",
@@ -613,10 +1335,10 @@
       },
       "path": "docs/architecture/diagrams/architecture.likec4",
       "ownership": "generated",
-      "rendererVersion": "archcontext.docs-renderer/v2",
+      "rendererVersion": "archcontext.docs-renderer/v4",
       "format": "likec4",
-      "sourceDigest": "sha256:dfeee72dd6b65c11c5410cf52261499a156ed11386d32cb5121711b63684470d",
-      "outputDigest": "sha256:196159656b7a2e9f9ba964b9b8405e9b40896efb50c8ff4e5ad4bd181437ebe0"
+      "sourceDigest": "sha256:b859983f97115344cb2d922ace1e8499d648eeca197ec66cf58b3775378e135d",
+      "outputDigest": "sha256:2a493e31de18fa3c27e43bdff58719edb6ec380c3573c5f2d20c69a4d3612d0d"
     }
   ]
 }

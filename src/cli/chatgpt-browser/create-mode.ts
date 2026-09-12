@@ -575,9 +575,9 @@ export async function runBrowserCreate(input: BrowserCreateInput): Promise<Brows
     title: input.title ?? `create ${context.targetBranch}`,
     prompt: buildCreatePrompt(input, context),
     files,
-    // Plan, Create, and Review use the same Oracle transport. The expected
-    // app is enforced by the fixed prompt and result contract, not by an
-    // Oracle CLI flag (published Oracle has no --browser-app option).
+    // Create uses the shared Oracle transport without optional app preselection.
+    // The expected app remains a prompt/result contract, not provider-attested
+    // evidence, even when the selected Oracle binary supports --browser-app.
     chatgptApp: undefined,
     provider: 'oracle',
     requireSecretScan: true,
@@ -933,8 +933,8 @@ export async function runBrowserCreateFollowup(
     requireSecretScan: input.requireSecretScan === true || Boolean(existing.meta.security?.promptSecretScan),
     providerSessionId: input.providerSessionId ?? existing.meta.providerSessionId,
     parentProviderSessionId: existing.meta.providerSessionId,
-    model: input.model ?? existing.meta.model.requested,
-    thinking: input.thinking ?? existing.meta.model.thinking,
+    model: input.model,
+    thinking: input.thinking,
     provider: 'oracle',
     chatgptUrl: input.chatgptUrl ?? existing.meta.browser.conversationUrl ?? existing.meta.browser.chatgptUrl,
     chatgptApp: undefined,

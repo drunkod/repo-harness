@@ -74,25 +74,26 @@ function writePolicy(cwd: string, mode: "off" | "advisory" | "strict") {
 }
 
 function writePendingCard(cwd: string, capabilityId = "apps-web", severity = "high") {
-  writeFileSync(
-    join(cwd, "docs/architecture/requests", `${capabilityId}.md`),
-    [
-      `# Architecture Drift Request: ${capabilityId}`,
-      "",
-      "> **Status**: Pending",
-      "> **Detected**: 2026-06-01T12:00:00+0800",
-      `> **Severity**: ${severity}`,
-      "> **Change Type**: workflow-surface",
-      "> **File**: `apps/web/src/routes/account.tsx`",
-      "> **Functional Block**: `apps/web`",
-      `> **Capability ID**: \`${capabilityId}\``,
-      "> **Matched Prefix**: `apps/web`",
-      "> **Architecture Domain**: `apps-web`",
-      "> **Architecture Capability**: `web`",
-      "> **Architecture Module**: `docs/architecture/modules/apps-web/web.md`",
-      "",
-    ].join("\n"),
-  );
+  const requestFile = `docs/architecture/requests/${capabilityId}.md`;
+  const event = {
+    ts: "2026-06-01T12:00:00+0800",
+    file_path: "apps/web/src/routes/account.tsx",
+    severity,
+    functional_block: "apps/web",
+    capability_id: capabilityId,
+    matched_prefix: "apps/web",
+    architecture_domain: "apps-web",
+    architecture_capability: "web",
+    architecture_module: "docs/architecture/modules/apps-web/web.md",
+    workstream_dir: "tasks/workstreams/apps-web/web",
+    contract_agents: "apps/web/AGENTS.md",
+    contract_claude: "apps/web/CLAUDE.md",
+    change_type: "workflow-surface",
+    request_file: requestFile,
+    spawn_recommended: false,
+    contract_sync_required: false,
+  };
+  expect(run("bun", ["scripts/architecture-event.ts", "upsert-request", "--request-file", requestFile, "--event-json", JSON.stringify(event)], cwd).status).toBe(0);
   expect(run("bash", ["scripts/architecture-queue.sh", "reindex"], cwd).status).toBe(0);
 }
 
@@ -181,6 +182,43 @@ describe("architecture sync gate", () => {
       const res = run("bash", ["scripts/check-architecture-sync.sh", "--changed-files", "changed.txt"], cwd);
       expect(res.status).toBe(1);
       expect(res.stderr).toContain("architecture request index is stale");
+    });
+  }, 30_000);
+
+  test("strict projection gate reads unresolved acceptance candidates from CLI receipt state", () => {
+    tmpRepo((cwd) => {
+      writeFileSync(
+        join(cwd, ".ai/harness/policy.json"),
+        JSON.stringify({
+          context: { capability_source: "registry" },
+          architecture: {
+            freshness_gate: "strict",
+            gate_min_severity: "medium",
+            projection_provider: "archctx",
+            projection_apply: "automatic",
+          },
+        }, null, 2) + "\n",
+      );
+      mkdirSync(join(cwd, "src/cli"), { recursive: true });
+      const statusFile = join(cwd, ".ai/harness/projection-status.json");
+      const writeStatus = (unresolvedCandidates: number, invalidArtifacts = 0) => writeFileSync(statusFile, JSON.stringify({
+        projectionProvider: { state: "ready", reason: "fixture provider ready" },
+        acceptance: { unresolvedCandidates, invalidArtifacts },
+      }));
+      writeFileSync(join(cwd, "src/cli/index.ts"), `process.stdout.write(await Bun.file(${JSON.stringify(statusFile)}).text());\n`);
+      writeChangedFiles(cwd, ["apps/web/src/routes/account.tsx"]);
+      expect(run("bash", ["scripts/architecture-queue.sh", "reindex"], cwd).status).toBe(0);
+
+      writeStatus(1);
+      const blocked = run("bash", ["scripts/check-architecture-sync.sh", "--changed-files", "changed.txt"], cwd);
+      expect(blocked.status).toBe(1);
+      expect(blocked.stdout).toContain("human_actions=1");
+      expect(blocked.stderr).toContain("strict gate failed");
+
+      writeStatus(0);
+      const resolved = run("bash", ["scripts/check-architecture-sync.sh", "--changed-files", "changed.txt"], cwd);
+      expect(resolved.status).toBe(0);
+      expect(resolved.stdout).toContain("human_actions=0");
     });
   }, 30_000);
 

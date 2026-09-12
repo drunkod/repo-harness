@@ -3,7 +3,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
-import { listHelpers, protectedChildEnv, resolveHelper, runHelper } from "../../src/cli/runtime/helper-runner";
+import { listHelpers, protectedChildEnv, resolveHelper, runHelper } from "../../src/effects/runtime/helper-runner";
+import { RUN_HELP_GROUPS, RUN_HELP_MAX_HELPERS, RUN_HELP_MAX_LINES } from "../../src/cli/commands/run";
+import { fixtureTaskId } from '../helpers/sprint-fixture';
 
 const ROOT = join(import.meta.dir, "..", "..");
 const CLI = join(ROOT, "src/cli/index.ts");
@@ -36,12 +38,13 @@ function writeActiveSprintFixture(cwd: string) {
       "# Sprint: Run Helper Root",
       "",
       "> **Status**: Approved",
+      "> **Backlog Schema**: 2",
       "",
       "## Backlog",
       "",
-      "| # | Status | Task | Mode | Acceptance | Plan |",
-      "|---|--------|------|------|------------|------|",
-      "| 1 | [ ] | root-task | inline | package run reads target repo | (pending) |",
+      "| # | ID | Status | Task | Mode | Acceptance | Plan |",
+      "|---|----|--------|------|------|------------|------|",
+      `| 1 | ${fixtureTaskId('root-task')} | [ ] | root-task | inline | package run reads target repo | (pending) |`,
       "",
     ].join("\n")
   );
@@ -274,6 +277,27 @@ describe("run command", () => {
     expect(res.stdout).toMatch(
       /check-task-workflow\s+Check workflow contract and policy compliance for the current repo/,
     );
+    expect(res.stdout).toContain("Planning & execution:");
+    expect(res.stdout.match(/cutover-closure/g)).toHaveLength(1);
+    expect(res.stdout).toContain("Verification & maintenance:");
+  }, 30_000);
+
+  test("run --help groups every real helper exactly once and stays within explicit budgets", () => {
+    const helpers = listHelpers(packageRuntimeEnv());
+    const realIds = helpers.map((helper) => helper.id).sort();
+    const groupedIds: string[] = RUN_HELP_GROUPS.flatMap((group) => group.helpers).sort();
+
+    expect(new Set(groupedIds).size).toBe(groupedIds.length);
+    expect(groupedIds).toEqual(realIds);
+    expect(helpers.length).toBeLessThanOrEqual(RUN_HELP_MAX_HELPERS);
+
+    const res = spawnSync("bun", [CLI, "run", "--help"], {
+      cwd: ROOT,
+      encoding: "utf-8",
+      env: packageRuntimeEnv(),
+    });
+    expect(res.status).toBe(0);
+    expect(res.stdout.trimEnd().split("\n").length).toBeLessThanOrEqual(RUN_HELP_MAX_LINES);
   }, 30_000);
 
   test("package sprint-backlog helper resolves the target repo root from runHelper", () => {
@@ -299,6 +323,37 @@ describe("run command", () => {
 
       expect(next.status).toBe(0);
       expect(next.stdout).toContain("task: root-task");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("package prepare-handoff binds its workflow library and recovery helper from one runtime", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "repo-harness-run-prepare-handoff-"));
+    try {
+      mkdirSync(join(tmp, ".ai/hooks/lib"), { recursive: true });
+      mkdirSync(join(tmp, "tasks"), { recursive: true });
+      writeFileSync(
+        join(tmp, ".ai/hooks/lib/workflow-state.sh"),
+        "workflow_write_handoff() { echo stale-target-workflow >&2; return 91; }\n",
+      );
+      writeFileSync(join(tmp, "tasks/todos.md"), "# Deferred Goals\n");
+      expect(spawnSync("git", ["init"], { cwd: tmp }).status).toBe(0);
+
+      const result = runHelper({
+        helper: "prepare-handoff",
+        args: ["--reason", "package-runtime"],
+        cwd: tmp,
+        env: packageRuntimeEnv(),
+        stdio: "pipe",
+      });
+
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stderr ?? "").not.toContain("stale-target-workflow");
+      expect(existsSync(join(tmp, "scripts/recovery-view-cli.ts"))).toBe(false);
+      expect(readFileSync(join(tmp, ".ai/harness/handoff/current.md"), "utf-8")).toContain(
+        "**Reason**: package-runtime",
+      );
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -385,6 +440,18 @@ describe("run command", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  test("runHelper returns a structured spawn error when helper resolution fails", () => {
+    const res = runHelper({
+      helper: "check-task-workflow",
+      env: { REPO_HARNESS_SOURCE_ROOT: "relative/source-root" },
+      stdio: "pipe",
+    });
+
+    expect(res.exitCode).toBe(1);
+    expect(res.reason).toBe("spawn-error");
+    expect(res.stderr).toContain("REPO_HARNESS_SOURCE_ROOT must be an absolute path");
   });
 
   test("bundled workstream-sync resolves bundled sibling helpers", () => {

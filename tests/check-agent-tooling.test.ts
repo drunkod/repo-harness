@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -52,6 +53,25 @@ function writeExecutable(filePath: string, content: string) {
   chmodSync(filePath, 0o755);
 }
 
+function writeOfficialCodexPluginFixture(pluginRoot: string) {
+  mkdirSync(join(pluginRoot, "scripts"), { recursive: true });
+  mkdirSync(join(pluginRoot, ".claude-plugin"), { recursive: true });
+  mkdirSync(join(pluginRoot, "schemas"), { recursive: true });
+  writeFileSync(join(pluginRoot, "scripts", "codex-companion.mjs"), "// fixture\n");
+  writeFileSync(join(pluginRoot, ".claude-plugin", "plugin.json"), JSON.stringify({
+    name: "codex",
+    version: "1.0.6",
+    author: { name: "OpenAI" },
+  }));
+  writeFileSync(join(pluginRoot, "schemas", "review-output.schema.json"), JSON.stringify({
+    required: ["verdict", "summary", "findings", "next_steps"],
+    properties: {
+      verdict: { enum: ["approve", "needs-attention"] },
+      findings: { items: { properties: { severity: { enum: ["critical", "high", "medium", "low"] } } } },
+    },
+  }));
+}
+
 function setupFakeEnvironment(prefix: string) {
   const root = mkdtempSync(join(tmpdir(), `${prefix}-`));
   const home = join(root, "home");
@@ -59,6 +79,8 @@ function setupFakeEnvironment(prefix: string) {
 
   mkdirSync(home, { recursive: true });
   mkdirSync(fakeBin, { recursive: true });
+  writeExecutable(join(fakeBin, "herdr"), "#!/bin/sh\nprintf 'herdr 0.9.0\\n'\n");
+  writeOfficialCodexPluginFixture(join(home, ".claude/plugins/cache/openai-codex/codex/1.0.6"));
   writeExecutable(
     join(fakeBin, "timeout"),
     [
@@ -67,6 +89,18 @@ function setupFakeEnvironment(prefix: string) {
       "if [[ \"${1:-}\" == --kill-after=* ]]; then shift; fi",
       "if [[ \"${1:-}\" == *s ]]; then shift; fi",
       "exec \"$@\"",
+      "",
+    ].join("\n")
+  );
+  writeExecutable(
+    join(fakeBin, "claude"),
+    [
+      "#!/bin/bash",
+      "if [[ \"$*\" == \"plugin list --json\" ]]; then",
+      `  printf '%s\\n' '${JSON.stringify([{ id: "codex@openai-codex", version: "1.0.6", enabled: true, installPath: join(home, ".claude/plugins/cache/openai-codex/codex/1.0.6") }])}'`,
+      "  exit 0",
+      "fi",
+      "exit 9",
       "",
     ].join("\n")
   );
@@ -142,22 +176,25 @@ function symlinkClaudeWazaToAgents(home: string) {
   }
 }
 
-function writeFakeBunx(fakeBin: string, logFile?: string) {
+// The Skills CLI probe resolves `skills` from PATH and runs it directly, so
+// every spawn of the script needs this stub on the stubbed PATH; otherwise the
+// probe reaches the real Skills CLI on the developer machine.
+function writeFakeSkillsCli(fakeBin: string, logFile?: string) {
   const items = WAZA_SKILLS
     .map((skill) => ({ name: skill, agents: ["Claude Code", "Codex"] }))
     .map((item) => JSON.stringify(item))
     .join(",");
   writeExecutable(
-    join(fakeBin, "bunx"),
+    join(fakeBin, "skills"),
     [
       "#!/bin/bash",
       "set -euo pipefail",
-      logFile ? `echo "bunx $*" >> "${logFile}"` : "",
-      "if [[ \"$*\" == *\"skills ls -g --json\"* ]]; then",
+      logFile ? `echo "skills $*" >> "${logFile}"` : "",
+      "if [[ \"$*\" == \"ls -g --json\" ]]; then",
       `  echo '[${items}]'`,
       "  exit 0",
       "fi",
-      "if [[ \"$*\" == *\"skills check\"* || \"$*\" == *\"skills update\"* ]]; then",
+      "if [[ \"${1:-}\" == \"check\" || \"${1:-}\" == \"update\" ]]; then",
       "  echo 'unexpected mutating skill command' >&2",
       "  exit 2",
       "fi",
@@ -165,6 +202,53 @@ function writeFakeBunx(fakeBin: string, logFile?: string) {
       "",
     ].join("\n")
   );
+}
+
+// A `skills` stub that never returns, used to prove the probe budget is
+// enforced. Pair it with writeCappedFakeTimeout so the run is bounded in
+// test time instead of the full production budget.
+function writeHangingFakeSkillsCli(fakeBin: string) {
+  writeExecutable(
+    join(fakeBin, "skills"),
+    // `exec` matters: without it the killed wrapper leaves an orphaned `sleep`
+    // holding the inherited stdout pipe, and spawnSync waits for EOF anyway.
+    ["#!/bin/bash", "exec sleep 120", ""].join("\n")
+  );
+}
+
+// Stands in for GNU `timeout` with a shortened cap: the script asks for its
+// production budget, this stub enforces 2s and returns 124 like the real
+// binary, so the timed-out mapping is exercised without waiting out the real
+// 45s budget.
+function writeCappedFakeTimeout(fakeBin: string, capSeconds = 2) {
+  writeExecutable(
+    join(fakeBin, "timeout"),
+    [
+      "#!/bin/bash",
+      "if [[ \"${1:-}\" == --kill-after=* ]]; then shift; fi",
+      "if [[ \"${1:-}\" == *s ]]; then shift; fi",
+      "\"$@\" &",
+      "child=$!",
+      `( sleep ${capSeconds}; kill -9 "$child" 2>/dev/null ) &`,
+      "watcher=$!",
+      "status=0",
+      "wait \"$child\" 2>/dev/null || status=$?",
+      "kill \"$watcher\" 2>/dev/null || true",
+      "if [[ \"$status\" -ge 128 ]]; then exit 124; fi",
+      "exit \"$status\"",
+      "",
+    ].join("\n")
+  );
+}
+
+// PATH with every directory that ships a real `skills` binary removed, so the
+// absent-binary case cannot silently resolve the developer machine's install.
+function pathWithoutSkillsCli(prefix: string) {
+  const entries = (process.env.PATH ?? "").split(":").filter((dir) => {
+    if (!dir) return false;
+    return !existsSync(join(dir, "skills"));
+  });
+  return [prefix, ...entries].join(":");
 }
 
 function writeFakeCodeGraph(
@@ -267,12 +351,24 @@ function writeFakeCurl(fakeBin: string, version: string, logFile?: string) {
   );
 }
 
-function writeArchctxRepo(repoRoot: string, capabilitySource: "registry" | "archcontext") {
+const HERDR_PIN = JSON.parse(readFileSync(join(ROOT, ".ai/harness/policy.json"), "utf8")).external_tooling.herdr;
+
+/**
+ * Strict readiness reads the herdr floor from
+ * `.ai/harness/policy.json#external_tooling.herdr`, so a fixture repo that stands
+ * in for a ready repo must carry the same pin this repo publishes.
+ */
+function writeFixturePolicy(repoRoot: string, policy: Record<string, unknown> = {}) {
   mkdirSync(join(repoRoot, ".ai/harness"), { recursive: true });
+  const externalTooling = { ...((policy.external_tooling as Record<string, unknown>) ?? {}), herdr: HERDR_PIN };
   writeFileSync(
     join(repoRoot, ".ai/harness/policy.json"),
-    JSON.stringify({ version: 1, context: { capability_source: capabilitySource } }, null, 2)
+    `${JSON.stringify({ ...policy, external_tooling: externalTooling }, null, 2)}\n`
   );
+}
+
+function writeArchctxRepo(repoRoot: string, capabilitySource: "registry" | "archcontext") {
+  writeFixturePolicy(repoRoot, { version: 1, context: { capability_source: capabilitySource } });
   writeFileSync(
     join(repoRoot, "package.json"),
     JSON.stringify({ devDependencies: { "archctx-contracts": "0.3.0" } }, null, 2)
@@ -303,7 +399,8 @@ describe("check-agent-tooling", () => {
       symlinkClaudeWazaToAgents(envRoot.home);
       writeWazaLock(envRoot.home);
 
-      writeFakeBunx(envRoot.fakeBin);
+      const skillsCliLog = join(envRoot.root, "skills-cli.log");
+      writeFakeSkillsCli(envRoot.fakeBin, skillsCliLog);
       writeFakeCodeGraph(envRoot.fakeBin);
 
       const res = spawnSync("bash", [SCRIPT, "--json", "--host", "both"], {
@@ -324,7 +421,14 @@ describe("check-agent-tooling", () => {
       );
       expect(report.runtime_capabilities.bun.required).toBe(true);
       expect(report.runtime_capabilities.npx.owner).toBe("npm-registry");
-      expect(report.runtime_capabilities.skills_cli.status).toBe("available");
+      // Default run: PATH resolution still happens (cheap), the probe itself
+      // does not. The absent log proves no spawn was paid for.
+      expect(report.runtime_capabilities.skills_cli.status).toBe("not-probed");
+      expect(report.runtime_capabilities.skills_cli.path).toBe(join(envRoot.fakeBin, "skills"));
+      expect(report.runtime_capabilities.skills_cli.command).toBe("skills ls -g --json");
+      expect(report.tools.waza.skills_cli_status).toBe("not-probed");
+      expect(existsSync(skillsCliLog)).toBe(false);
+      expect(report.tools.waza.hosts.codex.skills[0].skills_cli_agents).toEqual([]);
       expect(report.runtime_capabilities.rsync.required).toBe(false);
       expect(report.runtime_capabilities.symlink.required_for).toContain("copy mode remains the fallback");
       expect(report.tools).not.toHaveProperty("gstack");
@@ -345,6 +449,19 @@ describe("check-agent-tooling", () => {
         architecture_diagram: "mermaid",
       });
       expect(report.tools.codex_automation_profile.vendoring_policy).toBe("do-not-vendor-skill-body");
+      expect(report.tools.official_codex_plugin).toMatchObject({
+        status: "present",
+        required: true,
+        plugin_id: "codex@openai-codex",
+        version: "1.0.6",
+        review_gate: "not-enabled-by-repo-harness",
+      });
+      expect(report.tools.obsidian_runtime_skills.required_skills).toEqual(["obsidian-markdown", "obsidian-cli"]);
+      expect(report.tools.obsidian_runtime_skills.mode).toBe("catalog-dependency-closure");
+      expect(report.tools.obsidian_runtime_skills.readiness).toBe("advisory");
+      expect(report.tools.obsidian_runtime_skills.install_command)
+        .toBe("repo-harness install --target both --with-obsidian-skills");
+      expect(readFileSync(SCRIPT, "utf-8")).not.toContain("OBSIDIAN_RUNTIME_SKILLS");
       expect(report.tools).not.toHaveProperty("gbrain");
       expect(report.tools.codegraph.status).toBe("partial");
       expect(report.tools.codegraph.primary_host).toBe("codex");
@@ -367,6 +484,158 @@ describe("check-agent-tooling", () => {
       expect(textRes.status).toBe(0);
       expect(textRes.stdout.toLowerCase()).not.toContain("gstack");
       expect(textRes.stdout).toContain("Waza [present]");
+      expect(textRes.stdout).toContain("Official Codex plugin [present]");
+      expect(textRes.stdout).toContain("repo-harness install --target both --with-obsidian-skills");
+    } finally {
+      rmSync(envRoot.root, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("reports an enabled but incomplete official plugin as invalid", () => {
+    const envRoot = setupFakeEnvironment("check-agent-tooling-invalid-plugin");
+    try {
+      rmSync(join(envRoot.home, ".claude/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs"));
+      const result = spawnSync("bash", [SCRIPT, "--host", "codex", "--json"], {
+        cwd: ROOT,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          HOME: envRoot.home,
+          PATH: `${envRoot.fakeBin}:${process.env.PATH ?? ""}`,
+          AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
+        },
+      });
+      expect(result.status).toBe(0);
+      const report = JSON.parse(result.stdout);
+      expect(report.tools.official_codex_plugin.status).toBe("invalid");
+      expect(report.tools.official_codex_plugin.reason).toContain("missing a version, companion, manifest, or review schema");
+    } finally {
+      rmSync(envRoot.root, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("managed Obsidian companion receipt turns missing projected Skills into a strict readiness failure", () => {
+    const envRoot = setupFakeEnvironment("check-agent-tooling-obsidian-managed");
+    try {
+      mkdirSync(join(envRoot.home, ".repo-harness"), { recursive: true });
+      writeFileSync(join(envRoot.home, ".repo-harness", "install-state.json"), JSON.stringify({
+        protocol: 2,
+        ownership_manifest: [{
+          path: join(envRoot.home, ".agents", "skills", "obsidian-markdown"),
+        }],
+      }));
+      writeFakeSkillsCli(envRoot.fakeBin);
+
+      const res = spawnSync("bash", [SCRIPT, "--json", "--strict-readiness", "--host", "codex"], {
+        cwd: ROOT,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          HOME: envRoot.home,
+          PATH: `${envRoot.fakeBin}:${process.env.PATH ?? ""}`,
+          AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
+        },
+      });
+      expect(res.status).toBe(2);
+      expect(res.stderr).toContain("Managed Obsidian companion Skill readiness is missing");
+      const report = JSON.parse(res.stdout);
+      expect(report.tools.obsidian_runtime_skills.readiness).toBe("managed");
+      expect(report.tools.obsidian_runtime_skills.managed_receipt).toBe(true);
+    } finally {
+      rmSync(envRoot.root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("--probe-skills-cli reports the resolved Skills CLI as available", () => {
+    const envRoot = setupFakeEnvironment("check-agent-tooling-skills-cli-probe");
+    try {
+      const skillsCliLog = join(envRoot.root, "skills-cli.log");
+      mkdirSync(join(envRoot.home, ".agents", "skills"), { recursive: true });
+      mkdirSync(join(envRoot.home, ".codex"), { recursive: true });
+      writeWazaBundle(join(envRoot.home, ".agents", "skills"), "3.0.0");
+      writeWazaBundle(join(envRoot.home, ".codex", "skills"), "3.0.0");
+      writeWazaLock(envRoot.home);
+      writeFakeSkillsCli(envRoot.fakeBin, skillsCliLog);
+      writeFakeCodeGraph(envRoot.fakeBin);
+
+      const res = spawnSync("bash", [SCRIPT, "--json", "--probe-skills-cli", "--host", "codex"], {
+        cwd: ROOT,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          HOME: envRoot.home,
+          PATH: `${envRoot.fakeBin}:${process.env.PATH ?? ""}`,
+          AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
+        },
+      });
+
+      expect(res.status).toBe(0);
+      const report = JSON.parse(res.stdout);
+      expect(report.runtime_capabilities.skills_cli.status).toBe("available");
+      expect(report.runtime_capabilities.skills_cli.path).toBe(join(envRoot.fakeBin, "skills"));
+      expect(report.tools.waza.skills_cli_status).toBe("available");
+      expect(readFileSync(skillsCliLog, "utf-8")).toContain("skills ls -g --json");
+      expect(report.tools.waza.hosts.codex.skills[0].skills_cli_agents).toEqual(["Claude Code", "Codex"]);
+    } finally {
+      rmSync(envRoot.root, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  test("reports the Skills CLI as timed-out when the probed binary exceeds the budget", () => {
+    const envRoot = setupFakeEnvironment("check-agent-tooling-skills-cli-timeout");
+    try {
+      writeHangingFakeSkillsCli(envRoot.fakeBin);
+      writeCappedFakeTimeout(envRoot.fakeBin);
+      writeFakeCodeGraph(envRoot.fakeBin);
+
+      const res = spawnSync("bash", [SCRIPT, "--json", "--probe-skills-cli", "--host", "codex"], {
+        cwd: ROOT,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          HOME: envRoot.home,
+          PATH: `${envRoot.fakeBin}:${process.env.PATH ?? ""}`,
+          AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
+        },
+      });
+
+      expect(res.status).toBe(0);
+      const report = JSON.parse(res.stdout);
+      expect(report.runtime_capabilities.skills_cli.status).toBe("timed-out");
+      expect(report.runtime_capabilities.skills_cli.path).toBe(join(envRoot.fakeBin, "skills"));
+      expect(report.tools.waza.skills_cli_status).toBe("timed-out");
+    } finally {
+      rmSync(envRoot.root, { recursive: true, force: true });
+    }
+  }, 30000);
+
+  test("reports the Skills CLI as missing when no skills binary is on PATH", () => {
+    const envRoot = setupFakeEnvironment("check-agent-tooling-skills-cli-missing");
+    try {
+      writeFakeCodeGraph(envRoot.fakeBin);
+
+      const res = spawnSync("bash", [SCRIPT, "--json", "--host", "codex"], {
+        cwd: ROOT,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          HOME: envRoot.home,
+          PATH: pathWithoutSkillsCli(envRoot.fakeBin),
+          AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: "0",
+        },
+      });
+
+      expect(res.status).toBe(0);
+      const report = JSON.parse(res.stdout);
+      expect(report.runtime_capabilities.skills_cli.status).toBe("missing");
+      expect(report.runtime_capabilities.skills_cli.path).toBe(null);
+      expect(report.tools.waza.skills_cli_status).toBe("missing");
+      expect(report.tools.waza.skills_cli_path).toBe(null);
+      // Skill-item-dependent inspection degrades exactly as it already does
+      // when the probe fails: no CLI-reported agents, no invented data.
+      expect(report.tools.waza.hosts.codex.skills.every((skill: { skills_cli_agents: string[] }) =>
+        skill.skills_cli_agents.length === 0
+      )).toBe(true);
     } finally {
       rmSync(envRoot.root, { recursive: true, force: true });
     }
@@ -376,7 +645,7 @@ describe("check-agent-tooling", () => {
     const envRoot = setupFakeEnvironment("check-agent-tooling-codegraph-claude-deferred");
     try {
       writeClaudeCodeGraphConfig(envRoot.home, false);
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
 
       const res = spawnSync("bash", [SCRIPT, "--json", "--host", "claude"], {
@@ -407,7 +676,7 @@ describe("check-agent-tooling", () => {
     const envRoot = setupFakeEnvironment("check-agent-tooling-codegraph-claude-always-load");
     try {
       writeClaudeCodeGraphConfig(envRoot.home, true);
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
 
       const res = spawnSync("bash", [SCRIPT, "--json", "--host", "claude"], {
@@ -460,28 +729,7 @@ describe("check-agent-tooling", () => {
         ].join("\n"),
       );
 
-      writeExecutable(
-        join(envRoot.fakeBin, "bunx"),
-        [
-          "#!/bin/bash",
-          "set -euo pipefail",
-          `echo "bunx $*" >> "${logFile}"`,
-          "if [[ \"$*\" == *\"skills ls -g --json\"* ]]; then",
-          `  echo '[${WAZA_SKILLS.map((skill) => JSON.stringify({ name: skill, agents: ["Claude Code", "Codex"] })).join(",")}]'`,
-          "  exit 0",
-          "fi",
-          "if [[ \"$*\" == *\"skills check\"* ]]; then",
-          "  echo 'unexpected mutating skill command' >&2",
-          "  exit 2",
-          "fi",
-          "if [[ \"$*\" == *\"skills update\"* ]]; then",
-          "  echo 'unexpected mutating skill command' >&2",
-          "  exit 2",
-          "fi",
-          "exit 1",
-          "",
-        ].join("\n")
-      );
+      writeFakeSkillsCli(envRoot.fakeBin, logFile);
 
       writeFakeCodeGraph(envRoot.fakeBin, { logFile });
       writeFakeNpm(envRoot.fakeBin, "0.9.6", logFile);
@@ -529,7 +777,7 @@ describe("check-agent-tooling", () => {
     try {
       mkdirSync(join(envRoot.home, ".codex"), { recursive: true });
       writeFileSync(join(envRoot.home, ".codex", "config.toml"), "# no codegraph mcp\n");
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
 
       const res = spawnSync("bash", [SCRIPT, "--json", "--host", "codex", "--strict-readiness"], {
@@ -569,7 +817,7 @@ describe("check-agent-tooling", () => {
       writeSkill(join(envRoot.home, ".codex", "skills"), "mermaid", "1.0.0");
       symlinkClaudeWazaToAgents(envRoot.home);
       writeWazaLock(envRoot.home);
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
       writeFakeNpm(envRoot.fakeBin, "0.9.6");
       writeFakeCurl(envRoot.fakeBin, "9.0.0");
@@ -624,7 +872,7 @@ describe("check-agent-tooling", () => {
       writeSkill(join(envRoot.home, ".codex", "skills"), "mermaid", "1.0.0");
       symlinkClaudeWazaToAgents(envRoot.home);
       writeWazaLock(envRoot.home);
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
       writeFakeNpm(envRoot.fakeBin, "0.9.6");
       writeFakeCurl(envRoot.fakeBin, "3.0.0");
@@ -666,7 +914,7 @@ describe("check-agent-tooling", () => {
       mkdirSync(localBin, { recursive: true });
       mkdirSync(join(envRoot.home, ".codex"), { recursive: true });
       writeFileSync(join(envRoot.home, ".codex", "config.toml"), "[mcp_servers.codegraph]\ncommand = \"codegraph\"\n");
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(localBin, { version: "0.9.6" });
       writeFakeCodeGraph(envRoot.fakeBin, { version: "0.8.0" });
 
@@ -711,7 +959,7 @@ describe("check-agent-tooling", () => {
         join(envRoot.root, "package.json"),
         JSON.stringify({ devDependencies: { "@colbymchenry/codegraph": "1.0.1" } }, null, 2)
       );
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(bundleBin, { version: "1.0.1" });
       writeExecutable(join(shimBin, "codegraph"), "#!/bin/bash\necho 'bad shim used' >&2\nexit 99\n");
 
@@ -741,7 +989,7 @@ describe("check-agent-tooling", () => {
     const envRoot = setupFakeEnvironment("check-agent-tooling-fleet-missing");
     try {
       writeClaudeCodeGraphConfig(envRoot.home, true);
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
 
       const res = spawnSync("bash", [SCRIPT, "--json", "--host", "claude", "--strict-readiness"], {
@@ -773,7 +1021,7 @@ describe("check-agent-tooling", () => {
     const envRoot = setupFakeEnvironment("check-agent-tooling-fleet-partial");
     try {
       writeClaudeCodeGraphConfig(envRoot.home, true);
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
 
       mkdirSync(join(envRoot.home, ".claude", "agents"), { recursive: true });
@@ -824,7 +1072,7 @@ describe("check-agent-tooling", () => {
         copyFileSync(join(FLEET_SOURCE_DIR, `${agent}.md`), join(envRoot.home, ".claude", "agents", `${agent}.md`));
         copyFileSync(join(ROOT, ".codex", "agents", `${agent}.toml`), join(envRoot.home, ".codex", "agents", `${agent}.toml`));
       }
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
 
       const res = spawnSync("bash", [SCRIPT, "--json", "--host", "both", "--strict-readiness"], {
@@ -869,6 +1117,7 @@ describe("check-agent-tooling", () => {
     ]) {
       const envRoot = setupFakeEnvironment(`check-agent-tooling-role-${testCase.evidenceStatus}`);
       try {
+        writeFixturePolicy(envRoot.root);
         mkdirSync(join(envRoot.home, ".codex", "agents"), { recursive: true });
         writeFileSync(
           join(envRoot.home, ".codex", "config.toml"),
@@ -958,8 +1207,7 @@ describe("check-agent-tooling", () => {
   test("accepts the top-level evidence pointer written by a real SubagentStart handler", () => {
     const envRoot = setupFakeEnvironment("check-agent-tooling-hook-e2e");
     try {
-      mkdirSync(join(envRoot.root, ".ai", "harness"), { recursive: true });
-      writeFileSync(join(envRoot.root, ".ai", "harness", "policy.json"), "{}\n");
+      writeFixturePolicy(envRoot.root);
       mkdirSync(join(envRoot.home, ".codex", "agents"), { recursive: true });
       writeFileSync(
         join(envRoot.home, ".codex", "config.toml"),
@@ -987,7 +1235,7 @@ describe("check-agent-tooling", () => {
           turn_id: "turn-hook-e2e",
           agent_id: "agent-hook-e2e",
           agent_type: "fast-worker",
-          model: "gpt-5.6-luna",
+          model: "gpt-6-astra",
         }),
       });
       expect(hook.exitCode).toBe(0);
@@ -1009,7 +1257,7 @@ describe("check-agent-tooling", () => {
       expect(report.tools.agent_fleet.native_role_routing.observations).toEqual([
         expect.objectContaining({
           agent_type: "fast-worker",
-          observed_model: "gpt-5.6-luna",
+          observed_model: "gpt-6-astra",
           reasoning_effort_status: "configured_unverified",
         }),
       ]);
@@ -1176,7 +1424,7 @@ describe("check-agent-tooling", () => {
         writeFileSync(join(envRoot.home, ".codex", "agents", `${agent}.toml`), `name = "${agent}"\n`);
       }
 
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
       writeFakeNpm(envRoot.fakeBin, "0.9.6");
       writeFakeCurl(envRoot.fakeBin, "3.0.0");
@@ -1248,7 +1496,7 @@ describe("check-agent-tooling", () => {
         },
       ]);
 
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
       writeFakeNpm(envRoot.fakeBin, "0.9.6");
       writeFakeCurl(envRoot.fakeBin, "3.0.0");
@@ -1326,7 +1574,7 @@ describe("check-agent-tooling", () => {
         },
       ]);
 
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
       writeFakeNpm(envRoot.fakeBin, "0.9.6");
       writeFakeCurl(envRoot.fakeBin, "3.0.0");
@@ -1383,7 +1631,7 @@ describe("check-agent-tooling", () => {
         "not-the-expected-authority"
       );
 
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
       writeFakeNpm(envRoot.fakeBin, "0.9.6");
       writeFakeCurl(envRoot.fakeBin, "3.0.0");
@@ -1416,7 +1664,7 @@ describe("check-agent-tooling", () => {
       writeArchctxRepo(envRoot.root, "registry");
       installFleetForClaude(envRoot.home);
       writeClaudeCodeGraphConfig(envRoot.home, true);
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
 
       const res = spawnSync("bash", [SCRIPT, "--json", "--host", "claude", "--strict-readiness"], {
@@ -1452,7 +1700,7 @@ describe("check-agent-tooling", () => {
       writeArchctxRepo(envRoot.root, "archcontext");
       installFleetForClaude(envRoot.home);
       writeClaudeCodeGraphConfig(envRoot.home, true);
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
       writeFakeCodeGraph(envRoot.fakeBin);
 
       const res = spawnSync("bash", [SCRIPT, "--json", "--host", "claude", "--strict-readiness"], {
@@ -1479,3 +1727,31 @@ describe("check-agent-tooling", () => {
     }
   }, 15000);
 });
+
+test.each(['present', 'missing', 'unavailable'])('herdr is a required runtime capability: %s', status => {
+  const fixture = setupFakeEnvironment('required-herdr');
+  try {
+    const herdrPath = join(fixture.fakeBin, 'herdr');
+    if (status === 'unavailable') writeExecutable(herdrPath, '#!/bin/sh\nexit 2\n');
+    if (status === 'missing') rmSync(herdrPath);
+    // An explicit utility PATH makes absence independent of the developer's herdr installation.
+    const utilities = ['dirname', 'basename', 'node', 'bun', 'git', 'bash', 'sh', 'which', 'uname'];
+    for (const utility of utilities) {
+      const actual = Bun.which(utility);
+      if (actual && !existsSync(join(fixture.fakeBin, utility))) symlinkSync(actual, join(fixture.fakeBin, utility));
+    }
+    const result = spawnSync('/bin/bash', [SCRIPT, '--json', '--strict-readiness', '--host', 'claude'], {
+      cwd: ROOT, encoding: 'utf8', env: { ...process.env, HOME: fixture.home, PATH: fixture.fakeBin }, timeout: 15_000,
+    });
+    const report = JSON.parse(result.stdout);
+    expect(report.runtime_capabilities.herdr.required).toBe(true);
+    expect(report.runtime_capabilities.herdr.status).toBe(status);
+    if (status === 'present') {
+      expect(report.runtime_capabilities.herdr.version).toBe('herdr 0.9.0');
+      expect(result.stderr).not.toContain('herdr runtime is');
+    } else {
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(`herdr runtime is ${status}`);
+    }
+  } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+}, 20_000);

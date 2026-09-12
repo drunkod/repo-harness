@@ -39,13 +39,15 @@ function writeFakeCodeGraph(fakeBin: string, logFile: string) {
   );
 }
 
-function writeFakeBunx(fakeBin: string) {
+// check-agent-tooling.sh resolves `skills` from PATH (and only spawns it under
+// --probe-skills-cli), so the stub has to be the binary itself, not bunx.
+function writeFakeSkillsCli(fakeBin: string) {
   writeExecutable(
-    join(fakeBin, "bunx"),
+    join(fakeBin, "skills"),
     [
       "#!/bin/bash",
       "set -euo pipefail",
-      "if [[ \"$*\" == *\"skills ls -g --json\"* ]]; then echo '[]'; exit 0; fi",
+      "if [[ \"$*\" == \"ls -g --json\" ]]; then echo '[]'; exit 0; fi",
       "exit 1",
       "",
     ].join("\n")
@@ -60,7 +62,7 @@ describe("tools ensure codegraph", () => {
       mkdirSync(join(envRoot.home, ".codex"), { recursive: true });
       writeFileSync(join(envRoot.home, ".codex", "config.toml"), "[mcp_servers.codegraph]\ncommand = \"codegraph\"\n");
       writeFakeCodeGraph(envRoot.fakeBin, logFile);
-      writeFakeBunx(envRoot.fakeBin);
+      writeFakeSkillsCli(envRoot.fakeBin);
 
       const res = spawnSync("bun", [CLI, "tools", "ensure", "codegraph", "--check", "--json", "--repo", ROOT], {
         cwd: ROOT,
@@ -103,3 +105,33 @@ describe("tools ensure codegraph", () => {
     expect(res.stdout).toContain("Source:");
   }, 15000);
 });
+
+test('standalone CodeGraph configure records restorable MCP provenance', () => {
+  const fixture = setupFakeEnvironment('standalone-codegraph-uninstall');
+  try {
+    writeFakeSkillsCli(fixture.fakeBin);
+    writeExecutable(join(fixture.fakeBin, 'codegraph'), [
+      '#!/bin/bash',
+      'set -euo pipefail',
+      'case "${1:-}" in',
+      '  --version) echo "0.9.6" ;;',
+      '  status) echo "CodeGraph Status"; echo "Index is up to date" ;;',
+      '  install) mkdir -p "$HOME/.codex"; printf \'%s\\n\' \'[mcp_servers.codegraph]\' \'command = "codegraph"\' >> "$HOME/.codex/config.toml" ;;',
+      '  *) exit 1 ;;',
+      'esac',
+    ].join('\n'));
+    mkdirSync(join(fixture.home, '.codex'));
+    writeFileSync(join(fixture.home, '.codex/config.toml'), 'model = "user-model"\n');
+    const env = { ...process.env, HOME: fixture.home, PATH: `${fixture.fakeBin}:${process.env.PATH ?? ''}`, AGENTIC_DEV_CODEGRAPH_ALLOW_REPO_LOCAL: '0', BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' };
+    const configured = spawnSync('bun', [CLI, 'tools', 'configure', 'codegraph', '--target', 'codex', '--location', 'global', '--json', '--repo', ROOT], { cwd: ROOT, env, encoding: 'utf8' });
+    expect(configured.status, configured.stderr).toBe(0);
+    const receiptRaw = readFileSync(join(fixture.home, '.repo-harness/configuration-restore.json'), 'utf8');
+    const receipt = JSON.parse(receiptRaw);
+    expect(receipt.pending).toBeUndefined();
+    expect(receipt.changes.find((entry: any) => entry.selector === 'mcp_servers.codegraph').active).toBe(true);
+    expect(receiptRaw).not.toContain('user-model');
+    const uninstalled = spawnSync('bun', [CLI, 'uninstall', '--target', 'codex', '--json'], { cwd: ROOT, env, encoding: 'utf8' });
+    expect(uninstalled.status, uninstalled.stdout + uninstalled.stderr).toBe(0);
+    expect(readFileSync(join(fixture.home, '.codex/config.toml'), 'utf8')).toBe('model = "user-model"\n');
+  } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+}, 15000);

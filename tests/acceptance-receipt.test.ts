@@ -3,19 +3,47 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import { buildReviewSubject } from '../src/effects/review/diff-fingerprint';
+import { applyReviewerDisagreement, assessChange, buildReviewSelectionPacket } from '../src/core/review/change-assessment';
+import { executeVerificationContract } from '../src/effects/evidence/verification-execution';
 import {
+  acceptanceAuthorityFingerprint,
+  acceptanceContext,
+  authorityFingerprint,
+  acceptanceReceiptPath,
+  archiveProjectionReceiptPath,
   parseAcceptancePolicy,
   projectAcceptance,
   recordAcceptance,
   recordUserWaiverAcceptance,
   recordUserWaiverGrant,
   revokeUserWaiverGrant,
+  sealArchiveProjection,
   verifyAcceptance,
   verifyUserWaiverGrant,
 } from '../scripts/acceptance-receipt';
 
 const tempDirs: string[] = [];
+
+test('provider expected-context fence rejects each stale identity without overwriting acceptance', async () => {
+  const { root, home } = makeFixture();
+  await externalPass(root, home);
+  const before = readFileSync(acceptanceReceiptPath(root, home), 'utf8');
+  const context = await acceptanceContext({ root, contract: 'tasks/contracts/demo.contract.md', verification: '.ai/harness/checks/latest.json' });
+  const expected = {
+    contract_sha256: authorityFingerprint(context.contract.content), goal_sha256: authorityFingerprint(context.goal.content),
+    subject_sha256: context.subject.review_subject_sha256, verification_evidence_sha256: context.evidence.fingerprint,
+    target_revision: context.subject.target_rev,
+  };
+  for (const field of Object.keys(expected)) {
+    await expect(recordAcceptance({ root, authorityHome: home, contract: 'tasks/contracts/demo.contract.md',
+      verification: '.ai/harness/checks/latest.json', disposition: 'external_pass', reviewer: 'Claude', source: 'claude-review',
+      actor: null, summary: 'Real provider opinion for a different context', findings: [], expectedContext: { ...expected, [field]: 'stale' },
+    })).rejects.toThrow(`reviewed acceptance context is stale: ${field}`);
+    expect(readFileSync(acceptanceReceiptPath(root, home), 'utf8')).toBe(before);
+  }
+});
 
 afterEach(() => {
   for (const path of tempDirs.splice(0)) rmSync(path, { recursive: true, force: true });
@@ -46,12 +74,78 @@ function contract(waiver: 'allowed' | 'forbidden' = 'allowed'): string {
     `{"protocol":1,"reviewer":"Claude","user_waiver":"${waiver}"}`,
     '```',
     '',
+    '## Change Assessment',
+    '',
+    '```json',
+    '{"protocol":1,"oracles":[]}',
+    '```',
+    '',
+    '## Verification Plan',
+    '',
+    '```json',
+    '{"protocol":1,"checks":[]}',
+    '```',
+    '',
   ].join('\n');
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+}
+
+function changeAssessmentEvidence(subject: ReturnType<typeof buildReviewSubject>): Record<string, unknown> {
+  const assessment = assessChange({
+    subject,
+    workflowProfile: 'lite',
+    strictCategories: [],
+    patternNoveltyPaths: [],
+    declaredOracles: [],
+  });
+  if (assessment.status !== 'ready') throw new Error('fixture assessment must be ready');
+  const selection_packet = buildReviewSelectionPacket(assessment);
+  const basis = {
+    schema: 'repo-harness-change-assessment-evidence.v1',
+    status: 'pass',
+    assessment,
+    selection_packet,
+  };
+  return {
+    ...basis,
+    evidence_sha256: `sha256:${createHash('sha256').update(stableJson(basis)).digest('hex')}`,
+  };
+}
+
+function changeAssessmentEnvelope(assessment: unknown, selection_packet: unknown): Record<string, unknown> {
+  const basis = {
+    schema: 'repo-harness-change-assessment-evidence.v1',
+    status: 'pass',
+    assessment,
+    selection_packet,
+  };
+  return {
+    ...basis,
+    evidence_sha256: `sha256:${createHash('sha256').update(stableJson(basis)).digest('hex')}`,
+  };
+}
+
+function replaceChangeAssessment(root: string, next: Record<string, unknown>): void {
+  const path = join(root, '.ai', 'harness', 'checks', 'latest.json');
+  const checks = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+  checks.change_assessment = next;
+  writeFileSync(path, `${JSON.stringify(checks, null, 2)}\n`);
 }
 
 function writePassingChecks(root: string): void {
   const subject = buildReviewSubject(root, { targetRef: 'main' });
   expect(subject.status).toBe('ok');
+  const execution_evaluation = executeVerificationContract({
+    repoRoot: root,
+    contractPath: 'tasks/contracts/demo.contract.md',
+  });
+  expect(execution_evaluation.passed).toBe(true);
   const checks = {
     schema: 'repo-harness-run-trace.v1',
     source: 'verify-sprint',
@@ -65,9 +159,11 @@ function writePassingChecks(root: string): void {
       { name: 'contract', status: 'pass' },
       { name: 'review', status: 'pass' },
       { name: 'allowed_paths', status: 'pass' },
+      { name: 'change_assessment', status: 'pass' },
     ],
-    contract: { file: 'tasks/contracts/demo.contract.md' },
+    contract: { file: 'tasks/contracts/demo.contract.md', execution_evaluation },
     review: { file: 'tasks/reviews/demo.review.md' },
+    change_assessment: changeAssessmentEvidence(subject),
   };
   writeFileSync(join(root, '.ai', 'harness', 'checks', 'latest.json'), JSON.stringify(checks, null, 2) + '\n');
 }
@@ -118,8 +214,51 @@ async function externalPass(root: string, home: string) {
 describe('AcceptanceReceipt', () => {
   test('strictly parses the contract-frozen reviewer and waiver policy', () => {
     expect(parseAcceptancePolicy(contract())).toEqual({ protocol: 1, reviewer: 'Claude', user_waiver: 'allowed' });
+    expect(parseAcceptancePolicy(contract().replace(
+      '{"protocol":1,"reviewer":"Claude","user_waiver":"allowed"}',
+      '{"protocol":2,"reviewer":"Codex","source":"codex-plugin","user_waiver":"allowed"}',
+    ))).toEqual({ protocol: 2, reviewer: 'Codex', source: 'codex-plugin', user_waiver: 'allowed' });
     expect(() => parseAcceptancePolicy(contract().replace('"allowed"', '"maybe"'))).toThrow('user_waiver');
   });
+
+  test('protocol 2 truthfully binds Codex-host acceptance to source=codex-plugin', async () => {
+    const { root, home } = makeFixture();
+    const contractPath = join(root, 'tasks', 'contracts', 'demo.contract.md');
+    writeFileSync(contractPath, contract().replace(
+      '{"protocol":1,"reviewer":"Claude","user_waiver":"allowed"}',
+      '{"protocol":2,"reviewer":"Codex","source":"codex-plugin","user_waiver":"allowed"}',
+    ));
+    commit(root, 'freeze Codex plugin acceptance policy');
+    writePassingChecks(root);
+
+    await expect(recordAcceptance({
+      root,
+      authorityHome: home,
+      contract: 'tasks/contracts/demo.contract.md',
+      verification: '.ai/harness/checks/latest.json',
+      disposition: 'external_pass',
+      reviewer: 'Codex',
+      source: 'codex-review',
+      actor: null,
+      summary: 'wrong transport',
+      findings: [],
+    })).rejects.toThrow('frozen contract reviewer');
+
+    const receipt = await recordAcceptance({
+      root,
+      authorityHome: home,
+      contract: 'tasks/contracts/demo.contract.md',
+      verification: '.ai/harness/checks/latest.json',
+      disposition: 'external_pass',
+      reviewer: 'Codex',
+      source: 'codex-plugin',
+      actor: null,
+      summary: 'official plugin review passed',
+      findings: [],
+    });
+    expect(receipt).toMatchObject({ reviewer: 'Codex', source: 'codex-plugin', expected_reviewer: 'Codex' });
+    expect((await verifyAcceptance({ root, authorityHome: home })).source).toBe('codex-plugin');
+  }, 30_000);
 
   test('review projection changes do not invalidate acceptance, semantic changes do', async () => {
     const { root, home } = makeFixture();
@@ -147,6 +286,112 @@ describe('AcceptanceReceipt', () => {
 
     writeFileSync(join(root, 'feature.txt'), 'semantic change\n');
     await expect(verifyAcceptance({ root, authorityHome: home })).rejects.toThrow('semantic subject is stale');
+  }, 30_000);
+
+  test('projection overwrites review-binding headers from the receipt for every disposition', async () => {
+    const { root, home } = makeFixture();
+    const receipt = await externalPass(root, home);
+    const reviewPath = join(root, 'tasks', 'reviews', 'demo.review.md');
+    const header = (status: string, recommendation: string, subject: string, target: string): string => [
+      '# Task Review: demo',
+      '',
+      `> **Status**: ${status}`,
+      '> **Contract**: tasks/contracts/demo.contract.md',
+      `> **Recommendation**: ${recommendation}`,
+      '> **Review Rubric Version**: 2',
+      `> **Reviewed Subject SHA256**: ${subject}`,
+      '> **Reviewed Subject Scope**: normalized-final-content',
+      `> **Reviewed Target Revision**: ${target}`,
+      '',
+      '## Human Review Card',
+      '',
+      '- Verdict: pending',
+      '',
+    ].join('\n');
+
+    writeFileSync(reviewPath, header('Pending', 'fail', 'pending', 'pending'));
+    projectAcceptance(reviewPath, receipt);
+    const synced = readFileSync(reviewPath, 'utf-8');
+    expect(synced).toContain('> **Status**: Accepted');
+    expect(synced).toContain('> **Recommendation**: pass');
+    expect(synced).toContain(`> **Reviewed Subject SHA256**: ${receipt.subject_sha256}`);
+    expect(synced).toContain(`> **Reviewed Target Revision**: ${receipt.target_revision}`);
+    expect(synced).not.toMatch(/^> \*\*Reviewed (?:Subject SHA256|Target Revision)\*\*: pending$/m);
+
+    // The projected receipt section and the synced header now agree field by field.
+    const headerBlock = synced.slice(0, synced.indexOf('## Human Review Card'));
+    const projectionBlock = synced.slice(synced.indexOf('## Acceptance Receipt Projection'));
+    for (const field of ['Reviewed Subject SHA256', 'Reviewed Subject Scope', 'Reviewed Target Revision']) {
+      const read = (text: string): string | undefined =>
+        text.match(new RegExp(`^> \\*\\*${field}\\*\\*: (.+)$`, 'm'))?.[1];
+      expect(read(headerBlock)).toBe(read(projectionBlock));
+    }
+
+    projectAcceptance(reviewPath, receipt);
+    const reprojected = readFileSync(reviewPath, 'utf-8');
+    expect(reprojected.slice(0, reprojected.indexOf('## Human Review Card'))).toBe(headerBlock);
+
+    // An authored value that disagrees with the receipt is stale, not a second
+    // opinion: the receipt owns all four fields and overwrites them.
+    writeFileSync(reviewPath, header('Reviewed', 'pass', 'sha256:authored', 'authored-rev'));
+    projectAcceptance(reviewPath, receipt);
+    const overwritten = readFileSync(reviewPath, 'utf-8');
+    expect(overwritten).toContain('> **Status**: Accepted');
+    expect(overwritten).toContain(`> **Reviewed Subject SHA256**: ${receipt.subject_sha256}`);
+    expect(overwritten).toContain(`> **Reviewed Target Revision**: ${receipt.target_revision}`);
+    expect(overwritten).not.toContain('sha256:authored');
+    expect(overwritten).not.toContain('authored-rev');
+
+    // `projectAcceptance` is a pure projection of the receipt it is handed, so
+    // varying the disposition alone is enough to pin the Status/Recommendation
+    // mapping for all three.
+    for (const [disposition, status, recommendation] of [
+      ['external_pass', 'Accepted', 'pass'],
+      ['user_waiver', 'Accepted', 'pass'],
+      ['reject', 'Pending', 'fail'],
+    ] as const) {
+      writeFileSync(reviewPath, header('Reviewed', 'pass', 'sha256:authored', 'authored-rev'));
+      projectAcceptance(reviewPath, { ...receipt, disposition });
+      const projected = readFileSync(reviewPath, 'utf-8');
+      expect(projected).toContain(`> **Status**: ${status}`);
+      expect(projected).toContain(`> **Recommendation**: ${recommendation}`);
+      expect(projected).toContain(`> **Reviewed Subject SHA256**: ${receipt.subject_sha256}`);
+      expect(projected).toContain(`> **Reviewed Target Revision**: ${receipt.target_revision}`);
+    }
+  }, 30_000);
+
+  test('rejects a self-consistent forged Change Assessment and invalidates a receipt when a disagreement overlay changes canonical evidence', async () => {
+    const { root, home } = makeFixture();
+    const subject = buildReviewSubject(root, { targetRef: 'main' });
+    expect(subject.status).toBe('ok');
+    const forgedAssessment = assessChange({
+      subject,
+      workflowProfile: 'standard',
+      strictCategories: [],
+      patternNoveltyPaths: [],
+      declaredOracles: [],
+    });
+    if (forgedAssessment.status !== 'ready') throw new Error('fixture forged assessment must be ready');
+    replaceChangeAssessment(root, changeAssessmentEnvelope(forgedAssessment, buildReviewSelectionPacket(forgedAssessment)));
+    await expect(externalPass(root, home)).rejects.toThrow('does not match current base assessment');
+
+    writePassingChecks(root);
+    const baseReceipt = await externalPass(root, home);
+    const checks = JSON.parse(readFileSync(join(root, '.ai', 'harness', 'checks', 'latest.json'), 'utf-8')) as {
+      change_assessment: { assessment: unknown; selection_packet: Parameters<typeof applyReviewerDisagreement>[0] };
+    };
+    const overlay = applyReviewerDisagreement(checks.change_assessment.selection_packet, {
+      review_subject_sha256: subject.review_subject_sha256,
+      target_revision: subject.target_rev,
+      paths: ['feature.txt'],
+      summary: 'independent reviewer requires targeted human review',
+    });
+    replaceChangeAssessment(root, changeAssessmentEnvelope(checks.change_assessment.assessment, overlay));
+    await expect(verifyAcceptance({ root, authorityHome: home })).rejects.toThrow('verification evidence is stale');
+    const overlayReceipt = await externalPass(root, home);
+    expect(overlayReceipt.verification_evidence_sha256).not.toBe(baseReceipt.verification_evidence_sha256);
+    expect((await verifyAcceptance({ root, authorityHome: home })).verification_evidence_sha256)
+      .toBe(overlayReceipt.verification_evidence_sha256);
   }, 30_000);
 
   test('typed user waiver stays distinct from external pass and obeys the contract', async () => {
@@ -288,7 +533,7 @@ describe('AcceptanceReceipt', () => {
     expect(externalReceipt.waiver_grant_sha256).toBeNull();
   }, 30_000);
 
-  test('non-overlapping target movement preserves acceptance; overlap invalidates it', async () => {
+  test('historical acceptance stays bound to its recorded target through unrelated and overlapping target movement', async () => {
     const { root, home } = makeFixture();
     await externalPass(root, home);
     git(root, 'checkout', 'main');
@@ -301,7 +546,7 @@ describe('AcceptanceReceipt', () => {
     writeFileSync(join(root, 'feature.txt'), 'target overlap\n');
     commit(root, 'advance target with overlap');
     git(root, 'checkout', 'codex/demo');
-    await expect(verifyAcceptance({ root, authorityHome: home })).rejects.toThrow('overlaps 1 reviewed path');
+    expect((await verifyAcceptance({ root, authorityHome: home })).disposition).toBe('external_pass');
   }, 30_000);
 
   test('strict archive envelopes preserve plan and contract receipt authority', async () => {
@@ -329,6 +574,122 @@ describe('AcceptanceReceipt', () => {
     commit(root, 'archive accepted workflow');
 
     expect((await verifyAcceptance({ root, authorityHome: home })).disposition).toBe('external_pass');
+
+    const checksPath = join(root, '.ai', 'harness', 'checks', 'latest.json');
+    const checks = JSON.parse(readFileSync(checksPath, 'utf-8'));
+    checks.contract.file = 'tasks/contracts/different.contract.md';
+    writeFileSync(checksPath, `${JSON.stringify(checks, null, 2)}\n`);
+    writeFileSync(
+      join(root, 'plans', 'plan-demo.md'),
+      readFileSync(join(root, 'plans', 'archive', 'plan-demo.md'), 'utf-8'),
+    );
+    await expect(recordAcceptance({
+      root,
+      authorityHome: home,
+      contract: 'tasks/archive/contract-20260721-0800-demo.md',
+      verification: '.ai/harness/checks/latest.json',
+      disposition: 'external_pass',
+      reviewer: 'Claude',
+      source: 'claude-review',
+      actor: null,
+      summary: 'mismatched archive projection must fail',
+      findings: [],
+    })).rejects.toThrow('verification evidence contract is stale');
+  }, 30_000);
+
+  test('versioned archive path projection rewrites pointers without changing receipt authority', async () => {
+    const { root, home } = makeFixture();
+    const livePlanPath = 'plans/plan-demo.md';
+    const liveContractPath = 'tasks/contracts/demo.contract.md';
+    const liveReviewPath = 'tasks/reviews/demo.review.md';
+    mkdirSync(join(root, 'tasks', 'reviews'), { recursive: true });
+    writeFileSync(join(root, liveReviewPath), `# Review\n\nPlan: ${livePlanPath}\n`);
+    writeFileSync(
+      join(root, livePlanPath),
+      `${readFileSync(join(root, livePlanPath), 'utf-8')}\nContract: ${liveContractPath}\n`,
+    );
+    commit(root, 'bind workflow pointers');
+    await externalPass(root, home);
+    mkdirSync(join(root, 'plans', 'archive'), { recursive: true });
+    mkdirSync(join(root, 'tasks', 'archive'), { recursive: true });
+
+    const archivePlanPath = 'plans/archive/plan-demo.md';
+    const archiveContractPath = 'tasks/archive/contract-20260721-0815-demo-v2.md';
+    const archiveReviewPath = 'tasks/archive/review-20260721-0815-demo.md';
+    writeFileSync(join(root, 'tasks', 'archive', 'contract-20260721-0815-demo.md'), 'pre-existing collision\n');
+    const projection = [
+      `> **Archive Projection V1**: \`${livePlanPath}\` => \`${archivePlanPath}\``,
+      `> **Archive Projection V1**: \`${liveContractPath}\` => \`${archiveContractPath}\``,
+      `> **Archive Projection V1**: \`${liveReviewPath}\` => \`${archiveReviewPath}\``,
+    ];
+    const envelope = (lifecycle: 'plan' | 'contract' | 'review') => [
+      '> **Archived**: 2026-07-21 08:15',
+      `> **Related Plan**: ${archivePlanPath}`,
+      '> **Outcome**: Completed',
+      `> **Lifecycle**: ${lifecycle}`,
+      '> **Parent Run ID**: projection-test',
+      ...projection,
+      '',
+    ];
+    const plan = readFileSync(join(root, livePlanPath), 'utf-8')
+      .replace('> **Status**: Executing', '> **Status**: Archived')
+      .replaceAll(livePlanPath, archivePlanPath)
+      .replaceAll(liveContractPath, archiveContractPath);
+    const archivedPlan = [...envelope('plan'), plan].join('\n');
+    writeFileSync(join(root, archivePlanPath), archivedPlan);
+    rmSync(join(root, livePlanPath));
+
+    const contractText = readFileSync(join(root, liveContractPath), 'utf-8')
+      .replaceAll(livePlanPath, archivePlanPath)
+      .replaceAll(liveContractPath, archiveContractPath);
+    const archivedContract = [...envelope('contract'), contractText].join('\n');
+    writeFileSync(join(root, archiveContractPath), archivedContract);
+    rmSync(join(root, liveContractPath));
+    const reviewText = readFileSync(join(root, liveReviewPath), 'utf-8')
+      .replaceAll(livePlanPath, archivePlanPath)
+      .replaceAll(liveReviewPath, archiveReviewPath);
+    const archivedReview = [...envelope('review'), reviewText].join('\n');
+    writeFileSync(join(root, archiveReviewPath), archivedReview);
+    rmSync(join(root, liveReviewPath));
+    commit(root, 'archive workflow with exact path projection');
+
+    sealArchiveProjection({ root, authorityHome: home, contract: archiveContractPath });
+    expect((await verifyAcceptance({ root, authorityHome: home })).disposition).toBe('external_pass');
+    expect(archivedPlan).toContain(`Contract: ${archiveContractPath}`);
+    expect(archivedContract).toContain(`> **Plan**: ${archivePlanPath}`);
+
+    const firstAuthority = acceptanceAuthorityFingerprint(root, home);
+    const renewed = await recordAcceptance({
+      root,
+      authorityHome: home,
+      contract: archiveContractPath,
+      verification: '.ai/harness/checks/latest.json',
+      disposition: 'external_pass',
+      reviewer: 'Claude',
+      source: 'claude-review',
+      actor: null,
+      summary: 'archived authority accepted again',
+      findings: [],
+      now: () => new Date('2026-07-21T08:30:00.000Z'),
+    });
+    expect((await verifyAcceptance({ root, authorityHome: home })).summary).toBe(renewed.summary);
+    const archiveSeal = JSON.parse(readFileSync(archiveProjectionReceiptPath(root, home), 'utf-8'));
+    expect(archiveSeal.acceptance_receipt_sha256).toBe(
+      `sha256:${createHash('sha256').update(readFileSync(acceptanceReceiptPath(root, home))).digest('hex')}`,
+    );
+    expect(acceptanceAuthorityFingerprint(root, home)).not.toBe(firstAuthority);
+
+    const redirectedReviewPath = 'tasks/archive/review-20260721-0815-demo-v2.md';
+    for (const path of [archivePlanPath, archiveContractPath, archiveReviewPath]) {
+      const redirected = readFileSync(join(root, path), 'utf-8').replaceAll(archiveReviewPath, redirectedReviewPath);
+      writeFileSync(join(root, path === archiveReviewPath ? redirectedReviewPath : path), redirected);
+    }
+    rmSync(join(root, archiveReviewPath));
+    await expect(verifyAcceptance({
+      root,
+      authorityHome: home,
+      contract: archiveContractPath,
+    })).rejects.toThrow('ArchiveProjectionReceipt is stale');
   }, 30_000);
 
   test('strict archive envelopes preserve the waiver grant and its exact receipt', async () => {

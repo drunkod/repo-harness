@@ -42,10 +42,25 @@ import {
 } from "./brain-root";
 import { configureCodegraph, ensureCodegraph } from "../tools/codegraph";
 import { runProcess as runBoundedProcess } from "../../effects/process-runner";
+import {
+  inspectOfficialCodexPluginInventory,
+  inspectOfficialCodexPluginReadiness,
+  OFFICIAL_CODEX_MARKETPLACE,
+  OFFICIAL_CODEX_MARKETPLACE_NAME,
+  OFFICIAL_CODEX_PLUGIN_ID,
+} from "../../effects/review/codex-plugin-provider";
 import { askConfirm, writeLine } from "../tty-prompt";
 import { validateRepoAdoptionTarget } from "../repo-adoption/target";
 import { runAdoptionApply, runAdoptionPlan } from "./adoption-plan";
+import {
+  cutoverMarkerPath,
+  formatCutoverBlockers,
+  inspectCutoverQuiescence,
+  isCutoverInstalled,
+  recordCutoverInstalled,
+} from "../../effects/state/coordination-cutover";
 import type { AdoptionMode } from "../../core/adoption/modes";
+import type { DocumentationLanguage } from "../../core/adoption/standard-plan";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..", "..");
@@ -54,18 +69,20 @@ const GLOBAL_RULES_BEGIN = "<!-- BEGIN: repo-harness global-working-rules -->";
 const GLOBAL_RULES_END = "<!-- END: repo-harness global-working-rules -->";
 const GLOBAL_RULES_SELF_NOTE =
   "<!-- repo-harness manages this block; edits inside are overwritten on sync. Keep personal rules outside the markers. -->";
+const COMPLETION_SUMMARY_LABEL_EN = "Next cut";
+const COMPLETION_SUMMARY_LABEL_ZH = "下一刀";
 
 export type InitBrainMode = "manifest-only" | "skip";
 export type ReportingLanguagePreset = "follow" | "zh-CN" | "en" | "custom";
 
 export interface GlobalContextOptions {
   reportLanguageInstruction: string;
+  reportLanguagePreset: ReportingLanguagePreset;
 }
 
 /**
- * Host-scoped skills bundled under `assets/skills/<skill>`. Cross-model skills
- * (repo-harness-cross-review's opposite-provider review, plus the claude-plan
- * external-brain plan consult) install on the opposite host.
+ * Host-scoped skills bundled under `assets/skills/<skill>`. The cross-review
+ * skill is host-aware; claude-plan remains a Codex-host external-brain consult.
  */
 type BundledHostSkill = { skill: string; host: "claude" | "codex"; step: string };
 type BundledHostAgent = { source: string; agent: string; host: "claude" | "codex"; step: string };
@@ -280,6 +297,18 @@ function languageInstruction(preset: ReportingLanguagePreset, custom?: string): 
   return "Use the user's language for reports; keep technical terms in English.";
 }
 
+/**
+ * The single init question drives two projections: the host-level reporting
+ * sentence and the repo-level human-facing document language. A custom
+ * reporting sentence carries no enum value, so generated documents keep the
+ * repo default instead of inventing a language from free text.
+ */
+function documentationLanguageForPreset(preset: ReportingLanguagePreset): DocumentationLanguage {
+  if (preset === "follow") return "follow-user";
+  if (preset === "zh-CN") return "zh-CN";
+  return "en";
+}
+
 function readGlobalRulesTemplate(sourceRoot: string): string {
   const file = join(sourceRoot, "assets", "reference-configs", "global-working-rules.md");
   const raw = readFileSync(file, "utf-8");
@@ -287,9 +316,23 @@ function readGlobalRulesTemplate(sourceRoot: string): string {
   return match?.[1] ?? raw;
 }
 
-function renderGlobalRules(sourceRoot: string, instruction: string): string {
+/**
+ * The completion-summary label is the one phrase in the managed block that a
+ * Chinese-reporting user reads as a literal section title, so it is rendered in
+ * the reporting language while the rest of the template stays English.
+ */
+function renderCompletionSummaryLabel(template: string, preset: ReportingLanguagePreset): string {
+  if (preset !== "zh-CN") return template;
+  return template.replaceAll(COMPLETION_SUMMARY_LABEL_EN, COMPLETION_SUMMARY_LABEL_ZH);
+}
+
+function renderGlobalRules(
+  sourceRoot: string,
+  instruction: string,
+  preset: ReportingLanguagePreset,
+): string {
   const template = readGlobalRulesTemplate(sourceRoot);
-  const rendered = template.replace(
+  const rendered = renderCompletionSummaryLabel(template, preset).replace(
     /^- Use the user's language for reports; keep technical terms in English\.$/m,
     `- ${instruction}`,
   );
@@ -355,7 +398,11 @@ export function writeGlobalContextFiles(
     return { step: "global working rules", status: "failed", detail: "HOME is required to resolve host context files" };
   }
 
-  const block = renderGlobalRules(sourceRoot, opts.reportLanguageInstruction);
+  const block = renderGlobalRules(
+    sourceRoot,
+    opts.reportLanguageInstruction,
+    opts.reportLanguagePreset,
+  );
   const targets: string[] = [];
   if (target === "codex" || target === "both") targets.push(join(home, ".codex", "AGENTS.md"));
   if (target === "claude" || target === "both") targets.push(join(home, ".claude", "CLAUDE.md"));
@@ -468,7 +515,77 @@ export function syncCrossReviewSkills(
   env?: NodeJS.ProcessEnv,
 ): InitStep[] {
   const catalog = loadSkillSurfaceCatalog(sourceRoot);
-  return syncBundledItemsAtHome(sourceRoot, target, homeDir(env), crossReviewSkillsFromCatalog(catalog), []);
+  const steps = syncBundledItemsAtHome(sourceRoot, target, homeDir(env), crossReviewSkillsFromCatalog(catalog), []);
+  if (target === "codex" || target === "both") steps.push(ensureOfficialCodexPlugin(sourceRoot, env));
+  return steps;
+}
+
+function marketplaceConfigured(stdout: string): boolean | null {
+  try {
+    const value: unknown = JSON.parse(stdout);
+    if (!Array.isArray(value)) return null;
+    const matches = value.filter((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const item = entry as { name?: unknown; repo?: unknown };
+      return item.name === OFFICIAL_CODEX_MARKETPLACE_NAME;
+    });
+    if (matches.length > 1) return null;
+    if (matches.length === 0) return false;
+    return (matches[0] as { repo?: unknown }).repo === OFFICIAL_CODEX_MARKETPLACE;
+  } catch {
+    return null;
+  }
+}
+
+function ensureOfficialCodexPlugin(cwd: string, env?: NodeJS.ProcessEnv): InitStep {
+  const claudeCommand = env?.REPO_HARNESS_CLAUDE_EXECUTABLE ?? "claude";
+  let inspection = inspectOfficialCodexPluginInventory(cwd, { env, claudeCommand });
+  if (inspection.status === "failed") {
+    return {
+      step: "official Codex plugin",
+      status: "failed",
+      command: [...inspection.invocation.command],
+      stderr: inspection.message,
+    };
+  }
+  if (inspection.status === "missing") {
+    const marketplaces = runProcess(claudeCommand, ["plugin", "marketplace", "list", "--json"], cwd, env);
+    if (marketplaces.status === "failed") return withStepName(marketplaces, "official Codex plugin", "marketplace inventory failed");
+    const configured = marketplaceConfigured(marketplaces.stdout ?? "");
+    if (configured === null) {
+      return {
+        step: "official Codex plugin",
+        status: "failed",
+        command: marketplaces.command,
+        stderr: `marketplace ${OFFICIAL_CODEX_MARKETPLACE_NAME} is duplicated, malformed, or does not point to ${OFFICIAL_CODEX_MARKETPLACE}`,
+      };
+    }
+    if (!configured) {
+      const added = runProcess(claudeCommand, ["plugin", "marketplace", "add", OFFICIAL_CODEX_MARKETPLACE], cwd, env);
+      if (added.status === "failed") return withStepName(added, "official Codex plugin", "marketplace add failed");
+    }
+    const installed = runProcess(claudeCommand, ["plugin", "install", OFFICIAL_CODEX_PLUGIN_ID, "-s", "user", "-y"], cwd, env);
+    if (installed.status === "failed") return withStepName(installed, "official Codex plugin", "install failed");
+    inspection = inspectOfficialCodexPluginInventory(cwd, { env, claudeCommand });
+  }
+  if (inspection.status === "disabled") {
+    const enabled = runProcess(claudeCommand, ["plugin", "enable", OFFICIAL_CODEX_PLUGIN_ID, "-s", "user"], cwd, env);
+    if (enabled.status === "failed") return withStepName(enabled, "official Codex plugin", "enable failed");
+    inspection = inspectOfficialCodexPluginInventory(cwd, { env, claudeCommand });
+  }
+  const readiness = inspection.status === "ready"
+    ? inspectOfficialCodexPluginReadiness(cwd, { env, claudeCommand })
+    : inspection;
+  if (readiness.status !== "ready") {
+    const detail = readiness.status === "failed" ? readiness.message : `readback status=${readiness.status}`;
+    return { step: "official Codex plugin", status: "failed", detail, stderr: detail };
+  }
+  return {
+    step: "official Codex plugin",
+    status: "ok",
+    command: [...readiness.invocation.command],
+    detail: `enabled ${OFFICIAL_CODEX_PLUGIN_ID} version=${String(readiness.plugin.version)}`,
+  };
 }
 
 function syncWazaSharedRules(target: InstallTargetSpec, env?: NodeJS.ProcessEnv): InitStep {
@@ -585,6 +702,45 @@ export function runInit(
     };
   }
 
+  // Quiescent cutover gate, one-shot. The shared lease protocol relocates
+  // sprint execution ownership; crossing over while legacy per-worktree
+  // markers, an executing contract worktree, or an unfinished closeout are live
+  // would let a fresh agent re-claim work that is actively in flight.
+  //
+  // The crossing happens once per clone, so the gate is guarded by the
+  // installed-protocol marker. Live contract worktrees are the normal steady
+  // state of an adopted repository; a permanently armed gate would refuse every
+  // later upgrade, including ones that have nothing to do with sprint leases.
+  // A null marker path means the target is not a git clone, where there is no
+  // coordination plane and nothing to be quiescent about.
+  //
+  // The gate runs here, before anything is written, but the marker that
+  // disarms it is written only after the adoption apply below succeeds.
+  // Recording it here would disarm a one-shot gate on a run that never
+  // finished adopting: a later legacy marker produced under an old helper
+  // would then be crossed without any quiescence check at all.
+  const cutoverMarker = apply ? cutoverMarkerPath(repoRoot) : null;
+  const cutoverPending = cutoverMarker !== null && !isCutoverInstalled(repoRoot);
+  if (cutoverPending) {
+    const quiescence = inspectCutoverQuiescence(repoRoot);
+    if (!quiescence.quiescent) {
+      const blocked: InitStep[] = [
+        {
+          step: "cutover quiescence",
+          status: "failed",
+          detail: "outstanding sprint execution state; finish or release it before upgrading",
+          stderr: formatCutoverBlockers(quiescence),
+        },
+      ];
+      return {
+        exitCode: 1,
+        repoRoot,
+        steps: blocked,
+        lines: blocked.flatMap(renderStep),
+      };
+    }
+  }
+
   if (syncSkill && apply) {
     const step = runProcess("bash", [join(sourceRoot, "scripts", "sync-codex-installed-copies.sh")], sourceRoot, commandEnv);
     steps.push(withStepName(step, "sync repo-harness skills", `target=${target}`));
@@ -641,6 +797,12 @@ export function runInit(
   };
   steps.push(migrate);
 
+  // The crossing is recorded only now: the gate stays armed for every run that
+  // did not finish adopting this clone.
+  if (cutoverPending && migrate.status === "ok") {
+    recordCutoverInstalled(cutoverMarker!);
+  }
+
   const registration = adoptionApply?.report.registration;
   if (apply && migrate.status === "ok" && registration) {
     steps.push({
@@ -673,16 +835,29 @@ export function runInit(
   if (codegraph && apply) {
     try {
       const cg = ensureCodegraph({ repoRoot, init: true, sync: syncCodegraph, env: commandEnv, host: target });
-      const cgFailed = cg.actions.some((entry) => entry.status === "failed");
+      const failedActions = cg.actions.filter((entry) => entry.status === "failed");
+      const indexReady = cg.projectIndexStatus === "up-to-date";
+      const cgFailed = failedActions.length > 0 || !indexReady;
+      const actionDetail = cg.actions.map((entry) => `${entry.action}:${entry.status}`).join(", ");
+      const indexDetail = `index ${cg.projectIndexStatus}`;
+      const indexRemediation = cg.projectIndexStatus === "unavailable" && cg.resolution.source === "missing"
+        ? `install with: ${cg.remediation.installCommand}; then run: ${cg.remediation.initCommand} && ${cg.remediation.syncCommand}`
+        : cg.projectIndexStatus === "unavailable" || cg.projectIndexStatus === "unknown"
+          ? `inspect with: ${cg.remediation.projectIndexCommand}`
+          : cg.projectIndexStatus === "stale"
+            ? `run: ${cg.remediation.syncCommand}`
+            : `run: ${cg.remediation.initCommand} && ${cg.remediation.syncCommand}`;
+      const failureDetail = [
+        ...failedActions.map((entry) => entry.stderr || `${entry.action} failed`),
+        ...(!indexReady
+          ? [`CodeGraph is enabled, but the project index is ${cg.projectIndexStatus}; ${indexRemediation}`]
+          : []),
+      ].filter(Boolean).join("\n");
       steps.push({
         step: "ensure codegraph index",
-        status: cg.actions.length === 0 ? "skipped" : cgFailed ? "failed" : "ok",
-        detail:
-          cg.resolution.source === "missing"
-            ? "codegraph CLI not found; skipped (install via: repo-harness tools ensure codegraph)"
-            : cg.actions.length > 0
-              ? cg.actions.map((entry) => `${entry.action}:${entry.status}`).join(", ")
-              : `index ${cg.status}`,
+        status: cgFailed ? "failed" : cg.actions.length === 0 ? "skipped" : "ok",
+        detail: actionDetail ? `${actionDetail}; ${indexDetail}` : indexDetail,
+        stderr: failureDetail || undefined,
       });
 
       const mcpHosts =
@@ -893,12 +1068,20 @@ export async function runInteractiveInit(opts: InteractiveInitOptions = {}): Pro
     const languagePreset = await askChoice<ReportingLanguagePreset>(
       rl,
       output,
-      "Reporting language",
+      "Human-facing language",
       [
-        { label: "Follow user's language", value: "follow", detail: "Keep technical terms in English" },
-        { label: "中文", value: "zh-CN", detail: "Write reports in Chinese" },
-        { label: "English", value: "en", detail: "Write reports in English" },
-        { label: "Custom instruction", value: "custom", detail: "Write an exact sentence" },
+        {
+          label: "Follow user's language",
+          value: "follow",
+          detail: "Chat reports and generated docs follow the user; technical terms stay English",
+        },
+        { label: "中文", value: "zh-CN", detail: "Write chat reports and generated docs in Chinese" },
+        { label: "English", value: "en", detail: "Write chat reports and generated docs in English" },
+        {
+          label: "Custom instruction",
+          value: "custom",
+          detail: "Write an exact reporting sentence; generated docs stay English",
+        },
       ],
       0,
     );
@@ -912,6 +1095,7 @@ export async function runInteractiveInit(opts: InteractiveInitOptions = {}): Pro
           )
         : undefined;
     const reportLanguageInstruction = languageInstruction(languagePreset, customInstruction);
+    const documentationLanguage = documentationLanguageForPreset(languagePreset);
 
     let customBrainPath = opts.brainRoot;
     let brainChoices = brainLocationChoices(opts.env, customBrainPath);
@@ -957,6 +1141,7 @@ export async function runInteractiveInit(opts: InteractiveInitOptions = {}): Pro
       `repo=${repoRoot}`,
       `target=${target}`,
       `reporting=${reportLanguageInstruction}`,
+      `documentation_language=${documentationLanguage}`,
       `brainRoot=${(brainChoice as BrainRootChoice).root}`,
       `brainMode=${brainMode}`,
       `externalSkills=${externalSkills}`,
@@ -986,7 +1171,8 @@ export async function runInteractiveInit(opts: InteractiveInitOptions = {}): Pro
       codegraph,
       configureCodegraphMcp: codegraph,
       syncCodegraph: codegraph,
-      globalContext: { reportLanguageInstruction },
+      env: { ...(opts.env ?? process.env), REPO_HARNESS_DOCUMENTATION_LANGUAGE: documentationLanguage },
+      globalContext: { reportLanguageInstruction, reportLanguagePreset: languagePreset },
       brainRoot: (brainChoice as BrainRootChoice).root,
       brainMode,
     });

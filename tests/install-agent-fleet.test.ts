@@ -28,23 +28,23 @@ const CODEX_EXPECTATIONS: Record<
     sandboxMode: "read-only",
   },
   "fast-worker": {
-    model: "gpt-5.6-luna",
-    effort: "max",
-    descriptionLabel: "GPT-5.6 Luna at max reasoning",
+    model: "gpt-6-astra",
+    effort: "low",
+    descriptionLabel: "GPT-6 Astra at low reasoning",
     sourceDescription: "Opus at medium effort",
     sandboxMode: "workspace-write",
   },
   "deep-worker": {
-    model: "gpt-5.6-terra",
-    effort: "xhigh",
-    descriptionLabel: "GPT-5.6 Terra at xhigh reasoning",
+    model: "gpt-6-astra",
+    effort: "medium",
+    descriptionLabel: "GPT-6 Astra at medium reasoning",
     sourceDescription: "Opus at high effort",
     sandboxMode: "workspace-write",
   },
   gatekeeper: {
-    model: "gpt-5.6-terra",
-    effort: "xhigh",
-    descriptionLabel: "GPT-5.6 Terra at xhigh reasoning",
+    model: "gpt-6-astra",
+    effort: "medium",
+    descriptionLabel: "GPT-6 Astra at medium reasoning",
     sourceDescription: "Opus at high effort",
     sandboxMode: "read-only",
   },
@@ -66,8 +66,10 @@ const CODEX_EXPECTATIONS: Record<
 
 // Canonical anti-extras clause (scripts/contract-run.ts EXECUTION_BOUNDARY, joined with
 // "\n"). Hardcoded here the same way tests/workflow-contract.test.ts hardcodes the
-// canonical first sentence: this is the literal text the installer must embed verbatim
-// into every generated Codex agent's developer_instructions.
+// canonical first sentence: this is the literal text the installer must NOT embed into
+// a generated persona. The clause has exactly one owner on the Codex native-child path,
+// the SubagentStart task packet, which alone knows whether the child is contract-bound
+// and writable.
 const CANONICAL_BOUNDARY_TEXT = [
   "Execution boundary: implement exactly the Goal, In scope items, Allowed Paths, and Exit Criteria in this brief. Treat absent requirements as forbidden design space, not as permission to improve.",
   "",
@@ -596,7 +598,7 @@ describe("install-agent-fleet", () => {
   test("the installer declares Bun as its only semantic parser runtime", () => {
     const source = readFileSync(SCRIPT, "utf-8");
     expect(source).toContain("install-agent-fleet.sh requires bun");
-    expect(source).toContain('MIN_BUN_VERSION="1.1.35"');
+    expect(source).toContain('MIN_BUN_VERSION="1.4.0"');
     expect(source).toContain("Bun.TOML.parse(");
     expect(source).not.toContain("install-agent-fleet.sh requires node or bun");
     expect(source).toContain('AGENT_FLEET_SOURCE_DIR="$package_root/agents/fleet"');
@@ -614,7 +616,7 @@ describe("install-agent-fleet", () => {
       mkdirSync(fakeBin, { recursive: true });
       writeFileSync(
         fakeBun,
-        ['#!/bin/sh', 'if [ "$1" = "--version" ]; then', "  echo 1.0.0", "  exit 0", "fi", "exit 99", ""].join("\n"),
+        ['#!/bin/sh', 'if [ "$1" = "--version" ]; then', "  echo 1.3.14", "  exit 0", "fi", "exit 99", ""].join("\n"),
       );
       chmodSync(fakeBun, 0o755);
       const res = spawnSync("bash", [SCRIPT], {
@@ -627,7 +629,7 @@ describe("install-agent-fleet", () => {
         },
       });
       expect(res.status).not.toBe(0);
-      expect(res.stderr).toContain("requires Bun >= 1.1.35 (found: 1.0.0)");
+      expect(res.stderr).toContain("requires Bun >= 1.4.0 (found: 1.3.14)");
       expect(existsSync(join(home, ".claude"))).toBe(false);
       expect(existsSync(join(home, ".codex"))).toBe(false);
     } finally {
@@ -645,14 +647,14 @@ describe("install-agent-fleet", () => {
       mkdirSync(join(home, ".bun/bin"), { recursive: true });
       writeFileSync(
         oldBun,
-        ['#!/bin/sh', 'if [ "$1" = "--version" ]; then', "  echo 1.0.0", "  exit 0", "fi", "exit 99", ""].join("\n"),
+        ['#!/bin/sh', 'if [ "$1" = "--version" ]; then', "  echo 1.3.14", "  exit 0", "fi", "exit 99", ""].join("\n"),
       );
       writeFileSync(
         homeBun,
         [
           "#!/bin/sh",
           'if [ "$1" = "--version" ]; then',
-          "  echo 1.1.35",
+          "  echo 1.4.0",
           "  exit 0",
           "fi",
           `exec ${JSON.stringify(process.execPath)} "$@"`,
@@ -677,23 +679,28 @@ describe("install-agent-fleet", () => {
     }
   }, 30_000);
 
-  test("generated developer_instructions embeds the canonical EXECUTION_BOUNDARY text verbatim", () => {
+  test("generated developer_instructions carries the role body only, never the EXECUTION_BOUNDARY clause", () => {
     const { root, home } = setupFakeHome("install-agent-fleet-boundary");
     try {
-      // The installer source holds the boundary as an array of paragraph literals
-      // (joined into one string only at runtime), so assert each paragraph is present
-      // in the source verbatim, then assert the fully-joined text appears in the
-      // actual generated output -- the stronger, functional half of this check.
+      // The installer no longer owns the clause at all: neither its source nor any
+      // generated persona may carry a paragraph of it.
       const installerSource = readFileSync(SCRIPT, "utf-8");
       for (const paragraph of CANONICAL_BOUNDARY_TEXT.split("\n\n")) {
-        expect(installerSource).toContain(paragraph);
+        expect(installerSource).not.toContain(paragraph);
       }
 
       const res = runInstaller(home, FLEET_SOURCE_DIR);
       expect(res.status).toBe(0);
       for (const agent of AGENTS) {
         const toml = readFileSync(join(home, ".codex/agents", `${agent}.toml`), "utf-8");
-        expect(toml).toContain(CANONICAL_BOUNDARY_TEXT);
+        for (const paragraph of CANONICAL_BOUNDARY_TEXT.split("\n\n")) {
+          expect(toml).not.toContain(paragraph);
+        }
+        // The persona body itself is still projected: developer_instructions ends
+        // with the source body's final line, not with an appended boundary block.
+        const sourceBody = readFileSync(join(FLEET_SOURCE_DIR, `${agent}.md`), "utf-8").trimEnd();
+        const lastBodyLine = sourceBody.slice(sourceBody.lastIndexOf("\n") + 1);
+        expect(toml).toContain(`${lastBodyLine}'''`);
       }
     } finally {
       rmSync(root, { recursive: true, force: true });

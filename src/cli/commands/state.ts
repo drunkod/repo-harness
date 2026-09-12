@@ -1,3 +1,4 @@
+import { recordArtifactRepair } from '../../effects/state/artifact-repair-store';
 import { Command } from 'commander';
 import {
   ATTEMPT_OUTCOME_VALUES,
@@ -5,21 +6,23 @@ import {
 } from '../../core/state/attempt-ledger';
 import type {
   AttemptReceiptV1,
+  BoardDocumentV1,
   ContinuationEnvelopeV1,
   EffectiveState,
   EffectiveStateRiskInput,
 } from '../../core/state/types';
+import type { CommandOutcome } from '../../core/state/command-outcome';
 import type { WorkflowOperationKind, WorkflowProfile } from '../../core/workflow/profile';
 import { appendAttemptReceipt } from '../../effects/state/attempt-ledger-store';
+import {
+  readActiveSprintPath,
+  readCanonicalTargetRef,
+  type CollectBoardOptions,
+} from '../../effects/state/collect-board-inputs';
+import { resolveBoard } from '../../effects/state/resolve-board';
 import { resolveContinuationEnvelope } from '../../effects/state/resolve-continuation-envelope';
 import { resolveEffectiveState } from '../../effects/state/resolve-effective-state';
 import { migrateLegacyActivePlan } from '../hook/legacy-active-plan-migration';
-
-export interface CommandOutcome {
-  readonly exitCode: 0 | 1 | 2;
-  readonly stdout: string;
-  readonly stderr: string;
-}
 
 export interface StateCommandOptions {
   readonly targetPath?: readonly string[];
@@ -156,6 +159,65 @@ export function attemptStateCommand(
   return { exitCode: 0, stdout: `${JSON.stringify(built.receipt, null, 2)}\n`, stderr: '' };
 }
 
+export interface BoardCommandOptions {
+  readonly sprint?: string;
+  readonly targetRef?: string;
+}
+
+export interface BoardCommandDependencies {
+  readonly repoRoot: string;
+  readonly nowMs: number;
+  readonly activeSprintPath: () => string | null;
+  readonly canonicalTargetRef: () => string;
+  readonly resolveBoard: (repoRoot: string, options: CollectBoardOptions) => BoardDocumentV1;
+}
+
+/**
+ * Pure command projection for `state board`.
+ *
+ * `--sprint` falls back to the active sprint marker and nothing else. There is
+ * deliberately no `plans/sprints/` directory scan: picking a sprint by scanning
+ * would make the board's scope depend on directory contents rather than on the
+ * marker that every other verb already treats as the answer to "which sprint",
+ * and a repository with two sprint files would silently get a different board
+ * than a claim taken in the same repository.
+ *
+ * Exit codes match the rest of `state`: 2 is a malformed invocation (including
+ * no sprint to project), 1 is an operational failure, 0 is a document -- and a
+ * `changed_during_read` document is still a document, not a failure.
+ */
+export function boardStateCommand(
+  options: BoardCommandOptions,
+  deps: BoardCommandDependencies,
+): CommandOutcome {
+  let sprintPath = options.sprint ?? null;
+  let targetRef = options.targetRef ?? null;
+  try {
+    if (sprintPath === null) sprintPath = deps.activeSprintPath();
+    if (targetRef === null) targetRef = deps.canonicalTargetRef();
+  } catch (error) {
+    return operationalFailure(error);
+  }
+  if (sprintPath === null) {
+    return {
+      exitCode: 2,
+      stdout: '',
+      stderr: 'no active sprint is selected; pass --sprint <path>\n',
+    };
+  }
+
+  try {
+    const document = deps.resolveBoard(deps.repoRoot, {
+      sprintPath,
+      targetRef,
+      nowMs: deps.nowMs,
+    });
+    return { exitCode: 0, stdout: `${JSON.stringify(document, null, 2)}\n`, stderr: '' };
+  } catch (error) {
+    return operationalFailure(error);
+  }
+}
+
 function writeOutcome(outcome: CommandOutcome): void {
   if (outcome.stdout) process.stdout.write(outcome.stdout);
   if (outcome.stderr) process.stderr.write(outcome.stderr);
@@ -215,6 +277,38 @@ export function buildStateCommand(): Command {
         repoRoot: process.cwd(),
         nowMs: Date.now(),
         append: appendAttemptReceipt,
+      }));
+    });
+
+  state
+    .command('repair-artifact')
+    .description('Record a reason to edit only the current verifier-declared invalid contract')
+    .requiredOption('--json', 'Output the artifact repair receipt as JSON')
+    .requiredOption('--reason <reason>', 'Why the active verification artifact needs repair')
+    .action((opts: { reason: string }) => {
+      try {
+        const receipt = recordArtifactRepair(process.cwd(), opts.reason);
+        writeOutcome({ exitCode: 0, stdout: `${JSON.stringify(receipt, null, 2)}\n`, stderr: '' });
+      } catch (error) { writeOutcome(operationalFailure(error)); }
+    });
+
+  state
+    .command('board')
+    .description('Project the read-only kanban board for one canonical sprint')
+    .requiredOption('--json', 'Output the board document as JSON')
+    .option('--sprint <path>', 'Repo-relative sprint path; defaults to the active sprint marker')
+    .option(
+      '--target-ref <ref>',
+      'Canonical ref the sprint is read from; defaults to the policy merge-back target',
+    )
+    .action((opts: BoardCommandOptions) => {
+      const repoRoot = process.cwd();
+      writeOutcome(boardStateCommand(opts, {
+        repoRoot,
+        nowMs: Date.now(),
+        activeSprintPath: () => readActiveSprintPath(repoRoot),
+        canonicalTargetRef: () => readCanonicalTargetRef(repoRoot),
+        resolveBoard,
       }));
     });
 

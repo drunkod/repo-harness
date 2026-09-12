@@ -1,11 +1,10 @@
 # workflow-engine/contract-assets 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-contract-assets" sourceDigest="sha256:6d50fa43d5583ee0ef25afa1363333f11f3559475cae0f8dd61d8973925acf41" rendererVersion="archcontext.docs-renderer/v2" outputDigest="sha256:4ed97fc0617f36e832189a37a20f4ee0ef42f852f710578ba512170012b2371e" verifiedAgainst="main@c30f08fcf306b15911f300288bd10cbff03d5377@2026-08-12T23:03:40+08:00" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-contract-assets" sourceDigest="sha256:6f1d8c7839dc83c16c80bee79ee8c6b3b3131e523928d2d0e957180fd0541c02" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:beaaa466d51cbd8f929fd6acd6645c6f5136cccf539f09b63a273e5ab38519fa" -->
 > **狀態**:`active`
-> **Verified against**:`main@c30f08fcf306b15911f300288bd10cbff03d5377`(2026-08-12)
 > **Capability ID**:`capability.workflow-engine.contract-assets`(kind `capability`)
-> **Matched Prefixes**:`assets/workflow-contract.v1.json`、`.ai/harness/workflow-contract.json`、`.ai/harness/policy.json`、`.ai/context/context-map.json`、`.archcontext/model/nodes/**`、`scripts/capability-resolver.ts`、`scripts/capability-config.ts`、`scripts/contract-run.ts`、`scripts/contract-worktree.sh`、`scripts/archive-workflow.sh`、`scripts/merge-gate.ts`、`scripts/ship-worktrees.sh`、`src/cli/commands/init.ts`、`src/cli/commands/capability-context.ts`、`src/cli/runtime/helper-runner.ts`、`assets/templates/**`、`assets/reference-configs/**`、`docs/reference-configs/**`
+> **Matched Prefixes**:`assets/workflow-contract.v1.json`、`.ai/harness/workflow-contract.json`、`.ai/harness/policy.json`、`.ai/context/context-map.json`、`.archcontext/model/nodes/**`、`scripts/capability-resolver.ts`、`scripts/capability-config.ts`、`scripts/contract-run.ts`、`scripts/contract-worktree.sh`、`scripts/archive-workflow.sh`、`scripts/merge-gate.ts`、`scripts/ship-worktrees.sh`、`src/cli/commands/init.ts`、`src/cli/commands/capability-context.ts`、`src/effects/runtime/helper-runner.ts`、`assets/templates/**`、`assets/reference-configs/**`、`docs/reference-configs/**`
 > **Local Contracts**:`assets/AGENTS.md`、`assets/CLAUDE.md`
-> **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與 Git 狀態投影生成,手改會在下次投影被覆蓋。
+> **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與源碼度量投影生成,手改會在下次投影被覆蓋。本文檔不記錄出處;本次投影所驗證的 commit 見 `docs/architecture/.projection-manifest.json`。
 
 Maintains canonical workflow contracts, templates, capability nodes, and helper projections.
 
@@ -35,10 +34,9 @@ flowchart LR
 
 ### 1.3 規模信號
 
-- 文件數:`161`
-- 總行數:`45320`
-- 匹配前綴:`assets/workflow-contract.v1.json`、`.ai/harness/workflow-contract.json`、`.ai/harness/policy.json`、`.ai/context/context-map.json`、`.archcontext/model/nodes/**`、`scripts/capability-resolver.ts`、`scripts/capability-config.ts`、`scripts/contract-run.ts`、`scripts/contract-worktree.sh`、`scripts/archive-workflow.sh`、`scripts/merge-gate.ts`、`scripts/ship-worktrees.sh`、`src/cli/commands/init.ts`、`src/cli/commands/capability-context.ts`、`src/cli/runtime/helper-runner.ts`、`assets/templates/**`、`assets/reference-configs/**`、`docs/reference-configs/**`
-- 復算:`archctx docs plan --json`(掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`)
+- 規模量級:`100–200` 個文件 / `50k–100k` 行
+- 匹配前綴:`assets/workflow-contract.v1.json`、`.ai/harness/workflow-contract.json`、`.ai/harness/policy.json`、`.ai/context/context-map.json`、`.archcontext/model/nodes/**`、`scripts/capability-resolver.ts`、`scripts/capability-config.ts`、`scripts/contract-run.ts`、`scripts/contract-worktree.sh`、`scripts/archive-workflow.sh`、`scripts/merge-gate.ts`、`scripts/ship-worktrees.sh`、`src/cli/commands/init.ts`、`src/cli/commands/capability-context.ts`、`src/effects/runtime/helper-runner.ts`、`assets/templates/**`、`assets/reference-configs/**`、`docs/reference-configs/**`
+- 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
 ### 1.4 依賴邊界
 
@@ -90,6 +88,8 @@ sequenceDiagram
 | I8 | 51/52 helper 与 `scripts/` byte-identical；唯一例外携带 `@generated-from` 哈希头 | `scripts/sync-helper-sources.ts` `--check` |
 | I9 | adoption 事务永不无声覆盖用户内容 | `expectedContentHash` / `expectedAbsent` / move-collision 抛错 |
 | I10 | install profile 单一 authored 权威是 `profile`，`components` 是漂移检查过的投影 | `global-runtime.ts:651` + `PROFILE_COMPONENTS` |
+| I11 | 本地 contract publication 每个 work-package 只向 target 增加一个 commit，且 publication tree 必须与 seal 验证后的 lifecycle HEAD byte-identical | `contract-worktree.sh` 的 frozen-base、`commit-tree` parent/tree 断言、`publication_prepared` journal phase |
+| I12 | finish abort 只有在 runner 证明 target publication 未落地后才能把同一 fenced lease 从 `completing` 恢复为 `bound`；canonical 已完成行绝不重开 | `contract-worktree.sh` 的 landed-effect probe + `sprint abort-completion` 的 task-lock/canonical-row gate |
 
 ### 3.3 已接受的约束与取舍
 
@@ -98,6 +98,8 @@ sequenceDiagram
 - **闸门在 commit 之后跑**。pre-commit 的 HEAD 无法标识 merge candidate，所以只能先落 commit 再封印；FAIL/BLOCKED 靠恢复 pre-finish commit 与实时工作流工件来回滚。
 - **`functional_block_selector` 保留在 context-map 里但自述为 compatibility selector**（`.ai/context/context-map.json`，`rule` 字段原文：`compatibility selector; capability registry is the source of truth`）。这是**已实现、保留字段**：结构在，权威已经移交给注册表。它是有边界的遗留物，不是双权威。
 - **`merge-gate` 无 provider 调用**。它是确定性封印，不是语义评审；语义验收由独立的 AcceptanceReceipt 承担。这条边界让闸门可离线、可重放。
+- **证据边界不再等于 public commit 边界**。source branch 保留 checkpoint 与 lifecycle commits 供恢复和审计；local merge 用 frozen target base + verified lifecycle tree 合成一个 publication commit。代价是 source commit topology 不进入 target ancestry，收益是 main history 与 work-package/rollback 边界一致；journal 记录 publication SHA，并以 target ref 是否包含它判断外部效果是否已经落地。
+- **lease 与 closeout journal 没有跨存储原子事务**。abort 先幂等恢复 lease，再把 journal 标为 `aborted`；若两步之间崩溃，显式 `recover abort` 重放同一个 fenced transition。反向排序会留下已宣称 aborted、却仍不可接力的 `completing` lease，因此不采用。
 
 ### 3.4 10x 规模下先垮的点
 
@@ -116,7 +118,7 @@ sequenceDiagram
 
 | 历史段落 | 历史说法 | HEAD 实际 | 位置 |
 | --- | --- | --- | --- |
-| 2026-07-16 Closeout Runner Guardrails | `verify-contract`/`verify-sprint` 720 秒 | **1,260 秒**（`VERIFIER_HELPER_TIMEOUT_MS = 1_260_000`） | `src/cli/runtime/helper-runner.ts:13` |
+| 2026-07-16 Closeout Runner Guardrails | `verify-contract`/`verify-sprint` 720 秒 | **3,660 秒**（`VERIFIER_HELPER_TIMEOUT_MS = 3_660_000`） | `src/cli/runtime/helper-runner.ts:15` |
 | 2026-07-16 Closeout Runner Guardrails | 900 秒档只含 `contract-worktree`/`ship-worktrees` | 还包含 **`merge-gate`**；`PROTECTED_HELPERS` 另含 `acceptance-receipt` | `helper-runner.ts:12`、`:134-137` |
 | 2026-07-14 Helper Descriptions | 46 → 48 条描述 | **52 条**（scripts 与 descriptions 均为 52） | `assets/workflow-contract.v1.json#helpers` |
 
@@ -139,6 +141,63 @@ sequenceDiagram
 - Prompt-hook permission is typed `/delegate` or `/parallel` only. Policy no
   longer grants SessionStart standing authorization or treats natural-language
   classification as permission.
+
+### 2026-08-14 Single Publication Commit Cutover
+
+- `contract-worktree finish --merge` no longer fast-forwards the source branch's
+  checkpoint and lifecycle topology into the target. It seals the exact source
+  lifecycle HEAD, creates one commit whose parent is the frozen target base and
+  whose tree is identical to that HEAD, then fast-forwards the target to the
+  synthesized publication commit.
+- `publication_prepared` is recorded before target mutation. Recovery treats a
+  created-but-unpublished object as abortable and a target ref containing that
+  exact commit as landed, so the pre-existing SIGKILL window remains fail-closed.
+- Publication preserves repository signing policy: `commit.gpgsign=true`
+  selects `commit-tree -S`; invalid policy values and signing failures stop
+  before target mutation. A lifecycle tree already equal to the target tree is
+  rejected rather than published as an empty commit.
+- After the target ref contains the publication commit, in-process assertion or
+  journal-write failures retain the lifecycle state and journal for explicit
+  reconcile; the EXIT trap may auto-abort only while no target effect exists.
+- Recovery of journals created before this cutover is explicitly bounded to
+  the next major release: only a missing-`publication_prepared` lifecycle HEAD
+  already contained by the target is recognized. Operators must resolve those
+  journals before that upgrade, after which the fallback is removed.
+- `finish --no-merge` and PR shipping retain source-branch commits because the
+  provider owns their later merge/squash boundary. AcceptanceReceipt and review
+  subject schemas are unchanged; commit topology is not semantic authority.
+
+### 2026-08-21 Windows Protected Helper Platform Contract
+
+- P1: `src/cli/runtime/helper-runner.ts` remains the sole protected-helper
+  dispatcher; `src/cli/runtime/protected-helper-platform.ts` owns platform
+  resolution and the protocol-1 Windows schema; install/update owns discovery
+  and persistence; Git for Windows supplies the Bash/POSIX runtime; and the
+  existing process runner/supervisor pair owns bounded execution and receives
+  the exact validated `taskkill.exe` for both termination paths. The
+  four source helpers and their packaged asset mirrors remain the execution
+  surface. Installing Git, `jq`, `gh`, WSL, or an alternate shell is outside
+  this boundary.
+- P2: an explicit Windows install/update resolves Git and `taskkill` from the
+  operator environment, proves `taskkill` matches native `SystemRoot\\System32`,
+  proves Git/Bash/`usr/bin` share one non-symlink
+  Git-for-Windows root, validates the ceremony's absolute non-symlink `TEMP`
+  directory, probes the executables, and atomically writes the OS
+  account config without replacing siblings. Later `runHelper` reads and
+  revalidates that record, resolves the repo with pinned Git, selects the
+  packaged helper, and launches pinned Bash/Bun with an isolated Windows
+  environment. Direct `acceptance-receipt.ts` and `merge-gate.ts` invocation
+  re-resolves the same host contract rather than trusting caller binary/path/temp
+  overrides, and the shell ship path asks merge-gate for a scalar required flag
+  without adding a `jq` dependency. Missing or stale state stops before the
+  helper or repository side effect.
+- P3: runtime `PATH` probing would reintroduce caller authority, so discovery is
+  intentionally confined to install/update and relocation requires an explicit
+  update. Small host-absolute predicates in the two shell helpers preserve the
+  existing Bash implementation while accepting Windows drive paths. At 10x
+  invocation volume, repeated validation is bounded local filesystem I/O; the
+  first operational failure remains a moved Git-for-Windows installation, and
+  that failure is deliberately closed rather than repaired heuristically.
 
 ---
 
@@ -372,6 +431,17 @@ sequenceDiagram
   while overlap invalidates semantic acceptance.
 - PR CI is the sole candidate-branch lane. `codex/**` push CI is removed and
   workflow concurrency cancels superseded runs for the same PR/ref.
+
+### 2026-08-14 Change Assessment contract projection
+
+- New contract templates freeze a strict `## Change Assessment` declaration;
+  helper inventory projects `change-assessment.ts` and
+  `runtime-evidence-receipt.ts` into the npm package with the other canonical
+  helpers.
+- The contract declaration is only oracle intent. Final-subject selection is
+  recomputed at prepare-acceptance from policy `review_base`, and the result is
+  bound through verification evidence while protocol-2 AcceptanceReceipt stays
+  the single merge authority.
 
 ---
 

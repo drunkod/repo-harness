@@ -13,6 +13,7 @@ instead of becoming separate hook sources of truth.
 
 - `runtime-harness-hook-adapters` -> `docs/architecture/modules/runtime-harness/hook-adapters.md`
 - `runtime-harness-mcp-sidecar` -> `docs/architecture/modules/runtime-harness/mcp-sidecar.md`
+- `runtime-harness-agent-runtime-effects` -> `docs/architecture/modules/runtime-harness/agent-runtime-effects.md`
 
 ## Stable Rules
 
@@ -27,3 +28,7 @@ instead of becoming separate hook sources of truth.
 
 - `bun test tests/hook-runtime.test.ts tests/hook-contracts.test.ts tests/workflow-contract.test.ts`
 - `bash scripts/check-task-workflow.sh --strict`
+
+- `runtime-harness-interface-change` -> `docs/architecture/modules/runtime-harness/interface-change.md`
+
+- `runtime-harness-collaboration` -> `docs/architecture/modules/runtime-harness/collaboration.md`

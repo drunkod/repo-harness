@@ -1,3 +1,4 @@
+import { runMcpUninstall, type McpUninstallOptions } from '../mcp/uninstall';
 import { Command } from 'commander';
 import { isAbsolute, relative } from 'path';
 import { createMcpToolContext } from '../mcp/server';
@@ -62,7 +63,7 @@ interface McpPrepareGoalOptions {
   sprint: string;
   referenceRepo?: string;
   extraInstructions?: string;
-  overwrite?: boolean;
+  expectedSha256?: string;
 }
 
 function parsePort(value: string): number {
@@ -104,7 +105,9 @@ async function prepareCodexGoalFromSprint(rawOpts: McpPrepareGoalOptions): Promi
     goal_sprint_path: rawOpts.sprint,
     reference_repo: rawOpts.referenceRepo,
     extra_instructions: rawOpts.extraInstructions,
-    overwrite: rawOpts.overwrite === true,
+    // Absent means create-only; the key is sent only when the caller supplied
+    // one, so an omitted flag never reads as an empty revision precondition.
+    ...(rawOpts.expectedSha256 === undefined ? {} : { expected_sha256: rawOpts.expectedSha256 }),
   });
   const payload = JSON.parse(result.content[0]?.text ?? '{}');
   if (payload.error) {
@@ -135,7 +138,7 @@ export function buildMcpCommand(): Command {
     .option('--transport <transport>', 'Transport: stdio|http', 'stdio')
     .option('--host <host>', 'HTTP bind host', '127.0.0.1')
     .option('--port <port>', 'HTTP bind port', '8765')
-    .option('--profile <profile>', 'MCP profile: planner|executor|orchestrator|coding', 'planner')
+    .option('--profile <profile>', 'MCP profile: planner|executor|orchestrator|coding|engineer', 'planner')
     .option('--auth <mode>', 'HTTP auth mode: oauth|bearer|url-token', 'oauth')
     .option('--enable-reader', 'Force read-only workspace tools in this same MCP connector; registered adopted repos are included automatically')
     .option('--allow-root <path>', 'Additional non-repo local root for workspace reader/discovery tools; may be repeated', collectOption, [])
@@ -227,20 +230,45 @@ export function buildMcpCommand(): Command {
     .action((rawOpts: { json?: boolean }) => {
       void runMcpAction(() => {
         const rows = listManagedCodingWorkspaces();
-        console.log(rawOpts.json ? JSON.stringify({ workspaces: rows }, null, 2) : rows.map((row) => `${row.id}\t${row.branch}\t${row.dirty ? 'dirty' : 'clean'}\t${row.path_exists ? 'present' : 'missing'}`).join('\n'));
+        console.log(rawOpts.json ? JSON.stringify({ workspaces: rows }, null, 2) : rows.map((row) => {
+          const worktreeState = row.stale_reason !== null ? 'stale' : (row.dirty ? 'dirty' : 'clean');
+          return `${row.id}\t${row.branch}\t${worktreeState}\t${row.path_exists ? 'present' : 'missing'}`;
+        }).join('\n'));
       });
     });
   workspaces
     .command('cleanup')
     .requiredOption('--workspace-id <id>', 'Managed workspace id')
+    .option('--target <ref>', 'Explicit integration target for a legacy workspace that has no bound target')
     .option('--json', 'Output JSON')
-    .action((rawOpts: { workspaceId: string; json?: boolean }) => {
+    .action((rawOpts: { workspaceId: string; target?: string; json?: boolean }) => {
       void runMcpAction(() => {
-        const result = cleanupManagedCodingWorkspace(rawOpts.workspaceId);
+        const result = cleanupManagedCodingWorkspace(rawOpts.workspaceId, process.env, { targetRef: rawOpts.target });
         console.log(rawOpts.json ? JSON.stringify(result, null, 2) : `[repo-harness mcp] Removed ${result.workspace_id} (${result.branch})`);
       });
     });
   mcp.addCommand(workspaces);
+
+  mcp.command('uninstall')
+    .description('Remove local MCP setup configuration while preserving workspaces and archives')
+    .option('--repo <path>', 'Project whose Codex MCP registration to remove', '.')
+    .option('--target <target>', 'codex|chatgpt|both', 'both')
+    .option('--dry-run', 'Preview cleanup without filesystem writes')
+    .option('--json', 'Output structured local cleanup result')
+    .option('--services-stopped', 'Confirm all MCP HTTP services have been stopped before credential deletion')
+    .option('--recover-interrupted', 'Restore recorded project fragments from an interrupted setup before uninstall')
+    .action((opts: McpUninstallOptions & { json?: boolean }) => {
+      void runMcpAction(() => {
+        const result = runMcpUninstall(opts);
+        console.log(opts.json ? JSON.stringify(result, null, 2) : [
+          ...result.items.map((item) => `[${item.action}] ${item.path}: ${item.reason}`),
+          ...result.retained.map((item) => `[preserve] ${item}`),
+          ...result.externalActions.map((item) => `[external] ${item}`),
+          `[mcp uninstall] ${result.status} (local configuration${result.dryRun ? ', dry-run' : ''})`,
+        ].join('\n'));
+        if (result.status === 'partial') process.exitCode = 1;
+      });
+    });
 
   const setup = new Command('setup').description('Generate MCP setup files for ChatGPT or Codex');
 
@@ -252,7 +280,7 @@ export function buildMcpCommand(): Command {
     .option('--port <port>', 'Local MCP HTTP bind port')
     .option('--endpoint <url>', 'Stable public HTTPS /mcp endpoint to store in ignored local config')
     .option('--server-name <name>', 'ChatGPT Connector/MCP server name to record in ignored local config')
-    .option('--profile <profile>', 'MCP profile to configure: planner|executor|orchestrator|coding')
+    .option('--profile <profile>', 'MCP profile to configure: planner|executor|orchestrator|coding|engineer')
     .option('--grant-read-write <path>', 'Explicitly grant one adopted repo read_write access for coding; may be repeated', collectOption, [])
     .option('--enable-reader', 'Enable read-only workspace tools in the same ChatGPT MCP Connector; registered adopted repos are included automatically')
     .option('--allow-root <path>', 'Additional non-repo local root for workspace reader/discovery tools; may be repeated', collectOption, [])
@@ -300,7 +328,7 @@ export function buildMcpCommand(): Command {
     .requiredOption('--sprint <path>', 'Checklist Sprint path to execute')
     .option('--reference-repo <path>', 'Read-only reference repo path to include in the Goal')
     .option('--extra-instructions <text>', 'Additional bounded execution instruction for Codex')
-    .option('--overwrite', 'Replace an existing Codex goal handoff')
+    .option('--expected-sha256 <hex>', 'Current sha256 of .ai/harness/handoff/codex-goal.md; required to regenerate an existing goal, omit to create')
     .action((rawOpts: McpPrepareGoalOptions) => {
       void runMcpAction(async () => {
         const lines = await prepareCodexGoalFromSprint(rawOpts);

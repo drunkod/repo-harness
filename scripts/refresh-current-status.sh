@@ -5,7 +5,7 @@ usage() {
   cat <<'USAGE_EOF'
 Usage: scripts/refresh-current-status.sh [--write] [--clear] [--reason <reason>] [--target <branch>]
 
-Refresh the tracked tasks/current.md read model from repo-local workflow
+Refresh the ignored local tasks/current.md read model from repo-local workflow
 artifacts. By default this prints a preview. Use --write to update the file.
 USAGE_EOF
 }
@@ -98,15 +98,40 @@ timestamp_now() {
 file_metadata_value() {
   local file="$1"
   local label="$2"
+  local value
   [[ -f "$file" ]] || return 1
-  awk -v label="$label" '
+  value="$(awk -v label="$label" '
     $0 ~ "^> \\*\\*" label "\\*\\*:" {
       sub("^> \\*\\*" label "\\*\\*: *", "")
       gsub(/\r/, "")
       print
       exit
     }
-  ' "$file" | xargs
+  ' "$file")"
+  trim_value "$value"
+}
+
+trim_value() {
+  local value="$1"
+  value="${value%$'\r'}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+read_marker_value() {
+  local file="$1"
+  local value=""
+  IFS= read -r value < "$file" || [[ -n "$value" ]] || return 1
+  trim_value "$value"
+}
+
+is_absolute_path() {
+  local value="$1"
+  case "$value" in
+    /*|[[:alpha:]]:[\\/]*|\\\\*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 read_plan_status() {
@@ -120,7 +145,7 @@ normalize_plan_path() {
   if [[ -z "$plan_path" ]]; then
     return 1
   fi
-  if [[ "$plan_path" == /* ]]; then
+  if is_absolute_path "$plan_path"; then
     printf '%s' "$plan_path"
   else
     printf '%s/%s' "$worktree" "$plan_path"
@@ -135,34 +160,88 @@ append_unique_line() {
   fi
 }
 
+opaque_worktree_label() {
+  local value="$1"
+  local digest
+  digest="$(printf '%s' "$value" | git hash-object --stdin 2>/dev/null)"
+  [[ "$digest" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "refresh-current-status: cannot derive opaque worktree label" >&2
+    return 1
+  }
+  printf 'linked-worktree-%s' "${digest:0:12}"
+}
+
+safe_repo_ref() {
+  local worktree="$1"
+  local value="$2"
+  local label="$3"
+  local relative
+
+  if is_absolute_path "$value"; then
+    if [[ "$value" == "$worktree/"* ]]; then
+      relative="${value#"$worktree/"}"
+    else
+      printf 'opaque-%s-%s' "$label" "$(opaque_worktree_label "$value" | sed 's/^linked-worktree-//')"
+      return 0
+    fi
+  else
+    relative="${value#./}"
+  fi
+
+  if [[ -z "$relative" || "$relative" == .. || "$relative" == ../* || "$relative" == */../* ]]; then
+    printf 'opaque-%s-%s' "$label" "$(opaque_worktree_label "$value" | sed 's/^linked-worktree-//')"
+    return 0
+  fi
+  printf '%s' "$relative"
+}
+
+safe_plan_ref() {
+  safe_repo_ref "$1" "$2" 'plan'
+}
+
+safe_sprint_ref() {
+  safe_repo_ref "$1" "$2" 'sprint'
+}
+
+safe_owner_ref() {
+  local worktree="$1"
+  local owner="$2"
+  if [[ "$owner" == "$worktree" ]]; then
+    printf 'self'
+    return 0
+  fi
+  printf 'opaque-owner-%s' "$(opaque_worktree_label "$owner" | sed 's/^linked-worktree-//')"
+}
+
 inspect_worktree_active_state() {
   local worktree="$1"
-  local rel_worktree="$2"
-  local marker plan_path plan_abs owner
+  local worktree_label="$2"
+  local marker plan_path plan_abs plan_ref owner
 
   marker=".ai/harness/active-plan"
   if [[ -f "$worktree/$marker" ]]; then
-    plan_path="$(cat "$worktree/$marker" 2>/dev/null | xargs || true)"
+    plan_path="$(read_marker_value "$worktree/$marker" 2>/dev/null || true)"
     if [[ -n "$plan_path" ]]; then
       plan_abs="$(normalize_plan_path "$worktree" "$plan_path")"
+      plan_ref="$(safe_plan_ref "$worktree" "$plan_path")"
       if [[ -f "$plan_abs" ]]; then
-        append_unique_line "- ${rel_worktree}: ${plan_path}"
+        append_unique_line "- ${worktree_label}: ${plan_ref}"
       else
-        append_unique_line "- ${rel_worktree}: stale active-plan marker -> ${plan_path}"
+        append_unique_line "- ${worktree_label}: stale active-plan marker -> ${plan_ref}"
       fi
     fi
   fi
 
   if [[ -f "$worktree/.ai/harness/active-worktree" ]]; then
-    owner="$(cat "$worktree/.ai/harness/active-worktree" 2>/dev/null | xargs || true)"
+    owner="$(read_marker_value "$worktree/.ai/harness/active-worktree" 2>/dev/null || true)"
     if [[ -n "$owner" ]]; then
-      append_unique_line "- ${rel_worktree}: active-worktree owner -> ${owner}"
+      append_unique_line "- ${worktree_label}: active-worktree owner -> $(safe_owner_ref "$worktree" "$owner")"
     fi
   fi
 }
 
 collect_active_work_refs() {
-  local root current_path worktree_path
+  local current_path worktree_path worktree_label
   active_refs=""
   current_path="$(pwd -P 2>/dev/null || pwd)"
   inspect_worktree_active_state "$current_path" "."
@@ -171,7 +250,8 @@ collect_active_work_refs() {
     while IFS= read -r worktree_path; do
       [[ -n "$worktree_path" ]] || continue
       [[ "$worktree_path" == "$current_path" ]] && continue
-      inspect_worktree_active_state "$worktree_path" "$worktree_path"
+      worktree_label="$(opaque_worktree_label "$worktree_path")"
+      inspect_worktree_active_state "$worktree_path" "$worktree_label"
     done < <(git worktree list --porcelain 2>/dev/null | awk '$1 == "worktree" { sub(/^worktree /, ""); print }')
   fi
 
@@ -183,7 +263,7 @@ read_current_active_plan() {
   current_path="$(pwd -P 2>/dev/null || pwd)"
   marker=".ai/harness/active-plan"
   [[ -f "$marker" ]] || return 1
-  plan_path="$(cat "$marker" 2>/dev/null | xargs || true)"
+  plan_path="$(read_marker_value "$marker" 2>/dev/null || true)"
   [[ -n "$plan_path" ]] || return 1
   plan_abs="$(normalize_plan_path "$current_path" "$plan_path")"
   if [[ -f "$plan_abs" ]]; then
@@ -268,12 +348,13 @@ workstream_summary() {
 sprint_backlog_progress() {
   local sprint_file="$1"
   awk -F '|' '
+    !in_section && /^>[[:space:]]*\*\*Backlog Schema\*\*:[[:space:]]*2[[:space:]]*$/ { off = 1; next }
     /^## Backlog[[:space:]]*$/ { in_section = 1; next }
     in_section && /^## / { exit }
     !in_section { next }
     /^\|[[:space:]]*[0-9]+[[:space:]]*\|/ {
       total++
-      cell = $3
+      cell = $(3 + off)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", cell)
       if (cell ~ /^\[[xX]\]$/) done++
     }
@@ -284,11 +365,12 @@ sprint_backlog_progress() {
 sprint_next_task() {
   local sprint_file="$1"
   awk -F '|' '
+    !in_section && /^>[[:space:]]*\*\*Backlog Schema\*\*:[[:space:]]*2[[:space:]]*$/ { off = 1; next }
     /^## Backlog[[:space:]]*$/ { in_section = 1; next }
     in_section && /^## / { exit }
     !in_section { next }
     /^\|[[:space:]]*[0-9]+[[:space:]]*\|/ {
-      status = $3; task = $4
+      status = $(3 + off); task = $(4 + off)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", status)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", task)
       if (status == "[ ]") { print task; found = 1; exit }
@@ -298,21 +380,28 @@ sprint_next_task() {
 }
 
 sprint_summary() {
-  local marker sprint_file status
+  local marker sprint_path sprint_file sprint_ref status current_path
   marker="$(json_get '.sprints.active_marker_file' '.ai/harness/sprint/active-sprint')"
   if [[ ! -f "$marker" ]]; then
     printf -- '- Sprint: (none)\n'
     return 0
   fi
 
-  sprint_file="$(cat "$marker" 2>/dev/null | xargs || true)"
-  if [[ -z "$sprint_file" || ! -f "$sprint_file" ]]; then
-    printf -- '- Sprint: stale active-sprint marker -> %s\n' "${sprint_file:-(empty)}"
+  current_path="$(pwd -P 2>/dev/null || pwd)"
+  sprint_path="$(read_marker_value "$marker" 2>/dev/null || true)"
+  if [[ -z "$sprint_path" ]]; then
+    printf -- '- Sprint: stale active-sprint marker -> (empty)\n'
+    return 0
+  fi
+  sprint_file="$(normalize_plan_path "$current_path" "$sprint_path")"
+  sprint_ref="$(safe_sprint_ref "$current_path" "$sprint_path")"
+  if [[ ! -f "$sprint_file" ]]; then
+    printf -- '- Sprint: stale active-sprint marker -> %s\n' "$sprint_ref"
     return 0
   fi
 
   status="$(file_metadata_value "$sprint_file" "Status" || printf 'unknown')"
-  printf -- '- Sprint: `%s`\n' "$sprint_file"
+  printf -- '- Sprint: `%s`\n' "$sprint_ref"
   printf -- '- Sprint Status: %s\n' "${status:-unknown}"
   printf -- '- Backlog: %s\n' "$(sprint_backlog_progress "$sprint_file")"
   printf -- '- Next Sprint Task: %s\n' "$(sprint_next_task "$sprint_file")"
@@ -401,7 +490,7 @@ render_status() {
 > **Reason**: ${reason}
 > **Derived From**: active-plan, active-sprint, workstreams, handoff, checks, git status
 
-This file is a tracked mainline snapshot derived from repo artifacts. It is not a live lock, not a kanban board, and not an implementation gate. If it is stale, read the source artifacts below.
+This file is an ignored local read model derived from this worktree's artifacts. It is not tracked, not a live lock, not a kanban board, and not an implementation gate. If it is stale, read the source artifacts below.
 
 ## Current Focus
 
@@ -410,12 +499,6 @@ This file is a tracked mainline snapshot derived from repo artifacts. It is not 
 - Plan Status: ${plan_status}
 - Next Task: ${next_task}
 - Clear Note: ${clear_note}
-
-## Mainline Snapshot Reading
-
-- Current worktree: \`tasks/current.md\`
-- Target branch snapshot: \`git show ${target}:tasks/current.md\`
-- Rule: non-target worktrees may read the target branch snapshot, but must verify against source artifacts before acting.
 
 ## Active Work
 

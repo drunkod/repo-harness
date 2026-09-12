@@ -1,4 +1,4 @@
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.diagram.structurizr" sourceDigest="sha256:dfeee72dd6b65c11c5410cf52261499a156ed11386d32cb5121711b63684470d" rendererVersion="archcontext.docs-renderer/v2" outputDigest="sha256:2a7471ae324271ace7dd0a9380b4ddb2b97a91cbd83c996501b47cf897ba5d05" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.diagram.structurizr" sourceDigest="sha256:b859983f97115344cb2d922ace1e8499d648eeca197ec66cf58b3775378e135d" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:7337ddd80453b2a526b722f3addfc9ed16351a1a65483117ea5f42e7866357b0" -->
 {
   "schemaVersion": "archcontext.structurizr-export/v1",
   "name": "ArchContext Architecture",
@@ -29,6 +29,94 @@
         ]
       },
       {
+        "id": "capability.runtime-harness.agent-runtime-effects",
+        "name": "Agent Runtime Effects",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.automation-budget",
+        "name": "Automation Budget",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.bound-task-freezes",
+        "name": "Bound Task Freezes",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.collaboration",
+        "name": "Collaboration Substrate",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.delegated-runs",
+        "name": "Read-only Delegated Runs",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.development-campaign",
+        "name": "Development Campaign",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.engineer-bindings",
+        "name": "Engineer Bindings",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.engineer-messages",
+        "name": "Engineer Messages",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.engineer-scheduling",
+        "name": "Engineer Scheduling",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.engineering-overlay",
+        "name": "Engineering Overlay",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.external-source-intake",
+        "name": "External Source Intake",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
         "id": "capability.runtime-harness.global-runtime-reconciliation",
         "name": "Global Runtime Reconciliation",
         "type": "Software System",
@@ -45,8 +133,48 @@
         ]
       },
       {
+        "id": "capability.runtime-harness.integration-acceptance",
+        "name": "Integration Product Acceptance",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.interface-change",
+        "name": "Interface Change Requests",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
         "id": "capability.runtime-harness.mcp-sidecar",
         "name": "MCP Sidecar",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.refactor-program",
+        "name": "Refactor Program",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.verified-context",
+        "name": "Verified Evidence Context",
+        "type": "Software System",
+        "tags": [
+          "capability"
+        ]
+      },
+      {
+        "id": "capability.runtime-harness.work-demand",
+        "name": "Work Demand Intake",
         "type": "Software System",
         "tags": [
           "capability"
@@ -109,8 +237,48 @@
         ]
       },
       {
+        "id": "component.agent-runtime-effects.journal",
+        "name": "Agent Runtime Effect Journal",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.automation-budget.ledger",
+        "name": "Automation Budget Ledger",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.automation-controller.journal",
+        "name": "Automation Controller Journal",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.bound-task-freezes.primary",
+        "name": "Immutable Task Freeze Store",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
         "id": "component.codegraph-readiness.primary",
         "name": "CodeGraph Readiness Check",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.collaboration.primary",
+        "name": "Append-only Collaboration Record Store",
         "type": "Component",
         "tags": [
           "component"
@@ -125,8 +293,64 @@
         ]
       },
       {
+        "id": "component.delegated-runs.primary",
+        "name": "Read-only Delegated Run Journal",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.development-campaign.journal",
+        "name": "Development Campaign Journal",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.engineer-bindings.primary",
+        "name": "Shared Engineer Binding Store",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.engineer-messages.primary",
+        "name": "Module Engineer Durable Inbox",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.engineer-scheduling.primary",
+        "name": "Engineer Offer Projector",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.engineering-overlay.primary",
+        "name": "Engineering Overlay Read Model",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
         "id": "component.evals-checks.primary",
         "name": "Review Outcome Classifier",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.external-source-intake.immutable-evidence",
+        "name": "Immutable External Evidence Store",
         "type": "Component",
         "tags": [
           "component"
@@ -165,6 +389,22 @@
         ]
       },
       {
+        "id": "component.integration-acceptance.primary",
+        "name": "Integration Acceptance Evidence Plane",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.interface-change.primary",
+        "name": "Interface Change Authority Store",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
         "id": "component.mcp-sidecar.primary",
         "name": "MCP Tool Dispatcher",
         "type": "Component",
@@ -173,8 +413,40 @@
         ]
       },
       {
+        "id": "component.refactor-program.archctx-provider",
+        "name": "Refactor ArchContext Provider Boundary",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.refactor-program.lifecycle",
+        "name": "Refactor Program Lifecycle Plane",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
         "id": "component.root-router.primary",
         "name": "Root Adoption Router",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.verified-context.primary",
+        "name": "Verified Checkpoint Evidence Store",
+        "type": "Component",
+        "tags": [
+          "component"
+        ]
+      },
+      {
+        "id": "component.work-demand.primary",
+        "name": "Work Demand Authority Store",
         "type": "Component",
         "tags": [
           "component"
@@ -195,9 +467,81 @@
         "description": "calls"
       },
       {
+        "id": "relation.agent-runtime-effects.engineer-bindings",
+        "sourceId": "capability.runtime-harness.agent-runtime-effects",
+        "destinationId": "capability.runtime-harness.engineer-bindings",
+        "description": "calls"
+      },
+      {
+        "id": "relation.agent-runtime-effects.engineer-messages",
+        "sourceId": "capability.runtime-harness.agent-runtime-effects",
+        "destinationId": "capability.runtime-harness.engineer-messages",
+        "description": "calls"
+      },
+      {
+        "id": "relation.agent-runtime-effects.journal",
+        "sourceId": "capability.runtime-harness.agent-runtime-effects",
+        "destinationId": "component.agent-runtime-effects.journal",
+        "description": "calls"
+      },
+      {
+        "id": "relation.automation-budget.ledger",
+        "sourceId": "capability.runtime-harness.automation-budget",
+        "destinationId": "component.automation-budget.ledger",
+        "description": "calls"
+      },
+      {
+        "id": "relation.automation-controller.journal",
+        "sourceId": "capability.runtime-harness.automation-budget",
+        "destinationId": "component.automation-controller.journal",
+        "description": "calls"
+      },
+      {
+        "id": "relation.bound-task-freezes.engineer-bindings",
+        "sourceId": "capability.runtime-harness.bound-task-freezes",
+        "destinationId": "capability.runtime-harness.engineer-bindings",
+        "description": "calls"
+      },
+      {
+        "id": "relation.bound-task-freezes.primary",
+        "sourceId": "capability.runtime-harness.bound-task-freezes",
+        "destinationId": "component.bound-task-freezes.primary",
+        "description": "calls"
+      },
+      {
         "id": "relation.codegraph-readiness.primary",
         "sourceId": "capability.verification.codegraph-readiness",
         "destinationId": "component.codegraph-readiness.primary",
+        "description": "calls"
+      },
+      {
+        "id": "relation.collaboration.bound-task-freezes",
+        "sourceId": "capability.runtime-harness.collaboration",
+        "destinationId": "capability.runtime-harness.bound-task-freezes",
+        "description": "calls"
+      },
+      {
+        "id": "relation.collaboration.delegated-runs",
+        "sourceId": "capability.runtime-harness.collaboration",
+        "destinationId": "capability.runtime-harness.delegated-runs",
+        "description": "calls"
+      },
+      {
+        "id": "relation.collaboration.engineer-bindings",
+        "sourceId": "capability.runtime-harness.collaboration",
+        "destinationId": "capability.runtime-harness.engineer-bindings",
+        "description": "calls"
+      },
+      {
+        "id": "relation.collaboration.engineer-scheduling",
+        "sourceId": "capability.runtime-harness.collaboration",
+        "destinationId": "capability.runtime-harness.engineer-scheduling",
+        "description": "calls"
+      },
+      {
+        "id": "relation.collaboration.primary",
+        "sourceId": "capability.runtime-harness.collaboration",
+        "destinationId": "component.collaboration.primary",
         "description": "calls"
       },
       {
@@ -207,9 +551,111 @@
         "description": "calls"
       },
       {
+        "id": "relation.delegated-runs.collaboration",
+        "sourceId": "capability.runtime-harness.delegated-runs",
+        "destinationId": "capability.runtime-harness.collaboration",
+        "description": "calls"
+      },
+      {
+        "id": "relation.delegated-runs.engineer-bindings",
+        "sourceId": "capability.runtime-harness.delegated-runs",
+        "destinationId": "capability.runtime-harness.engineer-bindings",
+        "description": "calls"
+      },
+      {
+        "id": "relation.delegated-runs.primary",
+        "sourceId": "capability.runtime-harness.delegated-runs",
+        "destinationId": "component.delegated-runs.primary",
+        "description": "calls"
+      },
+      {
+        "id": "relation.development-campaign.automation-budget",
+        "sourceId": "capability.runtime-harness.development-campaign",
+        "destinationId": "capability.runtime-harness.automation-budget",
+        "description": "depends_on"
+      },
+      {
+        "id": "relation.development-campaign.collaboration",
+        "sourceId": "capability.runtime-harness.development-campaign",
+        "destinationId": "capability.runtime-harness.collaboration",
+        "description": "depends_on"
+      },
+      {
+        "id": "relation.development-campaign.engineer-scheduling",
+        "sourceId": "capability.runtime-harness.development-campaign",
+        "destinationId": "capability.runtime-harness.engineer-scheduling",
+        "description": "depends_on"
+      },
+      {
+        "id": "relation.development-campaign.external-source-intake",
+        "sourceId": "capability.runtime-harness.development-campaign",
+        "destinationId": "capability.runtime-harness.external-source-intake",
+        "description": "depends_on"
+      },
+      {
+        "id": "relation.development-campaign.integration-acceptance",
+        "sourceId": "capability.runtime-harness.development-campaign",
+        "destinationId": "capability.runtime-harness.integration-acceptance",
+        "description": "depends_on"
+      },
+      {
+        "id": "relation.development-campaign.journal",
+        "sourceId": "capability.runtime-harness.development-campaign",
+        "destinationId": "component.development-campaign.journal",
+        "description": "calls"
+      },
+      {
+        "id": "relation.engineer-bindings.primary",
+        "sourceId": "capability.runtime-harness.engineer-bindings",
+        "destinationId": "component.engineer-bindings.primary",
+        "description": "calls"
+      },
+      {
+        "id": "relation.engineer-messages.engineer-bindings",
+        "sourceId": "capability.runtime-harness.engineer-messages",
+        "destinationId": "capability.runtime-harness.engineer-bindings",
+        "description": "calls"
+      },
+      {
+        "id": "relation.engineer-scheduling.engineer-bindings",
+        "sourceId": "capability.runtime-harness.engineer-scheduling",
+        "destinationId": "capability.runtime-harness.engineer-bindings",
+        "description": "calls"
+      },
+      {
+        "id": "relation.engineering-overlay.agent-runtime-effects",
+        "sourceId": "capability.runtime-harness.engineering-overlay",
+        "destinationId": "capability.runtime-harness.agent-runtime-effects",
+        "description": "calls"
+      },
+      {
+        "id": "relation.engineering-overlay.engineer-bindings",
+        "sourceId": "capability.runtime-harness.engineering-overlay",
+        "destinationId": "capability.runtime-harness.engineer-bindings",
+        "description": "calls"
+      },
+      {
+        "id": "relation.engineering-overlay.engineer-messages",
+        "sourceId": "capability.runtime-harness.engineering-overlay",
+        "destinationId": "capability.runtime-harness.engineer-messages",
+        "description": "calls"
+      },
+      {
+        "id": "relation.engineering-overlay.primary",
+        "sourceId": "capability.runtime-harness.engineering-overlay",
+        "destinationId": "component.engineering-overlay.primary",
+        "description": "calls"
+      },
+      {
         "id": "relation.evals-checks.primary",
         "sourceId": "capability.verification.evals-checks",
         "destinationId": "component.evals-checks.primary",
+        "description": "calls"
+      },
+      {
+        "id": "relation.external-source-intake.immutable-evidence",
+        "sourceId": "capability.runtime-harness.external-source-intake",
+        "destinationId": "component.external-source-intake.immutable-evidence",
         "description": "calls"
       },
       {
@@ -237,15 +683,123 @@
         "description": "calls"
       },
       {
+        "id": "relation.integration-acceptance.primary",
+        "sourceId": "capability.runtime-harness.integration-acceptance",
+        "destinationId": "component.integration-acceptance.primary",
+        "description": "calls"
+      },
+      {
+        "id": "relation.interface-change.engineer-bindings",
+        "sourceId": "capability.runtime-harness.interface-change",
+        "destinationId": "capability.runtime-harness.engineer-bindings",
+        "description": "calls"
+      },
+      {
+        "id": "relation.interface-change.engineer-scheduling",
+        "sourceId": "capability.runtime-harness.interface-change",
+        "destinationId": "capability.runtime-harness.engineer-scheduling",
+        "description": "calls"
+      },
+      {
+        "id": "relation.interface-change.primary",
+        "sourceId": "capability.runtime-harness.interface-change",
+        "destinationId": "component.interface-change.primary",
+        "description": "calls"
+      },
+      {
+        "id": "relation.mcp-sidecar.agent-runtime-effects",
+        "sourceId": "capability.runtime-harness.mcp-sidecar",
+        "destinationId": "capability.runtime-harness.agent-runtime-effects",
+        "description": "calls"
+      },
+      {
+        "id": "relation.mcp-sidecar.collaboration",
+        "sourceId": "capability.runtime-harness.mcp-sidecar",
+        "destinationId": "capability.runtime-harness.collaboration",
+        "description": "calls"
+      },
+      {
+        "id": "relation.mcp-sidecar.engineer-messages",
+        "sourceId": "capability.runtime-harness.mcp-sidecar",
+        "destinationId": "capability.runtime-harness.engineer-messages",
+        "description": "calls"
+      },
+      {
+        "id": "relation.mcp-sidecar.engineer-principal",
+        "sourceId": "capability.runtime-harness.mcp-sidecar",
+        "destinationId": "capability.runtime-harness.engineer-bindings",
+        "description": "calls"
+      },
+      {
+        "id": "relation.mcp-sidecar.engineer-scheduling",
+        "sourceId": "capability.runtime-harness.mcp-sidecar",
+        "destinationId": "capability.runtime-harness.engineer-scheduling",
+        "description": "calls"
+      },
+      {
+        "id": "relation.mcp-sidecar.interface-change",
+        "sourceId": "capability.runtime-harness.mcp-sidecar",
+        "destinationId": "capability.runtime-harness.interface-change",
+        "description": "calls"
+      },
+      {
         "id": "relation.mcp-sidecar.primary",
         "sourceId": "capability.runtime-harness.mcp-sidecar",
         "destinationId": "component.mcp-sidecar.primary",
         "description": "calls"
       },
       {
+        "id": "relation.refactor-program.archctx-provider",
+        "sourceId": "capability.runtime-harness.refactor-program",
+        "destinationId": "component.refactor-program.archctx-provider",
+        "description": "calls"
+      },
+      {
+        "id": "relation.refactor-program.lifecycle",
+        "sourceId": "capability.runtime-harness.refactor-program",
+        "destinationId": "component.refactor-program.lifecycle",
+        "description": "calls"
+      },
+      {
         "id": "relation.root-router.primary",
         "sourceId": "capability.public-surface.root-router",
         "destinationId": "component.root-router.primary",
+        "description": "calls"
+      },
+      {
+        "id": "relation.verified-context.delegated-runs",
+        "sourceId": "capability.runtime-harness.verified-context",
+        "destinationId": "capability.runtime-harness.delegated-runs",
+        "description": "calls"
+      },
+      {
+        "id": "relation.verified-context.engineer-bindings",
+        "sourceId": "capability.runtime-harness.verified-context",
+        "destinationId": "capability.runtime-harness.engineer-bindings",
+        "description": "calls"
+      },
+      {
+        "id": "relation.verified-context.primary",
+        "sourceId": "capability.runtime-harness.verified-context",
+        "destinationId": "component.verified-context.primary",
+        "description": "calls"
+      },
+      {
+        "id": "relation.work-demand.engineer-bindings",
+        "sourceId": "capability.runtime-harness.work-demand",
+        "destinationId": "capability.runtime-harness.engineer-bindings",
+        "description": "calls"
+      },
+      {
+        "id": "relation.work-demand.engineer-scheduling",
+        "sourceId": "capability.runtime-harness.work-demand",
+        "destinationId": "capability.runtime-harness.engineer-scheduling",
+        "description": "calls"
+      },
+      {
+        "id": "relation.work-demand.primary",
+        "sourceId": "capability.runtime-harness.work-demand",
+        "destinationId": "component.work-demand.primary",
         "description": "calls"
       }
     ]
@@ -257,9 +811,25 @@
         "capability.public-surface.action-commands",
         "capability.public-surface.adoption",
         "capability.public-surface.root-router",
+        "capability.runtime-harness.agent-runtime-effects",
+        "capability.runtime-harness.automation-budget",
+        "capability.runtime-harness.bound-task-freezes",
+        "capability.runtime-harness.collaboration",
+        "capability.runtime-harness.delegated-runs",
+        "capability.runtime-harness.development-campaign",
+        "capability.runtime-harness.engineer-bindings",
+        "capability.runtime-harness.engineer-messages",
+        "capability.runtime-harness.engineer-scheduling",
+        "capability.runtime-harness.engineering-overlay",
+        "capability.runtime-harness.external-source-intake",
         "capability.runtime-harness.global-runtime-reconciliation",
         "capability.runtime-harness.hook-adapters",
+        "capability.runtime-harness.integration-acceptance",
+        "capability.runtime-harness.interface-change",
         "capability.runtime-harness.mcp-sidecar",
+        "capability.runtime-harness.refactor-program",
+        "capability.runtime-harness.verified-context",
+        "capability.runtime-harness.work-demand",
         "capability.runtime-mcp.general-repo-access",
         "capability.verification.codegraph-readiness",
         "capability.verification.evals-checks",
@@ -267,15 +837,33 @@
         "capability.workflow-engine.inspection-migration",
         "component.action-commands.primary",
         "component.adoption.primary",
+        "component.agent-runtime-effects.journal",
+        "component.automation-budget.ledger",
+        "component.automation-controller.journal",
+        "component.bound-task-freezes.primary",
         "component.codegraph-readiness.primary",
+        "component.collaboration.primary",
         "component.contract-assets.primary",
+        "component.delegated-runs.primary",
+        "component.development-campaign.journal",
+        "component.engineer-bindings.primary",
+        "component.engineer-messages.primary",
+        "component.engineer-scheduling.primary",
+        "component.engineering-overlay.primary",
         "component.evals-checks.primary",
+        "component.external-source-intake.immutable-evidence",
         "component.general-repo-access.primary",
         "component.global-runtime-reconciliation.primary",
         "component.hook-adapters.primary",
         "component.inspection-migration.primary",
+        "component.integration-acceptance.primary",
+        "component.interface-change.primary",
         "component.mcp-sidecar.primary",
-        "component.root-router.primary"
+        "component.refactor-program.archctx-provider",
+        "component.refactor-program.lifecycle",
+        "component.root-router.primary",
+        "component.verified-context.primary",
+        "component.work-demand.primary"
       ]
     }
   }

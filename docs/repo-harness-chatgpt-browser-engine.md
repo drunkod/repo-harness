@@ -42,7 +42,7 @@ repo-harness remains a Bun-first CLI package. The Oracle CLI package currently r
 
 `browser-doctor --provider oracle --json` is the authority for this boundary. It probes the resolved binary with `--help` and `--version` and reports `nodeCompatible` plus the capabilities repo-harness may use. If the doctor reports `nodeCompatible:false`, fix or reinstall Oracle's Node runtime before changing repo-harness' `package.json` engines or CI runtime.
 
-When Oracle is missing, too old, or selected through a broken explicit source, the same doctor JSON includes explicit source-aware `agent_actions` such as `chatgpt-oracle-install-pinned`, `chatgpt-oracle-upgrade-pinned`, or `chatgpt-oracle-fix-configured-source`. These actions are for the opt-in GPT Pro setup/repair lane only. Default `repo-harness install`, ordinary setup checks, and dry-run consults still do not install, upgrade, or re-point Oracle automatically.
+When Oracle is missing, too old, or selected through a broken explicit source, the same doctor JSON includes explicit source-aware `agent_actions` such as `chatgpt-oracle-install-pinned`, `chatgpt-oracle-upgrade-pinned`, `chatgpt-oracle-fix-configured-source`, or `chatgpt-oracle-select-fork-build` (emitted instead of an install/upgrade action when only the repo-harness fork flags are missing, because no published release carries them). These actions are for the opt-in GPT Pro setup/repair lane only. Default `repo-harness install`, ordinary setup checks, and dry-run consults still do not install, upgrade, or re-point Oracle automatically.
 
 ## First-Time Setup
 
@@ -79,7 +79,7 @@ repo-harness chatgpt browser-doctor --repo . --provider oracle --json
 
 If the JSON includes `agent_actions`, run the indicated source-aware repair only when the user has explicitly asked to set up GPT Pro browser consults, then rerun the doctor until `status:"ready"`.
 
-For an existing signed-in Chrome profile, bind the selected profile metadata so the Oracle wrapper can pass the matching cookie database instead of silently using an unbound/default browser session:
+For an existing signed-in Chrome profile, bind the selected profile metadata so the Oracle wrapper can copy that exact profile instead of silently using an unbound/default browser session:
 
 ```bash
 repo-harness chatgpt browser-setup \
@@ -89,13 +89,56 @@ repo-harness chatgpt browser-setup \
 repo-harness chatgpt browser-doctor --repo . --provider oracle --json
 ```
 
-`browser-setup` records only product binding metadata in `.repo-harness/chatgpt-browser.local.json`; it does not copy cookies, tokens, passwords, or browser storage. The Oracle provider reads that binding, derives a regular Chrome cookie database path such as `Profile 1/Network/Cookies`, and passes it to the pinned Oracle binary. If the cookie database is missing, the Oracle path fails closed with `ORACLE_PROFILE_COOKIE_NOT_FOUND`.
+`browser-setup` records only product binding metadata in `.repo-harness/chatgpt-browser.local.json`; it does not copy cookies, tokens, passwords, or browser storage. The Oracle provider reads that binding and passes the Chrome user data directory plus the selected profile name to the pinned Oracle binary as `--copy-profile <user-data-dir> --browser-chrome-profile <profile-directory>`; Oracle makes its own throwaway copy of that profile for the run. The binding must name a real user data directory with a readable `Local State` file and an existing profile subdirectory, otherwise the Oracle path fails closed with `ORACLE_PROFILE_NOT_FOUND`. A binding without an explicit profile directory is refused as well, because Oracle would otherwise fall back to the `Local State` `last_used` profile.
 
 If the user selects a Chrome profile subdirectory such as `<chrome-user-data-dir>/<profile-name>`, repo-harness stores the parent user data directory and launches Chrome with `--profile-directory <profile-name>`. On macOS this may look like `~/Library/Application Support/Google/Chrome/Profile 1`; Windows and Linux use their own Chrome profile roots. If the user selects the user data directory itself, pass `--profile-directory <name>` explicitly.
 
 The old experimental Chrome extension flow has been removed from the product surface. Do not load an unpacked extension or look for a `browser-bind` authorization page. Use Oracle for real GPT Pro consults; use native CDP only as a deprecated diagnostic path against a non-default automation profile.
 
 Do not use the default Chrome data directory for native CDP validation. Chrome 136+ no longer honors remote-debugging switches against the current user's default Chrome data directory; it requires a non-standard `--user-data-dir`. Existing signed-in real Chrome profiles should use Oracle instead of native CDP.
+
+## Advisory GPT Pro Orchestration
+
+The canonical `repo-harness-chatgpt` Skill has an explicit `orchestrate` mode
+for a user-authorized plan -> local implementation -> same-conversation review
+loop. It is a policy composition over the existing browser/session commands,
+not a managed `agent-fleet` role, a parallel Skill, a runtime adapter, or a new
+evidence schema. Enablement is task-scoped: project the Skill, verify the
+browser and visible Pro model, select the user's authorized GitHub Connector,
+pin the target repository/ref/SHA, and pass the exact local context through the
+existing secret-scanned prompt path. The full operator checklist is in
+`assets/skills/repo-harness-chatgpt/references/setup.md`; the protocol is in
+`assets/skills/repo-harness-chatgpt/references/orchestrate.md`.
+
+The authority split is deliberate. GPT Pro may propose work and review the
+returned diff, but it cannot edit the local worktree, run local commands,
+claim or release leases, widen allowed paths, assert check results, or approve
+commit/push/PR/merge/deploy. Local Codex and repo-harness remain accountable
+for task state, execution, verification, and acceptance. ChatGPT Web is not a
+source of local truth, and the GitHub Connector cannot describe uncommitted
+local changes.
+
+For each round, record the exact remote repository/ref/SHA separately from the
+local base commit and the SHA-256 identity of the tracked-diff/untracked-file
+bundle. Classify GitHub Connector evidence from observable browser/tool
+read-back, never from model self-report:
+
+- `verified`: the Connector invocation and exact repository/SHA are visible;
+- `bundle_only`: exact remote facts were supplied in the scanned bundle, but no
+  invocation is visible; this is not GitHub MCP proof;
+- `unverified`: invocation or revision evidence is absent, stale, or
+  conflicting and blocks adoption.
+
+The initial plan and implementation review must use the same browser
+conversation/session. Before each submission, run the exact prompt and
+attachments through `browser-consult --dry-run --secret-scan`, compare the
+saved prompt hash with its receipt, and do not paste or attach changed local
+content afterward. The canary is complete only when the visible Pro model,
+conversation URL/handle, generation completion, remote SHA, GitHub evidence
+classification, local-delta identity, same-conversation review, actual local
+checks, and local acceptance outcome are all inspectable. A missing login,
+Connector, attachment, completion state, stale SHA, failed scan, or failed
+continuation is a blocked run; do not switch transport or infer success.
 
 ## Dry Run
 
@@ -168,15 +211,18 @@ repo-harness chatgpt browser-consult \
   --write-output ".ai/harness/handoff/gptpro/chatgpt-review-${stamp}.md"
 ```
 
-The wrapper maps repo-harness input to `oracle --engine browser --browser-archive never`, passing an internal managed `--write-output` answer file. Oracle runs in a repo-harness-controlled `ORACLE_HOME_DIR` under `.ai/harness/chatgpt/oracle-home/`, with a neutral temporary working directory and absolute `--file` paths. The child process also drops inherited `ORACLE_*` environment variables before setting that controlled home. This prevents user or repository `.oracle/config.json` defaults such as `promptSuffix`, `browser.manualLogin`, remote browser routing, or model strategy from influencing the submitted prompt. When a ChatGPT profile binding exists, repo-harness also derives the selected Chrome profile cookie database (for example `<user-data-dir>/Profile 1/Cookies`) and passes it through Oracle `--browser-cookie-path`; the cookie DB must be a readable regular file, and the provider fails closed with `ORACLE_PROFILE_COOKIE_NOT_FOUND` rather than silently falling back to Oracle's own/default browser session. If no explicit `--model` is requested, repo-harness passes `--browser-model-strategy current` so Oracle keeps the signed-in browser's current ChatGPT model instead of depending on the model picker. If `--model` is requested, repo-harness passes `--browser-model-strategy select` so GPT Pro facades can guarantee a Pro model request. **The answer file plus the process terminal state are authoritative; stdout/stderr are treated as logs only** (used to detect the ChatGPT conversation URL and provider session ID, never as the answer). A clean exit that produces no answer file is reported as `recoverable` / `ORACLE_CAPTURE_INCOMPLETE` (the prompt may already be submitted — reattach with `browser-followup` rather than re-sending).
+The wrapper maps repo-harness input to `oracle --engine browser --browser-archive never`, passing an internal managed `--write-output` answer file. Oracle runs in a repo-harness-controlled `ORACLE_HOME_DIR` under `.ai/harness/chatgpt/oracle-home/`, with a neutral temporary working directory and absolute `--file` paths. The child process also drops inherited `ORACLE_*` environment variables before setting that controlled home. This prevents user or repository `.oracle/config.json` defaults such as `promptSuffix`, `browser.manualLogin`, remote browser routing, or model strategy from influencing the submitted prompt. When a ChatGPT profile binding exists, repo-harness passes exactly one transport: Oracle `--copy-profile <user-data-dir>` together with `--browser-chrome-profile <profile-directory>`. `--browser-cookie-path` is never sent, the two transports never coexist, and there is no silent fallback: a resolved Oracle binary that does not report both flags fails before prompt submission with `ORACLE_COPY_PROFILE_UNSUPPORTED`, and an unusable binding fails with `ORACLE_PROFILE_NOT_FOUND` rather than falling back to Oracle's own/default browser session. Each written session records which transport was used in `meta.browser.transport` (`copy_profile` with a binding, `oracle_session` without one), including dry runs. If no explicit `--model` is requested, repo-harness passes `--browser-model-strategy current` so Oracle keeps the signed-in browser's current ChatGPT model instead of depending on the model picker. If `--model` is requested, repo-harness passes `--browser-model-strategy select` so GPT Pro facades can guarantee a Pro model request. **The answer file plus the process terminal state are authoritative; stdout/stderr are treated as logs only** (used to detect the ChatGPT conversation URL, never as the answer or provider session identity). Provider session identity comes exclusively from the invocation's `--write-session` descriptor and matching metadata in the controlled Oracle home. A clean exit that produces no answer file is reported as `recoverable` / `ORACLE_CAPTURE_INCOMPLETE` (the prompt may already be submitted — reattach with `browser-followup` rather than re-sending).
 
-The oracle binary is resolved in a fixed, auditable order — `--oracle-bin`, then `REPO_HARNESS_ORACLE_BIN`, then repo-local `node_modules/.bin/oracle`, then `oracle` on `PATH`. A missing binary fails with `ORACLE_NOT_INSTALLED`; explicitly configured binaries (`--oracle-bin` or `REPO_HARNESS_ORACLE_BIN`) fail closed when invalid and do not silently fall through to the next source. repo-harness never implicitly downloads or `npx`-executes an unpinned oracle. `browser-doctor --provider oracle --json` runs `--help`, `--debug-help`, `--version`, plus an isolated `--browser-thinking-time` dry-run parser probe, and reports `installed`, resolved `binary`, `version`, `nodeCompatible`, a `capabilities` map (`browserEngine`, `writeOutput`, `browserFollowup`, `sessionFollowup`, `browserArchive`, `browserModelStrategy`, `browserCookiePath`, `browserThinkingTime`, `chatgptUrl`, `heartbeat`), and opt-in `agent_actions` when a GPT Pro setup repair can install, upgrade, or re-point the selected pinned external CLI; `status:"ready"` requires every capability for every flag repo-harness may send at runtime.
+The oracle binary is resolved in a fixed, auditable order — `--oracle-bin`, then `REPO_HARNESS_ORACLE_BIN`, then repo-local `node_modules/.bin/oracle`, then `oracle` on `PATH`. A missing binary fails with `ORACLE_NOT_INSTALLED`; explicitly configured binaries (`--oracle-bin` or `REPO_HARNESS_ORACLE_BIN`) fail closed when invalid and do not silently fall through to the next source. repo-harness never implicitly downloads or `npx`-executes an unpinned oracle. `browser-doctor --provider oracle --json` runs `--help`, `--debug-help`, `--version`, plus an isolated `--browser-thinking-time` dry-run parser probe, and reports `installed`, resolved `binary`, `version`, `nodeCompatible`, a `capabilities` map (`browserEngine`, `writeOutput`, `browserFollowup`, `sessionFollowup`, `browserArchive`, `browserModelStrategy`, `copyProfile`, `browserChromeProfile`, `browserThinkingTime`, `chatgptUrl`, `heartbeat`), and opt-in `agent_actions` when a GPT Pro setup repair can install, upgrade, or re-point the selected pinned external CLI; `status:"ready"` requires every capability in that map, including the `copyProfile`/`browserChromeProfile` pair the bound-profile transport depends on.
 
-Plan, Create, Review, read-back, and follow-up use the same Oracle browser
-transport. Published Oracle versions do not expose a supported app-selection
-flag, so generic `browser-consult` and `browser-followup` do not expose a
-ChatGPT-app option, Browser Doctor does not advertise app preselection, and
-repo-harness never emits an Oracle app-selection argument.
+Plan, Create, Review, read-back, and follow-up use the same pinned Oracle
+0.20.0 browser transport. Ordinary `browser-consult` and `browser-followup`
+accept optional `--chatgpt-app <serverName>` preselection, mapped to Oracle's
+`--browser-app` only when the resolved binary supports it; otherwise the run
+fails before submission. Browser Doctor reports this capability. Ordinary
+follow-ups inherit the source app unless explicitly overridden or cleared with
+`--no-chatgpt-app`. Create, Create recovery, and Create read-back intentionally
+omit `--browser-app` and keep app selection in their prompt/result contract.
 
 Create and Create read-back still require the expected connected app name as a
 repo-harness contract value. That value is written into the fixed prompt,
@@ -189,7 +235,7 @@ remote state.
 
 Long Oracle browser runs default to `--heartbeat 59`. repo-harness streams Oracle diagnostics and heartbeat lines to stderr while preserving stdout for the final JSON payload, so humans and agents get a periodic liveness signal without breaking automation that parses command output.
 
-Oracle browser mode supports model selection through `--model` and thinking intensity through `--browser-thinking-time <light|standard|extended|heavy>`. repo-harness maps its `--thinking` value directly to that Oracle browser flag after doctor has verified parser support. Oracle also supports `--browser-manual-login`, but repo-harness intentionally does not send it on the bound-profile path because it skips cookie copy and would make the selected Chrome profile cookie DB non-authoritative.
+Oracle browser mode supports model selection through `--model` and thinking intensity through `--browser-thinking-time <level>`. repo-harness passes its `--thinking` value through to that Oracle browser flag verbatim after doctor has verified parser support; Oracle is the validation authority and rejects invalid levels fail-closed (Oracle 0.18 accepts `light`, `standard`, `extended`, `extra-high`, `pro`, `heavy`, plus ChatGPT UI aliases `instant`, `medium`, `high`, `xhigh` — e.g. GPT-5.6 Pro is `--model gpt-5.6-sol --thinking pro`). Oracle also supports `--browser-manual-login`, but repo-harness intentionally does not send it on the bound-profile path because Oracle rejects it together with `--copy-profile`, and an interactive login would make the bound Chrome profile non-authoritative. For the same reason repo-harness never sends `--browser-keep-browser`, `--remote-chrome`, or `--remote-host`.
 
 Use the Oracle CLI, not `oracle-mcp`, as the repo-harness provider runtime. `oracle-mcp` is useful when an external MCP host wants Oracle as a tool, but repo-harness needs per-run isolation for `ORACLE_HOME_DIR`, working directory, `ORACLE_*` environment, `--write-output` answer authority, session metadata, and fail-closed capability probes. A long-lived MCP server would move those boundaries into process state, so it remains an optional external integration surface rather than the default ChatGPT browser provider.
 
@@ -339,3 +385,9 @@ that a file is safe to send.
 - Use Create's mandatory scan and dry-run before a real mutating session.
 - Prefer narrow files over whole-repo dumps.
 - Treat generated ChatGPT output as review input, not authoritative code truth.
+
+### Campaign defaults and explicit GitHub selection
+
+Campaign initial authoring, fill/edit continuation, and readback require `chatgptApp: GitHub`. Oracle must advertise `--browser-app`; otherwise the existing pre-submit capability gate refuses the run. The candidate selects the app from the composer `+` menu and checks the real inline plugin pill at the send boundary. This is distinct from writing `@github` as plain prompt text. No model or thinking value is injected by campaign callers; omitted follow-up values also preserve the current UI default.
+
+Provider identity comes from the invocation-owned `--write-session` descriptor and matching Oracle metadata, not console Session ID text or the requested slug. `meta.oracle.observation` records provider observations of app/model/explicit effort independently. Missing/malformed evidence is recorded as `evidenceError` and cannot verify a model; completed answer capture does not establish backend model identity. `model.verified` remains false in the browser store. A selected app and matching file content likewise do not prove exact Connector revision provenance.

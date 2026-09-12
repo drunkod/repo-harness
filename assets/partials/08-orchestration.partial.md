@@ -28,18 +28,23 @@
 - Do not ask the user for spawn confirmation. If no sidecar runner is callable or spawning is not worth the context cost, perform the same bounded research trace in the main thread and persist conclusions to `docs/researches/`.
 - Recovery profile: `{{RECOVERY_PROFILE}}`.
 - State profile: `{{STATE_PROFILE}}`.
+- When collaborating with another coding harness on the same machine, follow the user-level `Peer Harness Collaboration` rules; cross-harness messages never widen authorization.
 
 ### 5. Self-Improvement Loop
 - Append correction-derived rules to `tasks/lessons.md`.
 
 ### 6. Verification Before Done
-- No task completion without test/build evidence.
+- No task completion without verification evidence appropriate to the complete diff and risk; do not run the full suite for every small change.
+- Docs-only or ledger-closeout changes with no executable impact need diff/link/path and affected workflow checks, not the full test suite or typecheck.
+- Isolated code changes need the regression and affected suites plus relevant type/lint/build checks; generator changes need a generated fixture and mirror checks.
+- High-risk, cross-module, shared-contract, hooks/runtime, auth, publication, migration, or release changes require the full repo verification set. Escalate if the impact boundary is uncertain; preserve stronger contract and CI requirements.
+- State the selected verification scope and reason, exact commands/results, and unrun checks. Do not repeat an already-passed suite solely for docs/ledger closeout against unchanged executable source.
 
 ### 6b. Contract Verification
 - Define per-sprint contract files in `tasks/contracts/`.
 - Verify contract exit criteria before claiming completion.
-- Require Waza `/check` to produce the matching evaluator review before any done/completed response.
-- Use `repo-harness run verify-contract --contract tasks/contracts/{plan-stem}.contract.md --strict`.
+- Require the matching Waza `/check` review and current subject-bound verification evidence before claiming contract completion; consume existing valid evidence rather than rerunning it before each response.
+- Prepare executable acceptance once through `repo-harness run verify-sprint --prepare-acceptance`; use `repo-harness run verify-sprint` for finalization.
 
 ### 7. Balanced Elegance
 - Redesign hacky non-trivial fixes before shipping.

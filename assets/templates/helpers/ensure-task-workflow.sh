@@ -433,152 +433,8 @@ PLAN_TEMPLATE_EOF
   fi
 
   if [[ ! -f ".claude/templates/contract.template.md" ]]; then
-    cat > .claude/templates/contract.template.md <<'CONTRACT_TEMPLATE_EOF'
-# Task Contract: {{TASK_SLUG}}
-
-> **Status**: Active
-> **Plan**: {{PLAN_FILE}}
-> **Task Profile**: {{TASK_PROFILE}}
-> <!-- legal values: code-change | docs-only | ledger-closeout | migration | eval-only | delegated-run | bugfix (omit for legacy passthrough); see docs/reference-configs/sprint-contracts.md -->
-> **Owner**: {{OWNER}}
-> **Capability ID**: {{CAPABILITY_ID}}
-> **Last Updated**: {{TIMESTAMP}}
-> **Review File**: `{{REVIEW_FILE}}`
-> **Notes File**: `{{NOTES_FILE}}`
-> **Exemplar**: `docs/reference-configs/contract-brief-example.md`
-
-## Why
-
-Why this task matters and what breaks downstream if it ships wrong or is skipped.
-
-## Goal
-
-Describe the exact outcome this task must deliver.
-
-## Scope
-
-- In scope:
-- Out of scope:
-- Taste constraints: <!-- advisory only, no run gate; default style/taste lives in AGENTS.md and the minimal-change policy, use this to record a per-task override -->
-
-## Stop Conditions
-
-- Stop and hand back to the parent if the change would require editing a path outside Allowed Paths.
-- Stop if an Exit Criteria command cannot be run in this environment.
-- Stop if Goal, Scope, or Exit Criteria are internally contradictory.
-
-## Falsifier
-
-What observable evidence would prove this task's direction wrong, and the cheapest proof point to check first. Leave as-is if not applicable.
-
-## Root Cause Evidence
-
-Required when Task Profile is `bugfix`; leave as-is otherwise.
-
-- root_cause: one sentence naming file:line/condition (testable, not "a state issue").
-- repro: the command or UI path that reproduces the symptom.
-- regression_guard: path to a test that fails on the unfixed code and passes after the fix (must also appear under exit_criteria.tests_pass).
-- pre_fix_failure_artifact: path to a captured run of regression_guard on the UNFIXED code. Capture with `bun test <regression_guard> > <artifact> 2>&1; echo "PRE_FIX_EXIT=$?" >> <artifact>` (no pipes — pipes swallow the exit status). The gate requires a non-zero `PRE_FIX_EXIT=` line plus the regression_guard path string in the artifact (see the Root Cause Evidence Gate section in docs/reference-configs/sprint-contracts.md).
-
-## Workflow Inventory
-
-- Source plan: `{{PLAN_FILE}}`
-- Deferred-goal ledger: `tasks/todos.md`
-- Review file: `{{REVIEW_FILE}}`
-- Notes file: `{{NOTES_FILE}}`
-- Checks file: `.ai/harness/checks/latest.json`
-- Run snapshots: `.ai/harness/runs/`
-- Scope gate: edit only paths listed under `allowed_paths`; update this contract before widening scope.
-- Completion gate: run `verify-sprint --prepare-acceptance`, record one typed AcceptanceReceipt under the frozen policy below, then run `verify-sprint`; review Markdown is projection only.
-
-## Acceptance Policy
-
-```json
-{"protocol":1,"reviewer":"Claude","user_waiver":"allowed"}
-```
-
-## Allowed Paths
-
-```yaml
-allowed_paths:
-  - docs/spec.md
-  - plans/
-  - tasks/todos.md
-  - {{CONTRACT_FILE}}
-  - {{REVIEW_FILE}}
-  - {{NOTES_FILE}}
-  - .ai/context/capabilities.json
-  - .claude/templates/
-  - src/
-  - tests/
-```
-
-## Evidence Requirements
-
-```yaml
-evidence_requirements:
-  # Set benchmark to required when this contract consumes the harness profile benchmark matrix.
-  benchmark: not_applicable
-```
-
-## Delegation Contract
-
-```yaml
-delegation:
-  budget:
-    tokens: null
-    runner_invocations: null
-    wall_time_minutes: null
-  permission_scope:
-    mode: inherit_allowed_paths
-    writable_paths: []
-    network: inherited
-  roles:
-    parent:
-      mode: narrate_and_gatekeep
-      purpose: approval_checkpoint_owner
-    explorer:
-      mode: read_only
-      purpose: codebase_research
-    worker:
-      mode: edit_within_allowed_paths
-      purpose: implementation
-    verifier:
-      mode: read_only
-      purpose: exit_criteria_review
-  runner:
-    preferred:
-      - subagent
-    fallback: null
-    brief_is_authoritative: true
-```
-
-## Exit Criteria (Machine Verifiable)
-
-```yaml
-exit_criteria:
-  files_exist:
-    - docs/spec.md
-  artifacts_exist:
-    - .ai/harness/checks/latest.json
-    - {{NOTES_FILE}}
-  tests_pass:
-    - path: tests/unit/{{TASK_SLUG}}.test.ts
-  commands_succeed:
-    - bun run check:type
-```
-
-## Acceptance Notes (Human Review)
-
-- Functional behavior:
-- Edge cases:
-- Regression risks:
-
-## Rollback Point
-
-- Commit / checkpoint:
-- Revert strategy:
-CONTRACT_TEMPLATE_EOF
+    echo "canonical contract template is required: .claude/templates/contract.template.md" >&2
+    return 1
   fi
 
   if [[ ! -f ".claude/templates/review.template.md" ]]; then
@@ -732,35 +588,35 @@ The UX Feature Guard section below is the behavior/authority hand-off to BDD;
 do not create a parallel guard artifact.
 -->
 
-## Purpose & Audience (頁面目的與受眾)
+## Purpose & Audience
 
 - Page/surface:
 - Primary audience:
 - Job to be done:
 
-## UX Feature Guard (行為前圍欄)
+## UX Feature Guard
 
-- Requested outcome (使用者可見結果):
-- Frozen behavior / rules that must not change (不可改變的玩法與語義):
-- Requested action (指令):
-- Exact payload acted on (資料內容; if none, write `N/A`):
-- Forbidden extras / non-goals (禁止新增):
+- Requested outcome:
+- Frozen behavior / rules that must not change:
+- Requested action:
+- Exact payload acted on (if none, write `N/A`):
+- Forbidden extras / non-goals:
 
-### Role-aware User-visible Concept Boundary (角色可見概念邊界)
+### Role-aware User-visible Concept Boundary
 
-- Audience / role for this surface (可見角色):
-- Allowed visible concepts (允許可見的概念範圍):
-- Required outcome/recovery concepts that must stay visible (必須保留的結果與復原概念):
-- Backstage-only concepts that must never appear as user-visible (僅限後台，不得對使用者可見):
-- Role-gated exceptions, or `none` (角色限定例外，無則填 `none`):
-- Authority for each exception, or `N/A` (每個例外的核准依據，無則填 `N/A`):
+- Audience / role for this surface:
+- Allowed visible concepts:
+- Required outcome/recovery concepts that must stay visible:
+- Backstage-only concepts that must never appear as user-visible:
+- Role-gated exceptions, or `none`:
+- Authority for each exception, or `N/A`:
 
 `UX-{{SLUG}}-N1` (the negative/non-goal scenario below) derives from the
 backstage-only and non-goal fields above: it asserts that a backstage-only
 concept or forbidden extra must NOT surface, not merely that some unrelated
 input is invalid.
 
-### Authority & Reuse Map (權威與復用)
+### Authority & Reuse Map
 
 Name exact repo paths. A new surface needs a concrete mismatch or cross-module
 invariant; “cleaner” and “easier” are not justification.
@@ -769,7 +625,7 @@ invariant; “cleaner” and “easier” are not justification.
 |------------------------|------------------------------------|---------------------------------|---------------------------|
 |                        |                                    |                                 |                           |
 
-### Observable & Copy Contract (可觀測狀態與文案)
+### Observable & Copy Contract
 
 - Happy/loading/empty states that can actually occur:
 - Invalid/unavailable state: (what happened, where, next action)
@@ -789,58 +645,58 @@ they do not invent missing product rules.
 Carry these IDs unchanged into the task contract, test names/tags, and review
 evidence. Those surfaces prove the scenarios; they do not redefine them.
 
-## Reference Sources (參考來源:學什麼/避什麼)
+## Reference Sources (what to learn / what to avoid)
 
 Name concrete products, sites, or design systems — not vague adjectives. Mark unverifiable claims `[UNVERIFIED]`.
 
-| Source | Learn (學什麼) | Avoid (避什麼) |
+| Source | Learn | Avoid |
 |--------|----------------|-----------------|
 |        |                |                 |
 
-## Color (色彩)
+## Color
 
 - Palette:
 - Usage rules: (which color for which state/action; contrast/accessibility floor)
 
-## Typography (字型排印)
+## Typography
 
 - Typeface(s):
 - Scale / weights:
 - Language-specific notes: (for example CJK pairing, line-height)
 
-## Layout (佈局)
+## Layout
 
 - Grid / breakpoints:
 - Spacing scale:
 - Key components and hierarchy:
 
-## Motion (動效)
+## Motion
 
 - Trigger -> effect pairs:
 - Duration / easing:
 - What must stay static:
 
-## Anti-patterns (明確禁止清單)
+## Anti-patterns
 
-List concrete things this design must NOT do. Vague taste complaints ("不好看") are not acceptable entries; name the specific pattern.
+List concrete things this design must NOT do. Vague taste complaints ("it looks ugly") are not acceptable entries; name the specific pattern.
 
 -
 
-## Confirmation Checklist (確認標準)
+## Confirmation Checklist
 
 Every item must be checked before this brief unblocks sprint/contract execution.
 
-- [ ] Value proposition is clear (價值主張清晰)
-- [ ] Primary reference is decided (主參考已定)
-- [ ] Color is accurate to the reference (色彩準確)
-- [ ] Anti-pattern / don't list is explicit (明確的 don't 清單)
-- [ ] Motion spec is explicit (動效規格明確)
-- [ ] Product rules/non-goals are frozen; instruction and payload are separate (玩法不變，指令與內容分離)
-- [ ] Existing component/domain authorities have exact reuse paths; every new surface is justified (優先復用現有權威)
-- [ ] Positive, negative, and authority-failure Given/When/Then scenarios are explicit and fail loudly (BDD 場景完整且錯誤可見)
-- [ ] Role-aware visible/backstage-only concept boundary is explicit; `UX-{{SLUG}}-N1` matches a backstage-only or non-goal concept (角色可見/僅限後台概念邊界明確，N1 對應非目標或僅限後台概念)
+- [ ] Value proposition is clear
+- [ ] Primary reference is decided
+- [ ] Color is accurate to the reference
+- [ ] Anti-pattern / don't list is explicit
+- [ ] Motion spec is explicit
+- [ ] Product rules/non-goals are frozen; instruction and payload are separate
+- [ ] Existing component/domain authorities have exact reuse paths; every new surface is justified
+- [ ] Positive, negative, and authority-failure Given/When/Then scenarios are explicit and fail loudly
+- [ ] Role-aware visible/backstage-only concept boundary is explicit; `UX-{{SLUG}}-N1` matches a backstage-only or non-goal concept
 
-## Preview Attachment (可選)
+## Preview Attachment
 
 Optional. Reference an imagegen-generated preview or screenshot here; imagegen-type skills are enhancers for this brief, never a substitute for the checklist above. `design-proposal` can run the peer-research -> boundary-freeze -> STIMULUS-preview -> taste-refinement pipeline ahead of this section; it is an optional enhancer too, never a substitute for this brief or the Confirmation Checklist.
 
@@ -1091,6 +947,10 @@ ARCHITECTURE_INDEX_EOF
     "reviews_dir": "tasks/reviews",
     "notes_dir": "tasks/notes"
   },
+  "development_campaign": {
+    "version": 1,
+    "mode": "off"
+  },
   "reference_material": {
     "dir": "_ref",
     "mode": "external-ignored",
@@ -1144,7 +1004,7 @@ ARCHITECTURE_INDEX_EOF
     "projection_provider": "disabled",
     "projection_apply": "disabled",
     "projection_failure_gate": "advisory",
-    "projection_version": "0.4.2",
+    "projection_version": "0.5.10",
     "projection_timeout_ms": 120000,
     "freshness_gate": "advisory",
     "gate_min_severity": "medium",
@@ -1155,6 +1015,26 @@ ARCHITECTURE_INDEX_EOF
     "contract_block_begin": "<!-- BEGIN ARCHITECTURE CONTRACT -->",
     "contract_block_end": "<!-- END ARCHITECTURE CONTRACT -->",
     "rule": "hooks record architecture queue cards and sync controlled local context blocks; agents author semantic snapshots and diagrams"
+  },
+  "refactor": {
+    "mode": "off",
+    "provider": "archctx",
+    "proposal_author": "local",
+    "stages": {
+      "scan": { "provider_version": "0.5.10", "required_features": ["module-statistics-v1", "refactor-assessment-v1", "recommendation-v3"] },
+      "verify": { "provider_version": "0.5.10", "required_features": ["refactor-resolution-v1"] }
+    },
+    "workflow_routing": {
+      "module_refactor": "work_package",
+      "cross_module_refactor": "refactor_sprint",
+      "architecture_intervention": "human_architecture_approval",
+      "proof_required": "investigation_only",
+      "no_action": "record_and_stop"
+    },
+    "maximum_modules_per_program": 10,
+    "maximum_parallel_modules": 3,
+    "require_cutover_closure": true,
+    "require_post_merge_measurement": false
   },
   "workstreams": {
     "dir": "tasks/workstreams",
@@ -1215,6 +1095,7 @@ ARCHITECTURE_INDEX_EOF
   "circuit_breakers": {
     "guard_repeat": 2,
     "review": { "lite": 1, "standard": 1, "strict": 2 },
+    "semantic_reviews_per_work_package": 1,
     "subagents": { "default": 2, "strict_explicit_contract": 3 },
     "repair_loops": 2,
     "cross_model_consults_default": 0
@@ -1392,6 +1273,15 @@ ARCHITECTURE_INDEX_EOF
       "model_dir": ".archcontext/model",
       "nodes_dir": ".archcontext/model/nodes",
       "capability_source_key": ".ai/harness/policy.json#context.capability_source"
+    },
+    "herdr": {
+      "min_version": "0.9.0",
+      "release_assets": {
+        "linux-x86_64": {
+          "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-linux-x86_64",
+          "sha256": "4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f"
+        }
+      }
     }
   },
   "agentic_development": {
