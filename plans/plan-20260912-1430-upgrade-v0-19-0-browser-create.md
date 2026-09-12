@@ -89,7 +89,7 @@ See captured planning output.
 
 ## Evidence Contract
 
-> **Substantive Change SHA256**: `sha256:bb1a78b9f7e293bff15c1c9c922224728128c6ac4974a1346805e229f7929473`
+> **Substantive Change SHA256**: `sha256:e61550ff446ff7ac6cc7a0badb6e0458e076beaac58f68d60a08eda22ec307d1`
 
 - **State/progress path**: `plans/plan-20260912-1430-upgrade-v0-19-0-browser-create.md` task breakdown, `tasks/todos.md` deferred-goal ledger, `tasks/contracts/20260912-1430-upgrade-v0-19-0-browser-create.contract.md`, `tasks/reviews/20260912-1430-upgrade-v0-19-0-browser-create.review.md`, and `tasks/notes/20260912-1430-upgrade-v0-19-0-browser-create.notes.md`
 - **Verification evidence**: `.ai/harness/checks/latest.json`, `.ai/harness/runs/`, and the commands named in the captured planning output

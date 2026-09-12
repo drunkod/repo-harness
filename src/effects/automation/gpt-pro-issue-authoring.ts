@@ -1,7 +1,6 @@
 import { assertStoppedAdoptedResumeEligible, assertReplaceableStoppedSuccessor, assertResumedAuthoringTarget, bindAdoptedResume, resolveEffectiveContinuation, validateAdoptedResumeSource, type AdoptedResumeSource, type ContinuationReplacementBasis } from './campaign-authoring-resume';
 import { readCampaignProtectionAtRevision } from './campaign-protection';
-import { toCampaignBrowserStatus } from './campaign-browser-status';
-import type { BrowserSessionStatus } from '../../cli/chatgpt-browser/types';
+import { toCampaignBrowserStatus, type CampaignBrowserResultStatus } from './campaign-browser-status';
 import { campaignAutomationRunId } from '../../core/automation/campaign-authoring-budget';
 import { campaignGithubPrompt, readCampaignBrowserSessionEvidence } from '../../core/automation/campaign-browser-session';
 import { resolveCampaignGroupAuthoringContext } from './campaign-fresh-audit';
@@ -51,7 +50,7 @@ export interface IssueAuthoringBrowserInput {
 
 export interface IssueAuthoringBrowserResult {
   readonly sessionId: string;
-  readonly status: BrowserSessionStatus;
+  readonly status: CampaignBrowserResultStatus;
   readonly meta: { readonly model: { readonly verified?: boolean } };
 }
 
