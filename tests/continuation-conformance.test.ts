@@ -38,7 +38,9 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
 import { buildReviewSubject } from '../src/effects/review/diff-fingerprint';
+import { readLease } from '../src/effects/state/coordination-lease-store';
 import type { ContinuationEnvelopeV1 } from '../src/core/state/types';
+import { fixtureTaskId } from './helpers/sprint-fixture';
 
 const ROOT = join(import.meta.dir, '..');
 const CLI = join(ROOT, 'src/cli/index.ts');
@@ -89,6 +91,14 @@ function writeExecutable(path: string, body: string): void {
   writeFileSync(path, body);
   chmodSync(path, 0o755);
 }
+
+/** A `repo-harness` entrypoint bound to this checkout, for the shell helpers. */
+const CLI_WRAPPER = (() => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'conformance-cli-')));
+  const wrapper = join(dir, 'repo-harness');
+  writeExecutable(wrapper, `#!/bin/bash\nexec ${process.execPath} ${CLI} "$@"\n`);
+  return wrapper;
+})();
 
 function withTempDir<T>(prefix: string, fn: (dir: string) => T): T {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), `${prefix}-`)));
@@ -196,6 +206,7 @@ const SPRINT_TEXT = [
   '> **Updated**: 2026-08-03 00:00',
   '> **Source Spec**: `docs/spec.md`',
   '> **Goal Mode**: incremental',
+  '> **Backlog Schema**: 2',
   '',
   '## PRD',
   '',
@@ -203,10 +214,10 @@ const SPRINT_TEXT = [
   '',
   '## Backlog',
   '',
-  '| # | Status | Task | Mode | Acceptance | Plan |',
-  '|---|--------|------|------|------------|------|',
-  '| 1 | [ ] | row-one | contract | first slice lands | (pending) |',
-  '| 2 | [ ] | row-two | contract | second slice lands | (pending) |',
+  '| # | ID | Status | Task | Mode | Acceptance | Plan |',
+  '|---|----|--------|------|------|------------|------|',
+  `| 1 | ${fixtureTaskId('row-one')} | [ ] | row-one | contract | first slice lands | (pending) |`,
+  `| 2 | ${fixtureTaskId('row-two')} | [ ] | row-two | contract | second slice lands | (pending) |`,
   '',
   '## Execution Log',
   '',
@@ -230,6 +241,7 @@ function installFixture(container: string): Fixture {
     '.ai/harness/sprint',
     'plans/sprints',
     'plans/archive',
+    '.claude/templates',
     'tasks/contracts',
     'tasks/reviews',
     'tasks/notes',
@@ -242,11 +254,16 @@ function installFixture(container: string): Fixture {
     'capture-plan.sh',
     'plan-to-todo.sh',
     'contract-worktree.sh',
+    'worktree-merge-lib.sh',
     'archive-workflow.sh',
   ]) {
     copyFileSync(join(ROOT, 'scripts', helper), join(primary, 'scripts', helper));
     chmodSync(join(primary, 'scripts', helper), 0o755);
   }
+  copyFileSync(
+    join(ROOT, '.claude/templates/contract.template.md'),
+    join(primary, '.claude/templates/contract.template.md'),
+  );
   copyFileSync(
     join(ROOT, 'assets/hooks/lib/workflow-state.sh'),
     join(primary, '.ai/hooks/lib/workflow-state.sh'),
@@ -350,6 +367,61 @@ function installFixture(container: string): Fixture {
   };
 }
 
+/**
+ * Argv for a command string the envelope published, read the way a POSIX
+ * shell would: whitespace-separated words, single-quoted spans, and backslash
+ * escapes. The driver never synthesizes argv of its own -- it runs the string
+ * it was handed -- so a command the envelope names but cannot succeed fails
+ * here instead of passing against a driver-invented variant.
+ */
+function shellArgv(command: string): string[] {
+  const argv: string[] = [];
+  let current = '';
+  let started = false;
+  let quoted = false;
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command[i]!;
+    if (quoted) {
+      if (char === "'") quoted = false;
+      else current += char;
+      continue;
+    }
+    if (char === "'") {
+      quoted = true;
+      started = true;
+      continue;
+    }
+    if (char === '\\' && i + 1 < command.length) {
+      current += command[i + 1]!;
+      started = true;
+      i += 1;
+      continue;
+    }
+    // Tripwire, not a parser extension: this reader only understands
+    // whitespace-separated words, single-quoted spans, and backslash escapes.
+    // A double quote or a bare newline outside single quotes is a form real
+    // bash parses differently, so it fails loudly here instead of being
+    // misread into a plausible-looking argv.
+    expect(
+      char === '"' || char === '\n',
+      `shellArgv only parses single-quoted words; unquoted ${char === '\n' ? 'newline' : 'double quote'} in command: ${command}`,
+    ).toBe(false);
+    if (char === ' ' || char === '\t') {
+      if (started) {
+        argv.push(current);
+        current = '';
+        started = false;
+      }
+      continue;
+    }
+    current += char;
+    started = true;
+  }
+  expect(quoted, `unterminated quote in command: ${command}`).toBe(false);
+  if (started) argv.push(current);
+  return argv;
+}
+
 /** Read one continuation envelope. This is the only thing the driver reads. */
 function tick(cwd: string): ContinuationEnvelopeV1 {
   const result = run(process.execPath, [CLI, 'state', 'next', '--json'], cwd);
@@ -400,6 +472,10 @@ function helper(cwd: string, script: string, args: readonly string[], env: NodeJ
     HOOK_HOST: 'codex',
     REPO_HARNESS_HOOK_CLI: join(ROOT, 'src/cli/hook-entry.ts'),
     REPO_HARNESS_BUN_BIN: process.execPath,
+    // The sprint lease verbs live in the CLI; a disposable repository has no
+    // copy of it, and an ambient `repo-harness` on PATH would be a different
+    // build than the source under test.
+    REPO_HARNESS_CLI_BIN: CLI_WRAPPER,
     REPO_HARNESS_WORKFLOW_STATE_LIB: join(cwd, '.ai/hooks/lib/workflow-state.sh'),
     ...env,
   });
@@ -421,6 +497,7 @@ function helperWithFault(
       HOOK_HOST: 'codex',
       REPO_HARNESS_HOOK_CLI: join(ROOT, 'src/cli/hook-entry.ts'),
       REPO_HARNESS_BUN_BIN: process.execPath,
+      REPO_HARNESS_CLI_BIN: CLI_WRAPPER,
       REPO_HARNESS_WORKFLOW_STATE_LIB: join(cwd, '.ai/hooks/lib/workflow-state.sh'),
       REPO_HARNESS_GIT_BIN: fixture.fakeGit,
       FAULT_PID_FILE: fixture.pidFile,
@@ -431,8 +508,19 @@ function helperWithFault(
   );
 }
 
+/**
+ * `advance_sprint`'s command names the row it claims, so its string is not a
+ * constant. The driver matches on this prefix and executes the argv it parses
+ * out of whatever follows.
+ */
+const ADVANCE_SPRINT_PREFIX = 'repo-harness run sprint-backlog start-task';
+
+/** The exact string the envelope is expected to publish for one backlog row. */
+function advanceSprintCommand(task: string): string {
+  return `${ADVANCE_SPRINT_PREFIX} --task '${task}' --execute`;
+}
+
 const HOST_COMMAND = {
-  advanceSprint: 'repo-harness run sprint-backlog start-task --execute',
   resolveState: 'repo-harness state resolve --json',
   prepareAcceptance: 'repo-harness run verify-sprint --prepare-acceptance',
   recordAcceptance: 'repo-harness run acceptance-receipt record',
@@ -448,9 +536,12 @@ function recordDriverCommand(fixture: Fixture, command: string): void {
 function executeHostCommand(fixture: Fixture, cwd: string, command: string): Run {
   recordDriverCommand(fixture, command);
   const gateEnv = { CONFORMANCE_GATE_LOG: fixture.gateLog };
+  if (command.startsWith(`${ADVANCE_SPRINT_PREFIX} `)) {
+    // Literal execution: `repo-harness run <helper> <args...>` maps onto the
+    // fixture's own copy of that helper, with the published args unchanged.
+    return helper(cwd, 'scripts/sprint-backlog.sh', shellArgv(command).slice(3), gateEnv);
+  }
   switch (command) {
-    case HOST_COMMAND.advanceSprint:
-      return helper(cwd, 'scripts/sprint-backlog.sh', ['start-task', '--execute'], gateEnv);
     case HOST_COMMAND.resolveState:
       return run(process.execPath, [CLI, 'state', 'resolve', '--json'], cwd);
     case HOST_COMMAND.prepareAcceptance:
@@ -535,11 +626,20 @@ describe('host Goal conformance: the full tick over a disposable repository', ()
       const start = tick(primary);
       expect(start.route).toBe('advance_sprint');
       expect(start.unit_ref).toBe(SPRINT);
-      expect(start.command).toBe('repo-harness run sprint-backlog start-task --execute');
+      expect(start.command).toBe(advanceSprintCommand('row-one'));
 
       const advance = executeHostCommand(fixture, primary, start.command!);
       expect(advance.status, `${advance.stdout}\n${advance.stderr}`).toBe(0);
       const worktreeOne = createdWorktree(advance.stdout);
+      const claimDir = join(worktreeOne, '.ai/harness/sprint/claims');
+      const claimFiles = readdirSync(claimDir);
+      expect(claimFiles).toHaveLength(1);
+      const claimFile = join(claimDir, claimFiles[0]!);
+      const originalClaimToken = readFileSync(claimFile, 'utf-8');
+      const taskId = originalClaimToken.match(/^task_id=(.+)$/m)?.[1] ?? '';
+      const originalClaimId = originalClaimToken.match(/^claim_id=(.+)$/m)?.[1] ?? '';
+      expect(taskId).not.toBe('');
+      expect(originalClaimId).not.toBe('');
 
       // --- Row 1, tick 2: the unit moved into its worktree. ----------------
       const openPlan = tick(worktreeOne);
@@ -570,6 +670,26 @@ describe('host Goal conformance: the full tick over a disposable repository', ()
       expect(actionableOne.unit_ref).toBe(planOne);
       expect(actionableOne.command).toBe(HOST_COMMAND.verifySprint);
 
+      // A normal pre-journal failure happens after the lease gate but before
+      // any publication can exist. The EXIT path must restore ownership to
+      // `bound` immediately, without requiring the crash-recovery surface.
+      const architectureCheck = join(worktreeOne, 'scripts/check-architecture-sync.sh');
+      writeExecutable(architectureCheck, '#!/bin/bash\nexit 73\n');
+      const rejectedFinish = helper(
+        worktreeOne,
+        'scripts/contract-worktree.sh',
+        ['finish', '--merge'],
+      );
+      expect(rejectedFinish.status).not.toBe(0);
+      expect(rejectedFinish.stdout).toContain('Restored sprint lease to bound after aborted completion');
+      expect(readLease(worktreeOne, taskId).record).toMatchObject({
+        state: 'bound',
+        claim_id: originalClaimId,
+        execution_worktree: worktreeOne,
+        finish_transaction_key: null,
+      });
+      writeExecutable(architectureCheck, '#!/bin/bash\nexit 0\n');
+
       // Completion gate, then closeout -- and the closeout is SIGKILLed the
       // moment the journal durably records `lifecycle_applied`.
       const mainBeforeCrash = git(primary, ['rev-parse', 'main']).stdout.trim();
@@ -591,6 +711,7 @@ describe('host Goal conformance: the full tick over a disposable repository', ()
       expect(crashedJournal.status).toBe('in_progress');
       expect(crashedJournal.phases[crashedJournal.phases.length - 1]).toBe('lifecycle_applied');
       expect(crashedJournal.phases).not.toContain('complete');
+      expect(readLease(worktreeOne, taskId).record?.state).toBe('completing');
       // Nothing external landed: main still points at the exact pre-crash
       // commit (HEAD-vs-main would be vacuous here -- HEAD is a symref to
       // main in the primary tree).
@@ -614,6 +735,45 @@ describe('host Goal conformance: the full tick over a disposable repository', ()
       expect(abort.status, `${abort.stdout}\n${abort.stderr}`).toBe(0);
       expect(abort.stdout).toContain('restored the pre-closeout state');
       expect(journalStatus(journalDir).status).toBe('aborted');
+
+      const recoveredLease = readLease(worktreeOne, taskId).record;
+      expect(recoveredLease).toMatchObject({
+        state: 'bound',
+        claim_id: originalClaimId,
+        execution_worktree: worktreeOne,
+        finish_transaction_key: null,
+      });
+
+      // Recovery re-opens the existing ownership state, so another Agent can
+      // take over through the ordinary fenced steal/bind path. Rebind the new
+      // generation to this fixture worktree and replace only the local fencing
+      // token; the subsequent real finish proves the handoff is executable.
+      const steal = run(process.execPath, [
+        CLI,
+        'sprint',
+        'steal',
+        '--expected-claim-id', originalClaimId,
+        '--reason', 'recover failed finish in a replacement session',
+        '--session-id', 'replacement-session',
+      ], primary);
+      expect(steal.status, `${steal.stdout}\n${steal.stderr}`).toBe(0);
+      const replacement = JSON.parse(steal.stdout) as { claim_id: string };
+      expect(replacement.claim_id).not.toBe(originalClaimId);
+      const branch = git(worktreeOne, ['branch', '--show-current']).stdout.trim();
+      const bind = run(process.execPath, [
+        CLI,
+        'sprint',
+        'bind',
+        '--claim-id', replacement.claim_id,
+        '--worktree', worktreeOne,
+        '--branch', branch,
+        '--unit-ref', planOne,
+      ], primary);
+      expect(bind.status, `${bind.stdout}\n${bind.stderr}`).toBe(0);
+      writeFileSync(claimFile, originalClaimToken.replace(
+        `claim_id=${originalClaimId}`,
+        `claim_id=${replacement.claim_id}`,
+      ));
 
       // The rolled-back state is exactly the pre-closeout one: the envelope
       // still routes to the same unit, and the retry completes cleanly.
@@ -701,6 +861,14 @@ describe('host Goal conformance: the full tick over a disposable repository', ()
       expect(actionableTwo.unit_ref).toBe(planTwo);
 
       runCompletionGate(fixture, worktreeTwo, actionableTwo);
+
+      // finish retires the merged worktree on its own success path, so the
+      // ledger's runtime-evidence state has to be read while the worktree is
+      // still on disk. The durable half of the claim -- that it never entered
+      // anyone's tracked tree -- is asserted against published history below.
+      const ledgerPresentBeforeFinish = existsSync(join(worktreeTwo, LEDGER));
+      const worktreeStatusBeforeFinish = git(worktreeTwo, ['status', '--porcelain', '--untracked-files=all']).stdout;
+
       const finishTwo = executeHostCommand(fixture, worktreeTwo, HOST_COMMAND.finishMerge);
       expect(finishTwo.status, `${finishTwo.stdout}\n${finishTwo.stderr}`).toBe(0);
       expect(finishTwo.stdout).toContain('Merged codex/row-two into main');
@@ -715,14 +883,14 @@ describe('host Goal conformance: the full tick over a disposable repository', ()
       // Both rows landed on main through their own closeout, and the sprint
       // authority -- not the driver's memory -- records that.
       const sprint = readFileSync(join(primary, SPRINT), 'utf-8');
-      expect(sprint).toMatch(/\| 1 \| \[x\] \| row-one \|/);
-      expect(sprint).toMatch(/\| 2 \| \[x\] \| row-two \|/);
+      expect(sprint).toMatch(/\| 1 \| [0-9a-f]{64} \| \[x\] \| row-one \|/);
+      expect(sprint).toMatch(/\| 2 \| [0-9a-f]{64} \| \[x\] \| row-two \|/);
       expect(existsSync(join(primary, 'src/row-one.ts'))).toBe(true);
       expect(existsSync(join(primary, 'src/row-two.ts'))).toBe(true);
 
       const driverCommands = readFileSync(fixture.driverLog, 'utf-8').trim().split('\n');
       expect(driverCommands).toEqual([
-        HOST_COMMAND.advanceSprint,
+        advanceSprintCommand('row-one'),
         HOST_COMMAND.resolveState,
         HOST_COMMAND.prepareAcceptance,
         HOST_COMMAND.recordAcceptance,
@@ -732,7 +900,7 @@ describe('host Goal conformance: the full tick over a disposable repository', ()
         HOST_COMMAND.recordAcceptance,
         HOST_COMMAND.verifySprint,
         HOST_COMMAND.finishMerge,
-        HOST_COMMAND.advanceSprint,
+        advanceSprintCommand('row-two'),
         HOST_COMMAND.resolveState,
         HOST_COMMAND.resolveState,
         HOST_COMMAND.resolveState,
@@ -760,6 +928,8 @@ describe('host Goal conformance: the full tick over a disposable repository', ()
         'verify-sprint ',
         `acceptance-receipt verify --contract tasks/contracts/${row}.contract.md --verification .ai/harness/checks/latest.json`,
         `acceptance-receipt verify --contract tasks/contracts/${row}.contract.md --verification .ai/harness/checks/latest.json`,
+        'acceptance-receipt archive-projection-path',
+        `acceptance-receipt seal-archive-projection --contract tasks/archive/contract-${row}.md`,
       ];
       expect(gateCalls).toEqual([
         ...closeoutGate('row-one'), // the SIGKILLed closeout
@@ -769,8 +939,9 @@ describe('host Goal conformance: the full tick over a disposable repository', ()
 
       // The attempt ledger stayed ignored runtime evidence throughout: it never
       // entered the tracked tree of either worktree.
-      expect(existsSync(join(worktreeTwo, LEDGER))).toBe(true);
-      expect(git(worktreeTwo, ['status', '--porcelain', '--untracked-files=all']).stdout).toBe('');
+      expect(ledgerPresentBeforeFinish).toBe(true);
+      expect(worktreeStatusBeforeFinish).toBe('');
+      expect(git(primary, ['log', '--all', '--oneline', '--', LEDGER]).stdout).toBe('');
     });
   }, 90_000);
 });

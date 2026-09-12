@@ -6,7 +6,7 @@
  * in-process handlers, one package at a time. This module establishes the
  * typed contract those handlers will eventually produce -- `LoopEvent` (what
  * happened) and `LoopEventResult` (what the runtime decided) -- plus the
- * total mapping from today's 11 public routes onto the 8 `LoopEvent` kinds,
+ * total mapping from today's 12 public routes onto the 8 `LoopEvent` kinds,
  * per audit §6 (`plans/sprints/20260715-harness-loop-audit-and-optimization.md:1239-1298`).
  *
  * No production file imports this module yet, and this module performs no
@@ -120,6 +120,40 @@ export type HookEventTelemetryMetric =
   | 'event_writes'
   | 'elapsed_ms';
 
+/**
+ * Diagnostic state for a handler-owned durable-effect observation.
+ *
+ * `none_committed` is a proof that this invocation did not report a committed
+ * phase.  `unknown_partial` is deliberately different: a handler threw before
+ * the post-commit observer could tell us what landed, so the runtime must not
+ * infer zero effects.  The two committed states describe the observed prefix
+ * and the contract-complete terminal state respectively.  These values are
+ * telemetry only; durable artifacts remain the recovery authority.
+ */
+export type HookEffectObservationState =
+  | 'none_committed'
+  | 'unknown_partial'
+  | 'committed_partial'
+  | 'committed_complete';
+
+export type HookEffectBoundary = 'durable-emission';
+export type HookEffectCardinality = 'zero-or-one' | 'bounded-sequence';
+export type HookEffectRecovery = 'retry-converges' | 'reconcile-required';
+
+/** Additive, validated effect observation carried by targeted hook telemetry. */
+export interface HookEventTelemetryEffectObservation {
+  readonly contract_id: string;
+  readonly boundary: HookEffectBoundary;
+  readonly cardinality: HookEffectCardinality;
+  readonly recovery: HookEffectRecovery;
+  readonly state: HookEffectObservationState;
+  readonly committed_phases: readonly string[];
+  readonly last_committed_phase: string | null;
+}
+
+/** Short alias for handler-contract consumers and tests. */
+export type HookEffectObservation = HookEventTelemetryEffectObservation;
+
 /** One ordered unit of work performed while handling a host event. */
 export interface HookEventTelemetryStep {
   readonly name: string;
@@ -171,6 +205,8 @@ export interface HookEventTelemetryRecord {
     readonly incomplete_metrics: readonly HookEventTelemetryMetric[];
     readonly opaque_steps: readonly string[];
   };
+  /** Omitted for handlers without an explicit effect contract. */
+  readonly effect_observation?: HookEventTelemetryEffectObservation;
   readonly fingerprint: `sha256:${string}`;
 }
 
@@ -182,9 +218,9 @@ export interface LoopRouteTuple {
 }
 
 /**
- * Total map from every one of the 11 public route tuples
+ * Total map from every one of the 12 public route tuples
  * (`src/cli/hook/route-registry.ts` `ROUTES`) onto the `LoopEvent` kind that
- * models it. Not injective: 11 routes onto 8 kinds means several routes
+ * models it. Not injective: 12 routes onto 8 kinds means several routes
  * necessarily share a kind (e.g. both `UserPromptSubmit` routes are
  * `prompt_submitted`; `PreToolUse.subagent` and `SubagentStart.context` are
  * both `subagent_started`).
@@ -204,6 +240,7 @@ export const routeToLoopEvent: readonly LoopRouteTuple[] = [
   { event: 'PostToolUse', routeId: 'bash', kind: 'command_observed' },
   { event: 'PostToolUse', routeId: 'always', kind: 'command_observed' },
   { event: 'UserPromptSubmit', routeId: 'default', kind: 'prompt_submitted' },
+  { event: 'UserPromptSubmit', routeId: 'inbox', kind: 'prompt_submitted' },
   { event: 'UserPromptSubmit', routeId: 'delegation', kind: 'prompt_submitted' },
   { event: 'SubagentStart', routeId: 'context', kind: 'subagent_started' },
   { event: 'SubagentStop', routeId: 'quality', kind: 'subagent_stopped' },

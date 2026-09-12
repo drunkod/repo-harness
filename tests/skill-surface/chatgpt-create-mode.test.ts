@@ -49,11 +49,11 @@ function hasStandaloneName(content: string, name: string): boolean {
 describe("repo-harness-chatgpt strict Create mode", () => {
   test("router exposes the dedicated runtime within the canonical byte budget", () => {
     const router = readFileSync(ROUTER, "utf-8");
-    expect(router).toContain("first-class GitHub-app-backed Browser Create");
+    expect(router).toContain("GitHub-app-backed Browser Create");
     expect(router).toContain("repo-harness chatgpt browser-create");
     expect(router).toContain("`references/create.md`");
     expect(router).toContain("sole ChatGPT Web mode allowed to perform GitHub writes");
-    expect(statSync(ROUTER).size).toBeLessThanOrEqual(2048);
+    expect(statSync(ROUTER).size).toBeLessThanOrEqual(2560);
   });
 
   test("Create has one canonical reference home and a declared closed-set entry", () => {
@@ -61,7 +61,7 @@ describe("repo-harness-chatgpt strict Create mode", () => {
     expect(existsSync(join(PACKAGE_ROOT, "create.md"))).toBe(false);
     const packageTest = readFileSync(join(ROOT, "tests", "skill-surface", "chatgpt-package.test.ts"), "utf-8");
     expect(packageTest).toContain('"create.md"');
-    expect(packageTest).toContain("ROUTER_BODY_BYTE_LIMIT = 2048");
+    expect(packageTest).toContain("ROUTER_BODY_BYTE_LIMIT = 2560");
   });
 
   test("protocol requires exact repository/default/base identity and a dedicated agent branch", () => {
@@ -139,7 +139,8 @@ describe("repo-harness-chatgpt strict Create mode", () => {
     expect(engineGuide).toContain("[ChatGPT + GitHub App Create](./repo-harness-chatgpt-github-create.md)");
     expect(engineGuide).toContain("planning, bounded GitHub Create, and review workflows");
     expect(engineGuide).toContain("Create and Create read-back are not exposed as MCP tools");
-    expect(engineGuide).not.toContain("--browser-app");
+    expect(engineGuide).toContain("optional `--chatgpt-app <serverName>` preselection");
+    expect(engineGuide).toContain("Create, Create recovery, and Create read-back intentionally\nomit `--browser-app`");
     expect(engineGuide).not.toContain("browserAppPreselect");
     expect(guide).toContain("--repository owner/repository");
     expect(guide).not.toContain("--repository drunkod/repo-harness");

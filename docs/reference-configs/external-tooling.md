@@ -1,5 +1,72 @@
 # External Tooling
 
+## External Source Intake P0
+
+`.ai/harness/policy.json#external_sources` is absent by default and is equivalent to the only default, `{ "version": 1, "mode": "off" }`. Refresh never auto-enables from a repository URL, installed `gh`, labels, or registry access mode.
+
+To enable one manual GitHub evidence refresh, use one exact closed selection shape. Every limit is positive. A label scan requires sorted non-empty `labels_all` and accepts a sorted optional `assignees_any` restriction. Unknown fields and provider values fail closed.
+
+```json
+{
+  "external_sources": {
+    "version": 1,
+    "mode": "manual",
+    "github": {
+      "enabled": true,
+      "repository": "owner/repository",
+      "selection": {
+        "kind": "labels",
+        "labels_all": ["ready"],
+        "assignees_any": []
+      },
+      "limits": {
+        "max_pages": 5,
+        "max_issues": 500,
+        "max_body_bytes": 65536,
+        "max_total_bytes": 1048576,
+        "deadline_ms": 30000
+      }
+    }
+  }
+}
+```
+
+For an explicitly reviewed one-shot batch, select exact Issue numbers instead of requiring provider labels or scanning the whole repository:
+
+```json
+{
+  "external_sources": {
+    "version": 1,
+    "mode": "manual",
+    "github": {
+      "enabled": true,
+      "repository": "Ancienttwo/byok-sdk",
+      "selection": {
+        "kind": "issue_numbers",
+        "issue_numbers": [102, 103, 104, 105, 106, 107, 108, 109, 110, 111]
+      },
+      "limits": {
+        "max_pages": 1,
+        "max_issues": 10,
+        "max_body_bytes": 65536,
+        "max_total_bytes": 1048576,
+        "deadline_ms": 30000
+      }
+    }
+  }
+}
+```
+
+Exact-batch refresh resolves only those Issue endpoints and fails the whole attempt if any selected Issue is missing, malformed, a pull request, or exceeds a limit. GitHub assignees, labels, and open/closed state are evidence only: they do not prove whether local work has already been dispatched. Dispatch deduplication belongs to an authenticated binding against canonical repo-harness task identity.
+
+`repo-harness external-source refresh --repo <registered-repo-id>` invokes the locally authenticated `gh` client once and records immutable observations plus an attempt receipt under the repository Git common directory. `list` performs no provider call. These records are inert evidence: they do not create or change TaskOffer, priority, Claim, Lease, WorkEnvelope, collaboration, or Agent Runtime state.
+
+## External Source Binding WP2
+
+After planning has produced a canonical pending sprint row and its exact Approved work-package plan/contract, run `repo-harness external-source bind --repo <id> --source-revision <digest> --sprint <path> --task-id <id> --target-ref <ref>`. The command requires a strict `read_write` registry grant and persists one immutable provenance edge with exact observation, authorization, canonical task, and plan/contract revisions.
+
+`external-source bindings` reports source/canonical/authorization drift without mutating work. `external-source context` is the sole provider-content renderer and wraps canonical JSON in `[ExternalSourceUntrusted]`. The unchanged execution path remains canonical row + Approved plan/contract → TaskOffer → acquire → Claim/Lease → WorkEnvelope. Human acceptance stays at PR merge; only a true `installation_blocker` may pause earlier.
+
 Generated repos route external tooling by host/runtime shape. Task-level
 skill routing lives in `docs/reference-configs/agentic-development-flow.md`.
 
@@ -30,11 +97,44 @@ Codex/Claude hook adapters, Waza (`think`, `hunt`, `check`, `health`), brain
 root persistence, Mermaid, and CodeGraph CLI/MCP configuration.
 `repo-harness init` remains a compatibility alias for existing automation. The
 bootstrap path must not silently install unrelated toolchains or Claude
-marketplace plugins.
+marketplace plugins. The one explicit exception is OpenAI's official
+`codex@openai-codex` plugin for the Codex-host outside-review capability.
 
-`repo-harness uninstall` removes repo-harness managed Codex/Claude hook
-adapters. It intentionally does not uninstall Waza, Mermaid, Reverse Skill, CodeGraph,
-brain config, package-manager globals, or user-authored sibling hook entries.
+`repo-harness uninstall --dry-run` previews user-level cleanup without writing
+configuration, locks or receipts. `repo-harness uninstall` applies it; `--json`
+returns `status`, `exitCode`, `dryRun` and per-path actions. `--target codex|claude`
+limits host cleanup; shared brain/profile surfaces are retired on `--target both`
+(the default). `--location local` retains its narrower Claude adapter-only scope.
+
+Cleanup removes tagged hook commands and global working-rule blocks, unchanged
+profile-owned skills/rules/agents/links, proven CodeGraph registrations, and the
+product's brain/helper configuration fields. Sibling hooks, configuration keys,
+user-edited surfaces and vault contents remain. Newly recorded Codex request-input
+and CodeGraph configuration changes restore their original values when the current
+fragment still matches the installation receipt. The private
+`~/.repo-harness/configuration-restore.json` is static installation history, retained
+for repeated uninstall and reinstall provenance; restored entries become inactive,
+and a no-op reinstall cannot reacquire ownership from history. It does not activate
+a runtime.
+
+Unproven old configuration, malformed configuration and changed owned surfaces are
+reported as `unresolved`; the command exits nonzero with `status: partial` and keeps
+remaining ownership evidence. Opaque Codex hook trust entries cannot yet be mapped
+to commands and are reported for manual resolution. A preserved shared/pre-existing
+third-party installation is not claimed as repo-harness-owned.
+
+Standalone CodeGraph configuration and global install/update share one host lock.
+Before external mutation, a private pending receipt records only selected configuration
+fragments. Interrupted setup blocks ordinary mutation and cleanup; use
+`repo-harness uninstall --recover-interrupted --dry-run` to preview restoration,
+then `repo-harness uninstall --recover-interrupted` to apply it. This explicit
+recovery restores the recorded fragments even if they were edited after interruption;
+sibling fields remain. The target must include every affected host.
+
+Package-manager globals, the official Codex plugin, independent MCP setup/workspaces,
+archives and runtime history remain. Repository unadoption and package removal are
+separate operations; this command does not enumerate other repositories or remove
+third-party packages. Remove the CLI package only after configuration cleanup.
 
 `repo-harness update` is a reconciliation command, not a best-effort package
 install. It verifies the installed package's exact `archctx` and
@@ -48,16 +148,19 @@ Waza and Mermaid providers remain behind explicit `--with-external-skills`;
 Repo-local workflow refresh stays on `repo-harness init`; `setup check
 --check-updates` remains the read-only advisory surface.
 
-The cross-review skill is **harness-owned and self-contained** — its source
-lives in `assets/skills/repo-harness-cross-review/` and it wraps the peer CLI
-(`codex exec` / `claude -p`) in a read-only sandbox with no external
-planning-provider runtime, so installing it is a workflow-owned runtime
-concern, not an unrelated toolchain. `repo-harness-cross-review` installs
+The cross-review skill is **harness-owned** — its routing source lives in
+`assets/skills/repo-harness-cross-review/`. Claude hosts wrap `codex exec` in a
+read-only sandbox. Codex hosts discover and invoke OpenAI's official
+`codex@openai-codex` plugin companion/app-server runtime; they never launch
+Claude as the reviewer and never fall back when the plugin is unavailable.
+Installing that single plugin is therefore a workflow-owned runtime concern,
+not an unrelated toolchain. `repo-harness-cross-review` installs
 host-aware during `repo-harness install`/`init` and explicit external-skill
 refreshes: it installs into **both** `~/.claude/skills` (a Claude session
 asking Codex for an independent review, via its Codex provider mode) and
-`~/.codex/skills` (a Codex session asking Claude for a review, via its Claude
-provider mode) for the full profile. `claude-plan` installs only into
+`~/.codex/skills` (a Codex session asking Codex through the official plugin,
+via its `codex-plugin` provider mode) for the full profile. Review Gate is not
+enabled. `claude-plan` installs only into
 `~/.codex/skills` (a Codex session using Claude's headless plan mode for a
 plan consult on a mid-execution design fork) and is unaffected by this
 package's host-aware installation. These harness skills ship with the full
@@ -95,6 +198,20 @@ The Codex automation profile is a runtime reference, not a vendored copy. It
 requires Waza `health`, Waza `check`, and the standalone `mermaid` skill to
 exist under `~/.codex/skills`; the skill bodies stay owned by their original
 installations.
+
+The official Obsidian skills are runtime-referenced too, not vendored. The
+repo-owned `obsidian-memory` facade (source in `assets/skills/obsidian-memory/`,
+projected into both host skill roots) owns only the judgment layer — what to
+recall, what is worth persisting, and how the project sub-vault is organized —
+and delegates every Obsidian-specific format and runtime action to the official
+skills: `obsidian-markdown` for authoring or rewriting vault notes, and
+`obsidian-cli` for searching, opening, or operating on a running vault. Both
+must exist under `~/.claude/skills` and `~/.codex/skills`;
+`bash scripts/check-agent-tooling.sh --host both` probes both roots and reports
+a missing skill as a gap in the `obsidian_runtime_skills` section. The gap is
+advisory for the environment check and fail-closed at skill runtime:
+`obsidian-memory` stops and reports rather than hand-writing its own Markdown
+dialect. This repo does not vendor either skill body.
 
 ## Detect Safely
 
@@ -209,18 +326,58 @@ boundary explicit:
 
 | Capability | Owner | Required for |
 |---|---|---|
+| `herdr` | user install (herdr.dev) | required at the version pinned in `.ai/harness/policy.json#external_tooling.herdr`; peer terminals and persistent task reviewer hosting |
 | `bun` | repo-harness | repo-harness-owned global installs, local dependency install, tests, and runtime execution |
-| `bash` | repo-harness | helper scripts, migration, setup checks, and contract verification wrappers |
+| `bash` | repo-harness | helper scripts, migration, setup checks, and contract verification wrappers; Git-for-Windows Bash is the Windows platform contract |
 | `npm` | npm registry | registry readbacks, publish gates, and opt-in update checks; not repo-harness-owned global install repair |
 | `npx` / `skills_cli` | external Skills CLI | Waza and Mermaid skill bootstrap/update commands |
 | `rsync` | platform filesystem | Waza staging-to-Codex sync and installed-copy runtime mirroring |
 | `symlink` | platform filesystem | link-mode aliases; copy mode is the fallback |
+
+`.ai/harness/policy.json#external_tooling.herdr` is the single herdr pin: it owns
+the `min_version` floor and the checksum-verified `release_assets` entry that CI
+installs. Install herdr through its official installer or platform package manager
+and verify `herdr --version` reports at least that pinned `min_version`.
+`check-agent-tooling.sh --strict-readiness` reads the same key and fails if herdr is
+missing, unusable, or older than the pin; `setup check` projects `runtime.herdr`. Repo-harness does not install it or edit user Herdr config.
+The persistent reviewer still requires POSIX process groups: use macOS/Linux or
+WSL. Native Windows review lifecycle support is not implied by Herdr support.
+Drain old tmux reviewers with the previous repo-harness version before upgrading.
+Rebind endpoints explicitly as `herdr-cli-agent`; old adapter policy, capabilities
+and live session metadata are not translated. The self-host runtime remains off.
+No runtime or collaboration path automatically falls back to tmux.
+The native protected-helper tool contract below remains a separate boundary.
 
 The policy is Bun-first, not Bun-only. Repo-harness-owned install/repair commands
 use `bun add -g` or `bun install`. Waza/Mermaid remain explicit external Skills
 CLI dependencies until a separate plan replaces that integration. Missing
 optional capabilities should degrade the named feature, not blur command
 ownership.
+
+On Windows, `repo-harness install` and `repo-harness update` are the only
+protected-helper tool discovery ceremonies. They resolve `git.exe` and
+`taskkill.exe` from that invocation's `PATH`, require the latter to match
+`SystemRoot\\System32\\taskkill.exe`, require Git, Bash, and `usr/bin` to
+resolve under one non-symlink Git-for-Windows root, require the ceremony's
+`TEMP` to be an absolute non-symlink directory, probe the executables, and
+atomically persist protocol 1 under the OS account's
+`~/.repo-harness/config.json#protectedHelperRuntime`. Existing sibling config
+fields are preserved.
+
+Normal `acceptance-receipt`, `merge-gate`, `contract-worktree`, and
+`ship-worktrees` dispatch reads that exact contract. The protected child gets
+the platform `PATH` delimiter, account home, pinned temp/SystemRoot values,
+pinned Bun/Git/Bash, the Git-for-Windows POSIX directories, and the exact
+`taskkill.exe` passed to both supervisor termination paths; caller binary overrides, `HOME`, shell
+startup hooks, and general `PATH` entries are discarded. A missing, malformed,
+relocated, symlinked, cross-root, or incomplete contract fails before helper
+execution and instructs the operator to rerun install/update. There is no
+runtime discovery fallback. The protected TypeScript entrypoints re-resolve the
+same host contract themselves when invoked directly, so their Git and temp
+authority does not depend on dispatcher-only environment variables. Optional
+feature dependencies such as `jq` and `gh` remain separately operator-owned
+and are not installed by this contract; the required merge-gate path does not
+depend on `jq`.
 
 Installed-copy sync has two explicit modes. `AGENTIC_DEV_LINK_INSTALLED_COPIES=1`
 uses symlinks and does not require `rsync`; if symlink creation fails, the
@@ -313,6 +470,20 @@ tools directly.
 
 Today this is a convention only: `repo-harness` does not automatically discover,
 summarize, or gate on these manifests yet.
+
+For the CLI/npm release surface, `runtime-evidence-receipt.ts verify` is the
+bounded exception: it records a separate `RuntimeEvidenceReceipt v1` only when
+a registry readback binds the published tarball and a clean install returns the
+expected CLI version and `repo-harness-state-snapshot` hook contract. The
+installed package manifest must declare `repo-harness` and `repo-harness-hook`
+bin targets; supplied executable paths resolve to those in-package targets
+(including `.bin` symlinks), and the installed manifest plus both bin contents
+must byte-match their published tarball members. This is
+release-side runtime evidence, not an `AcceptanceReceipt`, task-review oracle,
+scheduler, or service-auth readback; missing any observation fails closed.
+Installed CLI/hook commands run with the current trusted Bun executable
+directory plus `/usr/bin:/bin`, which is the minimum PATH supporting their real
+`#!/usr/bin/env bun` shebang without inheriting the caller environment.
 
 The recommended v1 convention is evidence ingestion, not provider invocation.
 It is not yet an automatic `repo-harness check` gate:
@@ -471,12 +642,11 @@ mapping.
 | `fable` | `gpt-5.6-sol` | `low`, `medium`, `high`, `xhigh`, `max` | same string, unchanged |
 
 Three per-agent target overrides are applied after tuple validation, on top of
-the family row above, and are the only effort remaps in the generator:
-`fast-worker` (`opus`/`medium`) targets `gpt-5.6-luna` at `max` reasoning
-instead of the opus family's `gpt-5.6-terra`/`medium`; `deep-worker`
-(`opus`/`high`) and `gatekeeper` (`opus`/`high`) keep the opus family's
-`gpt-5.6-terra` model but bump reasoning to `xhigh` instead of `high`. Every
-other agent's Codex model and effort follow the family row unchanged.
+the family row above, and are the only model/effort remaps in the generator:
+`fast-worker` (`opus`/`medium`) targets `gpt-6-astra` at `low` (light) reasoning;
+`deep-worker` (`opus`/`high`) and `gatekeeper` (`opus`/`high`) both target
+`gpt-6-astra` at `medium` reasoning. Every other agent's Codex model and effort follow the family row
+unchanged.
 
 `fast-worker`, `deep-worker`, `root-cause-prover`, and `harness-evaluator`
 receive `sandbox_mode = "workspace-write"`; every other role receives
@@ -556,9 +726,9 @@ The exact target base commit enables the local gate in
 `.ai/harness/policy.json#merge_gate`; the candidate cannot disable that base
 requirement. Runtime setup installs no merge-gate skill, agent, or provider
 runtime. Caller `HOME`, helper-source, and runner environment overrides are ignored for
-the protected ship/gate helpers. The official runner also pins Bash, Git, Bun,
-and `gh` to installed host executables and replaces caller `PATH` with the
-minimal host runtime path. The host state directories, AcceptanceReceipt, and
+the protected ship/gate helpers. The official runner pins Bash, Git, and Bun;
+where a fixed trusted host `gh` is present it pins that executable too, and it
+replaces caller `PATH` with the minimal host runtime path. The host state directories, AcceptanceReceipt, and
 seal must be owned by the OS account and not group/world writable. After
 `contract-worktree finish` creates the candidate commit, the installed helper
 binds the seal to repository root, target base ref/SHA, candidate head SHA,
@@ -614,11 +784,22 @@ mismatched, invalid, or unverified native observation blocks a role-routing
 claim and authorizes no alternate fleet runner. repo-harness must not scrape
 rollout JSONL or SQLite as a compatibility path.
 
-`developer_instructions` is the packaged `.md` body plus the canonical
-EXECUTION_BOUNDARY anti-extras clause, kept byte-identical to the
-`EXECUTION_BOUNDARY` constant in `scripts/contract-run.ts` so every generated
-Codex agent carries the same boundary as the Claude worker prompts, the MCP
-`codex-goal` path, and the Codex delegation advisor hook.
+`developer_instructions` is the packaged `.md` role body only. Generated
+personas carry no EXECUTION_BOUNDARY anti-extras clause, and neither does the
+Codex delegation advisor hook: on the native-child path `SubagentStart.context`
+is the single injection owner, so the clause appears exactly once in each
+rendered task packet under the marker
+`[repo-harness:execution-boundary/v1]`. The hook renders it only when both
+halves of the scope decision are known — a resolved active contract and a child
+whose selected profile declares `sandbox_mode = "workspace-write"`; a
+`read-only` child gets the inverse note, and an unresolved contract or
+unverified routing gets neither.
+
+`sandbox_mode` is therefore required in every custom-agent TOML and validated
+fail-closed. Writability is read from the selected profile, never inferred from
+the agent name and never defaulted: a profile missing `sandbox_mode`, or
+declaring anything other than `read-only` or `workspace-write`, routes the child
+to native-role-routing `invalid` and receives no implementation boundary.
 
 ### `install_mode`: self-host vs. downstream
 
@@ -648,9 +829,9 @@ six source files before mutating any target; a missing, malformed, mismatched,
 or unmapped source makes the whole run fail closed and leaves installed files
 untouched.
 
-The installer requires Bun >= 1.1.35, matching repo-harness's package runtime
-contract and the first supported `Bun.TOML.parse` behavior for the generated
-multiline agent files.
+The installer requires Bun >= 1.4.0, matching repo-harness's package runtime
+contract and its verified subprocess environment-inheritance behavior.
+The CLI entry rejects older or unparseable Bun runtimes before command dispatch.
 The top-level Unix and Windows bootstrap installers upgrade an older detected
 Bun before installing repo-harness, rather than relying on package-engine
 metadata that older Bun releases do not enforce.
@@ -781,6 +962,28 @@ stdout. A typed refresh-required signal runs the canonical architecture,
 context-contract, and capability-context writers even when the legacy queue
 helper creates no drift card. SessionStart and
 `repo-harness architecture-projection drain --json` expose queue state.
+An unresolved-major signal is persisted as an exact acceptance candidate. A
+human approval is applied only through
+`repo-harness architecture-projection accept --signal-id <sha256> --approval-reference <event-id> --json`:
+the command copies reason codes and affected node ids from that signal, keeps
+the supplied approval event identity unchanged, and refuses if repository,
+workspace, HEAD, or worktree digest has moved. A successful accepted apply
+writes a content-bound acceptance receipt, projects an automatic-drain dead
+letter into its terminal job receipt, and is byte-idempotent on the same signal
+and approval reference. `status --json` reports unresolved or invalid
+acceptance evidence, and the strict architecture gate fails closed on either;
+the command never chooses or infers an architecture decision.
+If a candidate's exact reason set is only `verified-flow-proof-changed`, use
+`repo-harness architecture-projection reconcile --signal-id <sha256> --json`
+after refreshing the configured CodeGraph index. Reconciliation runs the same
+provider in check mode without `acceptedChange`, requires CodeGraph-ready
+input/output snapshots and an empty `noop`, and writes a separate content-bound
+receipt. Semantic reasons, unavailable proof, affected nodes, files, human
+actions, refresh signals, and apply receipts all fail closed; human approval is
+never treated as missing proof. Resolution is serialized per acceptance store,
+so acceptance and reconciliation cannot both execute for one candidate. When
+the candidate came from the automatic drain, a successful reconciliation also
+projects the exact dead letter into a terminal job receipt.
 Each successful canonical refresh action is checkpointed by action key before
 the next action runs, so a partial failure resumes without replaying completed
 writers. Missing or stale CLI authority remains a typed refresh failure; it is

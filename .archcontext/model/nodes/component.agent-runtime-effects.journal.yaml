@@ -1,0 +1,7 @@
+schemaVersion: archcontext.node/v2
+id: component.agent-runtime-effects.journal
+kind: component
+name: Agent Runtime Effect Journal
+status: active
+parent: capability.runtime-harness.agent-runtime-effects
+summary: Owns immutable V2 effect intent and observation chains plus deterministic current repair and the explicit terminal-only V1 archive receipt.

@@ -176,6 +176,7 @@ Use ChatGPT for planning and review. Use Codex for local execution.
 7. Ask ChatGPT to prepare a Codex Goal with `prepare_codex_goal_from_sprint`.
 8. Open Codex locally and run the generated `/goal` prompt.
 9. Let Codex execute one Sprint task card at a time, run checks, update the checklist, and stage each completed phase before continuing.
+10. To regenerate an artifact that already exists, read it first: call `read_workflow_file` on the target path and pass the `sha256` it returns as `expected_sha256` on the write call. Omit `expected_sha256` only when creating a new artifact.
 
 Planner remains a workflow sidecar rather than a remote coding agent. Only the
 separate, explicitly granted coding profile provides direct coding and shell.
@@ -267,6 +268,19 @@ idea
   -> prepare_codex_goal_from_sprint
   -> local Codex /goal execution
 ```
+
+`write_plan`, `prepare_codex_goal_from_sprint`, and `write_codex_goal` write
+fixed paths, so every regeneration after the first targets an existing file.
+Read before writing:
+
+```text
+read_workflow_file(path)          -> { sha256, content }
+write_plan(..., expected_sha256)  -> { sha256, previousSha256 }
+```
+
+Without `expected_sha256` the write is create-only and returns
+`WOULD_OVERWRITE`; with a stale one it returns `REVISION_CONFLICT` and leaves
+the file unchanged. Read it again and retry with the current `sha256`.
 
 Local fallback for the last handoff step:
 
@@ -366,7 +380,7 @@ Use repo-harness to read the target repo PRD by repo_path. Convert it into an or
 ## Codex Goal Prompt
 
 ```text
-Use repo-harness prepare_codex_goal_from_sprint with repo_path, the PRD path, and the checklist Sprint path. Return the host-native /goal prompt. Do not run Codex remotely.
+Use repo-harness prepare_codex_goal_from_sprint with repo_path, the PRD path, and the checklist Sprint path. The goal is written to the fixed path .ai/harness/handoff/codex-goal.md, so if it already exists, first call read_workflow_file on that path and pass its sha256 as expected_sha256. Return the host-native /goal prompt. Do not run Codex remotely.
 ```
 
 Equivalent local CLI:
@@ -388,6 +402,7 @@ Use repo-harness-chatgpt-bridge. Execute the latest ChatGPT-generated Codex goal
 - If tools are missing, restart `repo-harness mcp serve` and rescan tools.
 - Run `repo-harness mcp doctor --repo . --live` to verify config, local server, tunnel, OAuth, initialize, and exact `tools/list` schema without printing credentials.
 - If workflow artifact writes fail, verify the target path is a PRD, sprint, plan, or approved handoff file.
+- If a workflow artifact write returns `WOULD_OVERWRITE` or `REVISION_CONFLICT`, call `read_workflow_file` on the target and retry with its `sha256` as `expected_sha256`. If it returns `RETIRED_PARAMETER`, drop the `overwrite` field: it was removed in 0.16.1 and replaced by `expected_sha256`.
 - If general repo writes fail, call `get_repo_capabilities`; write tools require a repo registered with `accessMode: "read_write"`.
 - If ChatGPT generated prose instead of checklist Sprint task cards, ask it to use write_checklist_sprint.
 - If Codex cannot see the server, run `repo-harness mcp setup codex --repo . --scope project`.
@@ -408,3 +423,22 @@ Use repo-harness-chatgpt-bridge. Execute the latest ChatGPT-generated Codex goal
 - The orchestrator dev runner is local-only, opt-in, timeout-bounded, audited, and limited to the fixed Codex goal handoff. It is not arbitrary shell.
 - Keep `_ref/` read-only when used as a comparison source.
 - Do not put tunnel tokens, OAuth tokens, passphrases, or ChatGPT/Codex credentials in git.
+
+## Uninstall local MCP setup
+
+Stop every `repo-harness mcp serve --transport http` process before deleting local credentials: a running OAuth server caches grants and can write its token store back on shutdown. The CLI does not manage service lifetimes or verify shutdown.
+
+```bash
+repo-harness mcp uninstall --repo . --dry-run --json
+repo-harness mcp uninstall --repo . --services-stopped
+# Only remove this project's Codex registration:
+repo-harness mcp uninstall --repo . --target codex
+```
+
+`--target chatgpt` cleans account-level `mcp.local.json`, `mcp.tokens.json`, `mcp.oauth.json` and `mcp.oauth-tokens.json` under `REPO_HARNESS_HOME` (default `~/.repo-harness`). The shared repository registry is restored only for setup changes with a restoration record. Other registrations and user changes are preserved; unresolved ownership yields `partial` and exit 1. Credentials are deleted without making secret backups.
+
+`--target codex` restores the project `.codex/config.toml` MCP fragment recorded by setup. Unrelated TOML settings remain. Existing registrations without a receipt are preserved and reported, including old `.bak` files which are not treated as restoration authority. An interrupted setup can be previewed and recovered with `--recover-interrupted --dry-run`, then `--recover-interrupted`.
+
+Setup records bounded configuration preimages and registry changes before publishing them. Successful cleanup retires their ownership so repeated uninstall cannot reacquire user configuration. Repositories, managed workspaces/worktrees, task state, archives, generated guides and bridge skill files remain. Repository unadoption and package-manager removal are separate operations.
+
+Completion means **local configuration cleanup**. Remove the remote ChatGPT Connector, tunnel and externally supplied credential environment variables separately. `--services-stopped` is the operator's assertion that every HTTP service was stopped; it is not proof of live or remote revocation. All mutation verification uses disposable storage.

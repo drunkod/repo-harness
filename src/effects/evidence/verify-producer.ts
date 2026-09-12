@@ -37,7 +37,7 @@ import { fileURLToPath } from "url";
 
 import type { EvidenceEventRecord, GenesisRecord, JsonValue, SubjectIdentity } from "../../core/evidence/types";
 import { appendEvidenceEvent, appendGenesisRecord } from "./event-log";
-import { buildReviewSubject, uniqueSorted } from "../review/diff-fingerprint";
+import { buildReviewSubject, resolvePolicyReviewBase, uniqueSorted } from "../review/diff-fingerprint";
 import { LEDGER_EPOCH_START_SHA } from "./epoch";
 
 const PRODUCER_ID = "verify-sprint";
@@ -80,6 +80,8 @@ export interface VerifyProducerInput {
   readonly counts?: Readonly<Record<string, number>>;
   /** Frozen subject hash the caller expects; emission fails closed if the recomputed hash differs. */
   readonly expectedSubjectSha256?: string;
+  /** Immutable review base frozen by the prepare run. */
+  readonly targetRevision?: string;
   readonly correlationRunId?: string;
   /**
    * Repo-relative path to the contract already resolved by the caller (see
@@ -100,10 +102,6 @@ export interface VerifyProducerInput {
    * payload value -- no new bypass of that construction invariant.
    */
   readonly runTrace?: JsonValue;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function sha256Hex(content: Buffer | string): string {
@@ -158,19 +156,6 @@ function lastCommitTouching(repoRoot: string, relativePath: string): string | nu
   if (!result.ok) return null;
   const sha = result.text.trim();
   return sha.length > 0 ? sha : null;
-}
-
-/** `.ai/harness/policy.json#worktree_strategy.review_base` (pattern reference: `scripts/acceptance-receipt.ts`'s `reviewBase`). Defaults to `HEAD` so a fixture/standalone repo without a policy file still resolves. */
-function resolveReviewBaseRef(repoRoot: string): string {
-  const policyPath = join(repoRoot, ".ai/harness/policy.json");
-  if (!existsSync(policyPath)) return "HEAD";
-  try {
-    const policy = JSON.parse(readFileSync(policyPath, "utf-8")) as unknown;
-    const value = isRecord(policy) && isRecord(policy.worktree_strategy) ? policy.worktree_strategy.review_base : undefined;
-    return typeof value === "string" && value.trim() !== "" ? value : "HEAD";
-  } catch {
-    return "HEAD";
-  }
 }
 
 /** This module's own `package.json` version -- the repo-harness tool's version, independent of whichever `repoRoot` is being verified. */
@@ -285,14 +270,30 @@ export function emitAuthoritativeVerifyEvidence(input: VerifyProducerInput): Ver
     };
   }
 
-  const reviewBaseRef = resolveReviewBaseRef(repoRoot);
-  const subject = buildReviewSubject(repoRoot, { targetRef: reviewBaseRef });
+  const reviewBase = resolvePolicyReviewBase(repoRoot);
+  if (!reviewBase.ok) {
+    return {
+      ok: false,
+      reason: "subject_mismatch",
+      message: `policy review base is unavailable: ${reviewBase.reason}`,
+    };
+  }
+  const subject = buildReviewSubject(repoRoot, { targetRef: reviewBase.targetRef, targetRevision: input.targetRevision });
   if (subject.status !== "ok") {
     return {
       ok: false,
       reason: "subject_mismatch",
       message: `review subject could not be computed: ${subject.reason ?? "unknown"}`,
     };
+  }
+  if (input.runTrace && typeof input.runTrace === "object" && !Array.isArray(input.runTrace)) {
+    const assessment = (input.runTrace as Readonly<Record<string, JsonValue>>).change_assessment;
+    const packet = assessment && typeof assessment === "object" && !Array.isArray(assessment)
+      ? (assessment as Readonly<Record<string, JsonValue>>).selection_packet : undefined;
+    if (packet && typeof packet === "object" && !Array.isArray(packet)
+      && ((packet as Readonly<Record<string, JsonValue>>).target_revision !== subject.target_rev || (packet as Readonly<Record<string, JsonValue>>).target_ref !== reviewBase.targetRef)) {
+      return { ok: false, reason: "subject_mismatch", message: "run trace target differs from the frozen evidence target" };
+    }
   }
   if (input.expectedSubjectSha256 !== undefined && input.expectedSubjectSha256 !== subject.review_subject_sha256) {
     return {

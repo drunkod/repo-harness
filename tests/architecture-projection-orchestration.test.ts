@@ -15,16 +15,21 @@ import {
   enqueueArchitectureProjectionJob,
   failArchitectureProjectionJob,
   recoverAbandonedArchitectureProjectionJobs,
+  architectureProjectionRunningStaleMs,
+  completeArchitectureProjectionJob,
   retryArchitectureProjectionDeadLetter,
+  ArchitectureProjectionOwnershipError,
+  LEGACY_ATTEMPT_BUDGET_NOTE,
 } from '../src/effects/architecture/projection-jobs';
-import type { ArchctxProcessResult, RunArchctxProcess } from '../src/effects/architecture/archctx-provider';
+import { captureArchitectureProjectionSnapshot, type ArchctxProcessResult, type RunArchctxProcess } from '../src/effects/architecture/archctx-provider';
 import { buildManagedHooks } from '../src/cli/installer/managed-entries';
 import { consumeArchitectureRefreshSignals, type RunArchitectureRefreshActions } from '../src/effects/architecture/refresh-consumer';
+import { inspectArchitectureProjectionAcceptanceState } from '../src/effects/architecture/projection-acceptance';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const digest = (token: string) => `sha256:${token.repeat(64).slice(0, 64)}` as const;
-const policy: ArchitectureProjectionPolicy = { provider: 'archctx', applyMode: 'automatic', failureGate: 'advisory', requiredVersion: '0.4.2', timeoutMs: 120_000 };
+const policy: ArchitectureProjectionPolicy = { provider: 'archctx', applyMode: 'automatic', failureGate: 'advisory', requiredVersion: '0.5.10', timeoutMs: 120_000 };
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'repo-harness-axr6-'));
@@ -35,7 +40,7 @@ function fixture() {
   mkdirSync(join(repoRoot, '.archcontext/model/nodes'), { recursive: true });
   mkdirSync(join(repoRoot, 'src'), { recursive: true });
   mkdirSync(join(consumerRoot, 'node_modules/archctx/bin'), { recursive: true });
-  writeFileSync(join(repoRoot, '.ai/harness/policy.json'), `${JSON.stringify({ architecture: { projection_provider: 'archctx', projection_apply: 'automatic', projection_version: '0.4.2', projection_timeout_ms: 120000 } })}\n`);
+  writeFileSync(join(repoRoot, '.ai/harness/policy.json'), `${JSON.stringify({ architecture: { projection_provider: 'archctx', projection_apply: 'automatic', projection_version: '0.5.10', projection_timeout_ms: 120000 } })}\n`);
   writeFileSync(join(repoRoot, '.archcontext/model/nodes/root.yaml'), `schemaVersion: archcontext.node/v2
 kind: capability
 id: capability.test.root
@@ -57,7 +62,7 @@ extensions:
   writeFileSync(join(repoRoot, 'src/index.ts'), 'export const value = 1;\n');
   writeFileSync(join(repoRoot, 'AGENTS.md'), '# agents\n');
   writeFileSync(join(repoRoot, 'CLAUDE.md'), '# claude\n');
-  writeFileSync(join(consumerRoot, 'node_modules/archctx/package.json'), `${JSON.stringify({ name: 'archctx', version: '0.4.2', engines: { node: '>=24 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
+  writeFileSync(join(consumerRoot, 'node_modules/archctx/package.json'), `${JSON.stringify({ name: 'archctx', version: '0.5.10', engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
   writeFileSync(join(consumerRoot, 'node_modules/archctx/bin/archctx'), '#!/bin/sh\nexit 1\n');
   chmodSync(join(consumerRoot, 'node_modules/archctx/bin/archctx'), 0o755);
   execFileSync('git', ['init'], { cwd: repoRoot, stdio: 'ignore' });
@@ -72,10 +77,10 @@ extensions:
 function capabilities(): ArchctxProcessResult {
   return { status: 0, signal: null, stderr: '', stdout: JSON.stringify({
     schemaVersion: 'archcontext.capabilities/v1',
-    package: { name: 'archctx', version: '0.4.2' },
-    protocols: { projectionRequest: 'archcontext.projection-request/v1', projectionResult: 'archcontext.projection-result/v1', architectureRefreshSignal: 'archcontext.architecture-refresh-signal/v1' },
-    renderers: { architectureDocs: 'archcontext.docs-renderer/v2', agentContext: 'archcontext.agent-context-renderer/v1' },
-    features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'projection-protocol-v1'],
+    package: { name: 'archctx', version: '0.5.10' },
+    protocols: { projectionRequest: 'archcontext.projection-request/v1', projectionResult: 'archcontext.projection-result/v2', architectureRefreshSignal: 'archcontext.architecture-refresh-signal/v1' },
+    renderers: { architectureDocs: 'archcontext.docs-renderer/v4', agentContext: 'archcontext.agent-context-renderer/v1' },
+    features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'projection-apply-receipt-v1', 'projection-prior-committed-applies-v1', 'projection-protocol-v2'],
   }) };
 }
 
@@ -84,12 +89,12 @@ function envelope(request: ProjectionRequestV1) {
     ...request.expected,
     baseHeadSha: request.expected.headSha,
     sourceTreeDigest: digest('1'), modelDigest: digest('2'), codeGraphDigest: digest('3'), indexedWorktreeDigest: digest('4'), projectionInputDigest: digest('5'),
-    rendererVersion: 'archcontext.docs-renderer/v2' as const,
+    rendererVersion: 'archcontext.docs-renderer/v4' as const,
     layoutVersion: 'archcontext.docs-layout/v1' as const,
     generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.5.0' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
   };
   const body: Omit<ProjectionResultV1, 'receiptDigest'> = {
-    schemaVersion: 'archcontext.projection-result/v1' as const,
+    schemaVersion: 'archcontext.projection-result/v2' as const,
     requestId: request.requestId,
     status: 'applied' as const,
     inputSnapshot: snapshot,
@@ -97,6 +102,52 @@ function envelope(request: ProjectionRequestV1) {
     affectedNodeIds: [], files: [], humanActions: [], refreshSignals: [],
   };
   return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.run', data: { ...body, receiptDigest: projectionResultReceiptDigest(body) } };
+}
+
+function reconcileEnvelope(
+  requestId: string,
+  originalExpected: ProjectionRequestV1['expected'],
+  acceptedChange: NonNullable<ProjectionRequestV1['acceptedChange']>,
+  status: 'applied-reconcile-required' | 'applied' | 'noop',
+) {
+  const snapshot = {
+    ...originalExpected,
+    baseHeadSha: originalExpected.headSha,
+    sourceTreeDigest: digest('1'), modelDigest: digest('2'), codeGraphDigest: digest('3'), indexedWorktreeDigest: digest('4'), projectionInputDigest: digest('5'),
+    rendererVersion: 'archcontext.docs-renderer/v4' as const,
+    layoutVersion: 'archcontext.docs-layout/v1' as const,
+    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.5.0' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
+  };
+  const applyReceipt = {
+    schemaVersion: 'archcontext.projection-apply-identity/v1' as const,
+    applyId: digest('a'), lookupKey: digest('b'), repositoryId: originalExpected.repositoryId, workspaceId: originalExpected.workspaceId,
+    acceptedChange,
+    semanticCommit: { changeSetId: 'changeset.docs-projection-test', idempotencyKey: 'idem_changeset.docs-projection-test' },
+    ownedFilesDigest: digest('c'), refreshSignalsDigest: digest('d'),
+  };
+  const signal = {
+    schemaVersion: 'archcontext.architecture-refresh-signal/v1' as const,
+    signalId: digest('e'), idempotencyKey: digest('f'), mode: 'refresh-required' as const,
+    repository: { repositoryId: originalExpected.repositoryId },
+    worktree: { workspaceId: originalExpected.workspaceId, headSha: originalExpected.headSha, worktreeDigest: originalExpected.worktreeDigest },
+    cause: 'accepted-semantic-delta' as const, acceptedChange,
+    reasonCodes: [...acceptedChange.reasonCodes], affectedNodeIds: [...acceptedChange.affectedNodeIds], refreshTargets: ['architecture-readiness'],
+    baseDigests: { modelDigest: digest('0'), sourceTreeDigest: digest('1'), flowProofDigest: digest('2'), projectionDigest: digest('3') },
+    resultingDigests: { modelDigest: digest('4'), sourceTreeDigest: digest('5'), flowProofDigest: digest('6'), projectionDigest: digest('7') },
+    projectionReceiptDigest: digest('0'),
+  };
+  const body: Omit<ProjectionResultV1, 'receiptDigest'> = {
+    schemaVersion: 'archcontext.projection-result/v2', requestId, status,
+    inputSnapshot: snapshot, outputSnapshot: snapshot,
+    affectedNodeIds: ['capability.test.root'],
+    files: [{ path: 'docs/architecture/index.md', action: 'update', preimageDigest: digest('8'), outputDigest: digest('9') }],
+    humanActions: [], refreshSignals: status === 'applied' ? [signal] : [], applyReceipt,
+  };
+  const receiptDigest = projectionResultReceiptDigest(body);
+  return {
+    schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.run',
+    data: { ...body, refreshSignals: body.refreshSignals.map((entry) => ({ ...entry, projectionReceiptDigest: receiptDigest })), receiptDigest },
+  };
 }
 
 function envelopeWithStatus(
@@ -151,6 +202,60 @@ function drain(repoRoot: string, options: Parameters<typeof drainArchitecturePro
 }
 
 describe('durable architecture projection orchestration', () => {
+  test('persists reconcile-pending, retries one durable apply, and consumes refresh exactly once', () => {
+    const f = fixture();
+    runMutationObserved({ collector: f.collector, input: JSON.stringify({ file_path: 'src/reconcile.ts', session_id: 'reconcile-session' }) });
+    const acceptedChange: NonNullable<ProjectionRequestV1['acceptedChange']> = {
+      changeSetId: 'changeset.user-accepted', eventId: 'event.user-accepted',
+      reasonCodes: ['responsibility-changed'], affectedNodeIds: ['capability.test.root'],
+    };
+    let originalExpected: ProjectionRequestV1['expected'] | null = null;
+    let projectionCalls = 0;
+    let ownedWrites = 0;
+    let humanAcceptances = 0;
+    let refreshCalls = 0;
+    const run: RunArchctxProcess = (_binary, args) => {
+      if (args[0] === 'capabilities') return capabilities();
+      projectionCalls += 1;
+      const request = JSON.parse(args[3]!) as ProjectionRequestV1;
+      originalExpected ??= request.expected;
+      if (projectionCalls === 1) {
+        ownedWrites += 1;
+        humanAcceptances += 1;
+        writeFileSync(join(f.repoRoot, 'src/concurrent.ts'), 'export const concurrent = true;\n');
+        return { status: 0, signal: null, stderr: 'warning: projection post-apply worktree digest diverged from the accepted snapshot', stdout: JSON.stringify(reconcileEnvelope(request.requestId, originalExpected, acceptedChange, 'applied-reconcile-required')) };
+      }
+      return { status: 0, signal: null, stderr: '', stdout: JSON.stringify(reconcileEnvelope(request.requestId, originalExpected, acceptedChange, 'applied')) };
+    };
+    const options = {
+      consumerRoot: f.consumerRoot,
+      policy,
+      run,
+      acceptedChange,
+      runRefreshActions: () => { refreshCalls += 1; return []; },
+    };
+    const first = drain(f.repoRoot, options);
+    expect(first).toMatchObject({ status: 'reconcile-pending', resultStatus: 'applied-reconcile-required', acknowledgeSourceEvents: false });
+    expect(first.error).toContain('worktreeDigest');
+    expect(first.error).toContain('projection post-apply worktree digest diverged');
+    expect(architectureProjectionQueueState(f.repoRoot)).toMatchObject({ pending: 1, running: 0, receipts: 0, deadLetters: 0 });
+    const pendingName = readdirSync(join(f.repoRoot, '.ai/harness/architecture-projection/pending'))[0]!;
+    expect(JSON.parse(readFileSync(join(f.repoRoot, '.ai/harness/architecture-projection/pending', pendingName), 'utf8')).acceptedChange).toEqual(acceptedChange);
+    expect(refreshCalls).toBe(0);
+
+    const second = drain(f.repoRoot, options);
+    expect(second).toMatchObject({ status: 'succeeded', resultStatus: 'applied', acknowledgeSourceEvents: true });
+    expect(architectureProjectionQueueState(f.repoRoot)).toMatchObject({ pending: 0, running: 0, receipts: 1, deadLetters: 0 });
+    expect(refreshCalls).toBe(1);
+    expect(ownedWrites).toBe(1);
+    expect(humanAcceptances).toBe(1);
+
+    const third = drain(f.repoRoot, options);
+    expect(third).toMatchObject({ status: 'idle', acknowledgeSourceEvents: true });
+    expect(projectionCalls).toBe(2);
+    expect(refreshCalls).toBe(1);
+  });
+
   test('coalesces ten source paths into one provider process and acks only after the durable receipt', () => {
     const f = fixture();
     for (let index = 0; index < 10; index += 1) {
@@ -219,6 +324,33 @@ describe('durable architecture projection orchestration', () => {
     const result = drain(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, nowMs: () => clockMs });
     expect(result.status).toBe('succeeded');
     expect(timeouts).toEqual([10_000, 110_000]);
+  });
+
+  test('does not replace the host deadline with a fresh provider budget', () => {
+    const f = fixture();
+    runMutationObserved({ collector: f.collector, input: JSON.stringify({ file_path: 'src/deadline.ts', session_id: 'host-deadline' }) });
+    let clockMs = 0;
+    const timeouts: number[] = [];
+    const run: RunArchctxProcess = (_binary, args, options) => {
+      timeouts.push(options.timeoutMs);
+      if (args[0] === 'capabilities') {
+        clockMs = 1_000;
+        return capabilities();
+      }
+      clockMs = 20_000;
+      return { status: null, signal: 'SIGTERM', stdout: '', stderr: 'timed out' };
+    };
+    const result = drain(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, nowMs: () => clockMs, deadlineMs: 20_000 });
+    expect(timeouts).toEqual([10_000, 19_000]);
+    expect(result.status).toBe('retry-pending');
+    expect(result.acknowledgeSourceEvents).toBe(false);
+    expect(result.queue.pending).toBe(1);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      clockMs = 0;
+      const retry = drain(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, nowMs: () => clockMs, deadlineMs: 20_000 });
+      expect(retry.status).toBe('retry-pending');
+      expect(retry.queue.deadLetters).toBe(0);
+    }
   });
 
   test('retains source events on process failure and dead-letters the third attempt', () => {
@@ -329,9 +461,9 @@ describe('durable architecture projection orchestration', () => {
     const f = fixture();
     const root = realpathSync(f.repoRoot);
     const first = enqueueArchitectureProjectionJob(root, ['event-a'], ['source-a'], ['src/a.ts']);
-    expect(claimNextArchitectureProjectionJob(root)?.jobId).toBe(first?.jobId);
+    expect(claimNextArchitectureProjectionJob(root, 120_000)?.jobId).toBe(first?.jobId);
     expect(enqueueArchitectureProjectionJob(root, ['event-b'], ['source-b'], ['src/b.ts'])).toBeNull();
-    expect(claimNextArchitectureProjectionJob(root)).toBeNull();
+    expect(claimNextArchitectureProjectionJob(root, 120_000)).toBeNull();
     expect(architectureProjectionQueueState(root)).toMatchObject({ pending: 0, running: 1 });
   });
 
@@ -369,14 +501,14 @@ describe('durable architecture projection orchestration', () => {
     runMutationObserved({ collector: f.collector, input: JSON.stringify({ file_path: 'src/crash.ts', session_id: 'crash' }) });
     const [source] = readPendingPostEditEvents(root);
     const queued = enqueueArchitectureProjectionJob(root, [source!.event_id], [source!.source_key], source!.changed_paths);
-    const running = claimNextArchitectureProjectionJob(root);
+    const running = claimNextArchitectureProjectionJob(root, 120_000);
     expect(running?.jobId).toBe(queued?.jobId);
     const runningPath = join(root, '.ai/harness/architecture-projection/running', `${running!.jobId}.json`);
     writeFileSync(runningPath, `${JSON.stringify({ ...running, ownerPid: 2_147_483_647 }, null, 2)}\n`);
 
-    expect(recoverAbandonedArchitectureProjectionJobs(root, new Date(running!.updatedAt))).toBe(0);
+    expect(recoverAbandonedArchitectureProjectionJobs(root, 120_000, new Date(running!.updatedAt))).toBe(0);
     expect(architectureProjectionJobState(root, running!.jobId)).toBe('running');
-    expect(recoverAbandonedArchitectureProjectionJobs(root, new Date(Date.parse(running!.updatedAt) + 150_001))).toBe(1);
+    expect(recoverAbandonedArchitectureProjectionJobs(root, 120_000, new Date(Date.parse(running!.updatedAt) + 150_001))).toBe(1);
     expect(architectureProjectionJobState(root, running!.jobId)).toBe('pending');
     expect(readPendingPostEditEvents(root).map((event) => event.event_id)).toEqual([source!.event_id]);
   });
@@ -385,21 +517,63 @@ describe('durable architecture projection orchestration', () => {
     const f = fixture();
     const root = realpathSync(f.repoRoot);
     const queued = enqueueArchitectureProjectionJob(root, ['event-stale'], ['source-stale'], ['src/stale.ts'], new Date('2026-01-01T00:00:00.000Z'));
-    const running = claimNextArchitectureProjectionJob(root, new Date('2026-01-01T00:00:01.000Z'));
+    const running = claimNextArchitectureProjectionJob(root, 120_000, new Date('2026-01-01T00:00:01.000Z'));
     expect(running?.jobId).toBe(queued?.jobId);
     expect(running?.ownerPid).toBe(process.pid);
-    expect(recoverAbandonedArchitectureProjectionJobs(root, new Date('2026-01-01T00:16:00.000Z'))).toBe(1);
+    expect(recoverAbandonedArchitectureProjectionJobs(root, 120_000, new Date('2026-01-01T00:16:00.000Z'))).toBe(1);
     expect(architectureProjectionJobState(root, running!.jobId)).toBe('pending');
+  });
+
+  test('holds a live claim to its own attempt deadline after the policy timeout shrinks', () => {
+    const f = fixture();
+    const root = realpathSync(f.repoRoot);
+    const claimedAt = new Date('2026-01-01T00:00:00.000Z');
+    enqueueArchitectureProjectionJob(root, ['event-window'], ['source-window'], ['src/window.ts'], claimedAt);
+    const running = claimNextArchitectureProjectionJob(root, 300_000, claimedAt)!;
+    expect(running.attemptTimeoutMs).toBe(300_000);
+    expect(running.attemptDeadlineAt).toBe('2026-01-01T00:05:00.000Z');
+
+    // The policy is edited down to 120000 while this attempt is still running.
+    expect(recoverAbandonedArchitectureProjectionJobs(root, 120_000, new Date(claimedAt.getTime() + 180_000))).toBe(0);
+    expect(architectureProjectionJobState(root, running.jobId)).toBe('running');
+    expect(recoverAbandonedArchitectureProjectionJobs(root, 120_000, new Date(claimedAt.getTime() + 329_999))).toBe(0);
+    expect(recoverAbandonedArchitectureProjectionJobs(root, 120_000, new Date(claimedAt.getTime() + 330_000))).toBe(1);
+    expect(architectureProjectionJobState(root, running.jobId)).toBe('pending');
+    const [pendingName] = readdirSync(join(root, '.ai/harness/architecture-projection/pending'));
+    const pending = JSON.parse(readFileSync(join(root, '.ai/harness/architecture-projection/pending', pendingName!), 'utf8'));
+    expect(pending.attemptDeadlineAt).toBeUndefined();
+    expect(pending.attemptTimeoutMs).toBeUndefined();
+    expect(pending.lastFailure.message).not.toContain('without a persisted attempt budget');
+  });
+
+  test('falls back to the current policy derivation for a legacy running record and records the fallback', () => {
+    const f = fixture();
+    const root = realpathSync(f.repoRoot);
+    const claimedAt = new Date('2026-01-01T00:00:00.000Z');
+    enqueueArchitectureProjectionJob(root, ['event-legacy'], ['source-legacy'], ['src/legacy.ts'], claimedAt);
+    const running = claimNextArchitectureProjectionJob(root, 300_000, claimedAt)!;
+    const runningPath = join(root, '.ai/harness/architecture-projection/running', `${running.jobId}.json`);
+    const { attemptDeadlineAt: _deadline, attemptTimeoutMs: _timeout, ...legacy } = JSON.parse(readFileSync(runningPath, 'utf8'));
+    writeFileSync(runningPath, `${JSON.stringify(legacy, null, 2)}\n`);
+
+    expect(architectureProjectionRunningStaleMs(120_000)).toBe(150_000);
+    expect(recoverAbandonedArchitectureProjectionJobs(root, 120_000, new Date(claimedAt.getTime() + 149_999))).toBe(0);
+    expect(architectureProjectionJobState(root, running.jobId)).toBe('running');
+    expect(recoverAbandonedArchitectureProjectionJobs(root, 120_000, new Date(claimedAt.getTime() + 150_000))).toBe(1);
+    expect(architectureProjectionJobState(root, running.jobId)).toBe('pending');
+    const [pendingName] = readdirSync(join(root, '.ai/harness/architecture-projection/pending'));
+    const pending = JSON.parse(readFileSync(join(root, '.ai/harness/architecture-projection/pending', pendingName!), 'utf8'));
+    expect(pending.lastFailure.message).toContain(LEGACY_ATTEMPT_BUDGET_NOTE);
   });
 
   test('dead-letters an abandoned third attempt instead of retrying forever', () => {
     const f = fixture();
     const root = realpathSync(f.repoRoot);
     enqueueArchitectureProjectionJob(root, ['event-timeout'], ['source-timeout'], ['src/timeout.ts']);
-    const running = claimNextArchitectureProjectionJob(root)!;
+    const running = claimNextArchitectureProjectionJob(root, 120_000)!;
     const runningPath = join(root, '.ai/harness/architecture-projection/running', `${running.jobId}.json`);
     writeFileSync(runningPath, `${JSON.stringify({ ...running, attempt: 3, ownerPid: 2_147_483_647 }, null, 2)}\n`);
-    expect(recoverAbandonedArchitectureProjectionJobs(root, new Date(Date.parse(running.updatedAt) + 150_001))).toBe(1);
+    expect(recoverAbandonedArchitectureProjectionJobs(root, 120_000, new Date(Date.parse(running.updatedAt) + 150_001))).toBe(1);
     expect(architectureProjectionJobState(root, running.jobId)).toBe('dead-letter');
   });
 
@@ -407,11 +581,11 @@ describe('durable architecture projection orchestration', () => {
     const f = fixture();
     const root = realpathSync(f.repoRoot);
     enqueueArchitectureProjectionJob(root, ['event-receipt-crash'], ['source-receipt-crash'], ['src/receipt-crash.ts']);
-    const running = claimNextArchitectureProjectionJob(root)!;
+    const running = claimNextArchitectureProjectionJob(root, 120_000)!;
     const receipts = join(root, '.ai/harness/architecture-projection/receipts');
     mkdirSync(receipts, { recursive: true });
     writeFileSync(join(receipts, `${running.jobId}.json`), '{}\n');
-    expect(recoverAbandonedArchitectureProjectionJobs(root)).toBe(1);
+    expect(recoverAbandonedArchitectureProjectionJobs(root, 120_000)).toBe(1);
     expect(architectureProjectionJobState(root, running.jobId)).toBe('receipt');
     expect(architectureProjectionQueueState(root).running).toBe(0);
   });
@@ -420,10 +594,45 @@ describe('durable architecture projection orchestration', () => {
     const f = fixture();
     const root = realpathSync(f.repoRoot);
     enqueueArchitectureProjectionJob(root, ['event-owner'], ['source-owner'], ['src/owner.ts']);
-    const running = claimNextArchitectureProjectionJob(root)!;
+    const running = claimNextArchitectureProjectionJob(root, 120_000)!;
     const runningPath = join(root, '.ai/harness/architecture-projection/running', `${running.jobId}.json`);
     writeFileSync(runningPath, `${JSON.stringify({ ...running, attempt: running.attempt + 1, ownerPid: running.ownerPid! + 1 }, null, 2)}\n`);
     expect(() => failArchitectureProjectionJob(root, running, { kind: 'process', message: 'stale owner' })).toThrow('claim no longer belongs');
+  });
+
+  test('refuses to publish a receipt once the claim was reclaimed and re-claimed', () => {
+    const f = fixture();
+    const root = realpathSync(f.repoRoot);
+    enqueueArchitectureProjectionJob(root, ['event-publish'], ['source-publish'], ['src/publish.ts']);
+    const running = claimNextArchitectureProjectionJob(root, 120_000)!;
+    const runningPath = join(root, '.ai/harness/architecture-projection/running', `${running.jobId}.json`);
+    writeFileSync(runningPath, `${JSON.stringify({ ...running, attempt: running.attempt + 1, ownerPid: running.ownerPid! + 1 }, null, 2)}\n`);
+    const request = { requestId: `repo-harness.projection.${running.jobId}`, expected: captureArchitectureProjectionSnapshot(root) } as ProjectionRequestV1;
+    const result = envelope(request).data as ProjectionResultV1;
+    expect(() => completeArchitectureProjectionJob(root, running, result, [])).toThrow(ArchitectureProjectionOwnershipError);
+    expect(existsSync(join(root, '.ai/harness/architecture-projection/receipts', `${running.jobId}.json`))).toBe(false);
+    expect(architectureProjectionQueueState(root)).toMatchObject({ running: 1, receipts: 0 });
+  });
+
+  test('reports a lost-ownership drain instead of publishing when recovery reclaims the attempt mid-run', () => {
+    const f = fixture();
+    runMutationObserved({ collector: f.collector, input: JSON.stringify({ file_path: 'src/reclaimed.ts', session_id: 'reclaimed' }) });
+    const root = realpathSync(f.repoRoot);
+    const reclaimingRunner: RunArchctxProcess = (_binary, args) => {
+      if (args[0] === 'capabilities') return capabilities();
+      // A concurrent recovery reclaims the running record while the provider runs.
+      const [name] = readdirSync(join(root, '.ai/harness/architecture-projection/running'));
+      const path = join(root, '.ai/harness/architecture-projection/running', name!);
+      const claimed = JSON.parse(readFileSync(path, 'utf8'));
+      writeFileSync(path, `${JSON.stringify({ ...claimed, attempt: claimed.attempt + 1, ownerPid: claimed.ownerPid + 1 }, null, 2)}\n`);
+      const request = JSON.parse(args[3]!) as ProjectionRequestV1;
+      return { status: 0, signal: null, stderr: '', stdout: JSON.stringify(envelope(request)) };
+    };
+    const drained = drain(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run: reclaimingRunner });
+    expect(drained.status).toBe('retry-pending');
+    expect(drained.error).toContain('lost-ownership: architecture projection running claim no longer belongs');
+    expect(drained.acknowledgeSourceEvents).toBe(false);
+    expect(drained.queue.receipts).toBe(0);
   });
 
   test('binds a completed retry to the events of its own job when a newer source arrives between retries', () => {
@@ -523,6 +732,12 @@ describe('durable architecture projection orchestration', () => {
     expect(result.error).toContain('unresolved major change');
     expect(readPendingPostEditEvents(f.repoRoot)).toHaveLength(1);
     expect(existsSync(join(f.repoRoot, '.ai/harness/architecture-refresh/receipts'))).toBe(false);
+    expect(inspectArchitectureProjectionAcceptanceState(f.repoRoot)).toMatchObject({
+      candidates: 1,
+      receipts: 0,
+      unresolvedCandidates: 1,
+      invalidArtifacts: 0,
+    });
   });
 
   test('manual drain leaves the cursor unchanged when the legacy cascade helper fails', () => {
@@ -657,8 +872,11 @@ describe('durable architecture projection orchestration', () => {
     let clockReads = 0;
     expect(() => consumeArchitectureRefreshSignals(f.repoRoot, [signal], ['src/a.ts', 'src/b.ts'], {
       env: { ...process.env, PATH: bin },
-      deadlineMs: 1_000,
-      nowMs: () => clockReads++ === 0 ? 0 : 2_000,
+      // deadlineMs minus the virtual now is handed to spawnSync as a REAL
+      // wall-clock kill timer; keep the derived budget generous so a loaded
+      // machine cannot SIGTERM the fake action before the second clock read.
+      deadlineMs: 30_000,
+      nowMs: () => clockReads++ === 0 ? 0 : 60_000,
     })).toThrow('timeout before canonical action');
     const progressPath = join(f.repoRoot, '.ai/harness/architecture-projection/refresh-progress', `${signal.signalId.replace(/^sha256:/, '')}.json`);
     expect(JSON.parse(readFileSync(progressPath, 'utf8')).actions.map((entry: { actionKey: string }) => entry.actionKey)).toEqual(['architecture-queue:src/a.ts']);

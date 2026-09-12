@@ -2,6 +2,750 @@
 
 All notable changes to this skill are documented here.
 
+## [Unreleased]
+
+## [0.19.0] - 2026-09-10
+
+The release grows a second layer on top of the file-backed session contract:
+authorized programs that hold their own budget, task offers, leases, and
+evidence, so a Sprint can advance without a human driving each step. The
+session layer is unchanged in shape — plans, contracts, checks, and handoffs
+remain the durable authority — and every program surface below sits on top of
+it rather than beside it.
+
+### Breaking
+
+- Repositories that explicitly pin ArchContext must update
+  `.ai/harness/policy.json` fields `architecture.projection_version`,
+  `refactor.stages.scan.provider_version`, and
+  `refactor.stages.verify.provider_version` to `0.5.10`, together with their
+  package-local `archctx` and `archctx-contracts` dependencies. `init` preserves
+  explicit repository settings; the runtime rejects older refactor pins.
+
+- **`herdr` >= 0.9.0 replaces `tmux` as the peer-terminal runtime.** tmux
+  support and its readiness probes are removed from
+  `scripts/check-agent-tooling.sh`; the pin lives in
+  `.ai/harness/policy.json#external_tooling.herdr` and is checksum-verified.
+  A host with only tmux installed fails strict readiness after upgrading.
+  Drain reviewers hosted by the previous runtime and rebind terminal endpoints
+  before the upgrade — see
+  [`20260909-herdr-runtime-cutover.md`](researches/20260909-herdr-runtime-cutover.md).
+- **`tasks/current.md` is no longer a tracked file.** It was tracked but derived
+  entirely from untracked local markers, so one session's snapshot could
+  misrepresent itself as mainline truth. It is now untracked and gitignored, the
+  adoption template ignores it from `init`, and `check-task-workflow` /
+  `check-task-sync` no longer require it. An already-adopted repo must run
+  `git rm --cached tasks/current.md` and pick up the new `.gitignore` entry.
+- **Sprint backlogs require schema v2.** Sprint task IDs are now persisted as
+  immutable identities, which the scheduler treats as authority. Run
+  `repo-harness sprint migrate-schema` — atomic, fail-closed, with pre-write
+  restore on refusal — before `engineer acquire-next` can trust task identity.
+- **The `provider-thread-effects` architecture capability is retired** and
+  replaced by `agent-runtime-effects`. Generated `CLAUDE.md` / `AGENTS.md`
+  capability blocks still naming the old identity are stale and need
+  regeneration.
+- **The Oracle exact pin moves 0.14.1 -> 0.20.0** and the ChatGPT browser cookie-path
+  transport is removed. `--copy-profile <user-data-dir>
+  --browser-chrome-profile <profile-dir>` is the only supported bound-profile
+  transport; `browser-doctor` fails closed with `ORACLE_INCOMPATIBLE` or
+  `ORACLE_RUNTIME_FLAGS_UNSUPPORTED` and points at `--oracle-bin` /
+  `REPO_HARNESS_ORACLE_BIN` instead of retrying a pinned install.
+- **`campaign close-not-planned` enforces the canonical acceptance vocabulary.**
+  Only `external_pass` and `user_waiver` are accepted; the generic `pass` status
+  from the unrelated status vocabulary is rejected rather than aliased.
+- **Fleet acquisition's plan-to-todo projection is initialize-only.** It fills a
+  missing contract and can no longer overwrite an authored one.
+
+### Added
+
+- **Authorized programs.** `repo-harness automation grant mint` stores
+  one operator-minted `ProgramAuthorizationV1` in the harness home gate store,
+  and `authorization list` prints the digests held for a repository. Every
+  program surface below — automation, refactor, campaign, collaboration — starts
+  from a stored authorization digest; there is no unauthenticated start path.
+- **A per-goal budget ledger.** `repo-harness automation budget show|list`
+  reads the enforceable budget projection for an automation run. Provider calls,
+  campaign steps, shadow adoption observations, heartbeat execution, and worker
+  acquisition all reserve against it before the work is recorded.
+  `automation budget repair` is an operator drift-repair verb: it re-runs the
+  locked reconciliation so a stopped or expired run seals its exhaustion
+  receipt, and never reserves, charges, or changes a cap.
+- **A bounded unattended controller.** `repo-harness automation controller
+  start|step|status|stop|reconcile` runs one Engineer dispatch loop under hard
+  caps — `--maximum-steps`, `--maximum-duration-ms`,
+  `--maximum-transient-retries`, deterministic backoff — reserving budget before
+  each attempt and validating projected outcomes against a bounded attempt-retry
+  ledger.
+- **Renewable Lease liveness.** A Lease carries `renewal_interval_ms`,
+  `maximum_ttl_ms`, and a closed set of evidence sources (`controller`,
+  `runtime_effect`, `publication`, `binding`); `automation controller start`
+  configures it with `--lease-renewal-interval-ms` and
+  `--lease-maximum-ttl-ms`. An unproven liveness state requires attention rather
+  than reclaiming silently.
+- **An Engineer scheduling core.** `repo-harness engineer acquire-next
+  --authorization-id <id> --idempotency-key <key>` selects and claims the first
+  canonical offer for an enrolled principal. Dependency edges
+  (`canonical_done`, `module_accepted`, `publication_integrated`,
+  `product_accepted`) resolve from receipt authorities instead of inference,
+  `engineer principal enroll|list|status|revoke` maps an OAuth authorization to
+  a Binding, `engineer message send|receive|ack` gives each claim an immutable
+  inbox that supersedes on takeover, `engineer task-freeze` freezes a bound task
+  without transferring execution, and `engineer board` projects read-only
+  organization attention.
+- **A typed WorkDemand lifecycle.** `repo-harness engineer work-demand
+  propose|transition|materialize|status` drives agent-proposed work through
+  `proposed -> under_review -> accepted -> materializing -> materialized ->
+  integrated`, with digest-guarded transitions and an atomic materialization
+  receipt when an accepted projection becomes a canonical Sprint task.
+- **Development campaigns.** `repo-harness campaign` runs an authorized campaign
+  state machine over a seeded repair program: `audit` takes a budgeted
+  read-only group audit, `author` persists an `IssueBatchIntentV1` and opens the
+  GPT Pro authoring lane, `author-followup` reuses that session for missing
+  slots or one explicit edit, `adopt` verifies exact-SHA readback and publishes
+  an atomic repair batch candidate, `step` hands one adopted task to its local
+  planning session, and `start`/`transition`/`status`/`closeout` move and read
+  the machine. `prepare-resume` emits a zero-provider resume request and its
+  preflight from stored adoption, continuation, and budget evidence, and can
+  replace a stopped-but-never-adopted successor through a typed
+  `superseded-<hex>` record without rewriting the original continuation
+  artifact. Resuming an adopted campaign requires a formally stopped
+  predecessor whose budget evidence is fully settled — no open reservation, no
+  active ledger step, no reserved provider call, and the authorization digest
+  still matching the grant. A stopped grant is never made executable again.
+- **Refactor Mode.** `repo-harness refactor` operates an ArchContext-backed
+  refactor program: `discover` scans and assesses one local agent proposal
+  inside shadow boundaries, `materialize` turns an authorized recommendation
+  into multiple Work Packages against a single canonical Sprint task authority,
+  `verify-candidate` chains contract, cutover closure, provider measurement and
+  acceptance receipt, and `architecture-request`, `bind-execution`,
+  `resolve-post-merge`, `board`, `canary-record`, `activation-promote`, and
+  `activation-status` cover the rest of the state machine. Activation remains
+  off in this release: the canary set and rung-promotion evidence must be
+  refreshed against the installed provider before it turns on.
+- **A collaboration plane.** `repo-harness collaboration` reads the Work
+  Exchange for one authenticated Module Engineer — `exchange` for the snapshot,
+  `threads` for lanes, hotspot scores and contribution opportunities, `signals`
+  and `post` for the append-only `CoordinationSignalV1` store, `handoff
+  publish|list|adopt` for `WorkStateHandoffV1` (adoption is non-exclusive and
+  grants no Task, Claim, or Lease), and `packet build|read` for bounded
+  context packets. The author is always derived from `--authorization-id`; a
+  payload cannot declare its own actor.
+- **External source intake.** `repo-harness external-source
+  refresh|list|bind|bindings|context` observes provider Issues and binds one
+  immutable source revision to one exact pending canonical task and its approved
+  plan/contract. Intake is inert: an observed Issue mints no execution
+  authority and does not become a runnable task on its own.
+- **Persistent Claude acceptance review.** `repo-harness claude-review
+  round|status|close|cancel` hosts a read-only Claude reviewer in an owned herdr
+  session that survives up to three repair rounds against prepared
+  `verify-sprint` evidence. `round` accepts `--timeout-ms` up to 1,800,000, and
+  a repeat session past the round budget is refused with
+  `claude_review_session_budget_exhausted`.
+- **Offline uninstall.** `repo-harness uninstall --target codex|claude|both
+  [--dry-run] [--recover-interrupted]` removes only owned managed configuration
+  — hooks, managed context blocks, receipts — and preserves user edits and
+  static history. `repo-harness mcp uninstall` does the matching cleanup for
+  local MCP registration and credentials, refusing ChatGPT credential deletion
+  until `--services-stopped` confirms every MCP HTTP service is down.
+- **Real multi-agent collaboration canary.** A source-checkout canary runs three
+  isolated baseline/treatment protocol traces with three concurrent read-only
+  Codex Workers plus one real successor run, exact usage metrics, bounded
+  context injection, source-signal reuse, handoff adoption, persisted
+  writer-lineage checks and delivery-authority digests. C9-A and C9-B pass;
+  persistent `EngineerSeatV2`, Phase 5 Review and Phase 6 Merge remain inactive.
+- **Context-map drift check.** `bun run check:context-map` validates
+  `.ai/context/context-map.json` against ArchContext capability nodes and disk,
+  rejecting duplicate paths and dangling capability ids. `--write` performs a
+  one-shot repair.
+- **Route-eval coverage gate and a split CI.** `check:route-eval
+  --check-ts-arm` replays 31 route scenarios covering every
+  `PROMPT_GUARD_INTENTS` and `PROMPT_GUARD_ACTIONS` entry and fails below a
+  pinned coverage floor, running ahead of the test step. Governance and
+  functional checks now run as independent CI jobs.
+
+### Changed
+
+- **Verification and acceptance are separate authorities.** Execution facts
+  (test and `verify-contract` runs) no longer double as semantic acceptance;
+  active contracts are migrated onto the split and execution identity is
+  preserved across the migration rather than re-derived.
+- **ArchContext moves 0.4.7 -> 0.5.8** as the Refactor Mode provider contract,
+  with discovery and resolution bound to the pinned version.
+- **Campaign acquisition consumes contract authority from the canonical plan
+  proof.** Workers read `acquired.envelope.plan.contract_sha256` directly
+  instead of keeping a competing digest.
+- **Fleet worktree acquisition resolves `contract-worktree` and `plan-to-todo`
+  from the packaged trusted-runtime helpers**, not repository-local `scripts/`,
+  so a downstream repo without those helper scripts can complete acquisition
+  instead of failing on a valid execution-ready offer.
+- **Shipped agent-facing surfaces are English-only.** Six orphan Chinese
+  templates and their dead advisories are deleted; the design-brief template and
+  the TDD/BDD/AssetLayer advisories are English-only. Hook intent regexes, skill
+  trigger phrases, and the operator board's i18n stay bilingual because they
+  match user input rather than instruct an agent.
+
+### Fixed
+
+- **ArchContext 0.5.10 avoids workspace scans during projection retries.** The
+  pinned provider reads prior committed writes directly from its journal, so
+  large ignored runtime caches do not delay that lookup.
+- **Recovery checkpoints keep only the current snapshot.** Repeated Stop events
+  no longer accumulate full-history copies; publication preserves the current
+  checkpoint before collecting old cache directories, while the raw evidence
+  ledger and blobs remain intact. Concurrent recovery reads follow a changed
+  publication marker, and interrupted collection can resume.
+- **Task Message drafts survive refresh and browser restarts.** The operator
+  board restores browser-local text with its original message ID and fence;
+  stale drafts still require the existing explicit rebind before sending.
+
+- **Delegated Codex output now follows its actual JSONL wire.** Contribution
+  collection decodes one complete `codex exec --json` turn and parses only its
+  final agent message. Test shims emit the same JSONL shape, raw-marker output is
+  rejected, provider usage is retained, and the delegated capture ceiling is 1
+  MiB so tool events cannot erase the terminal message at the old 64 KiB cap.
+- **Lease reclaim no longer races observation time.** Reclaim eligibility and
+  reclaim-receipt acceptance are revalidated across the actual observation
+  window, and reclaim additionally requires proof that the claiming command's
+  process tree still contains the original descendant.
+- **The `@github` connector is activated by exact prompt text.** `campaign
+  author` and `step` verify the tool call was captured instead of assuming
+  activation from prompt intent, so an activation prompt can no longer silently
+  no-op.
+- **Docker-supervised workers cannot grant themselves supervision authority.**
+  Renewal, liveness, and namespace-exit cleanup are isolated from the worker
+  process they supervise, and the namespace-exit cleanup race is closed.
+- **Attempt accounting is closed.** A repair attempt can no longer be recorded
+  without a matching budget reservation, an outcome outside the closed enum
+  cannot be projected as satisfied, and unobserved provider event types are
+  rejected during campaign provider-lifecycle recovery.
+- **ChatGPT browser and MCP races are closed.** The stale cookie-database
+  transport and its `browserCookiePath` capability are removed rather than
+  falling back to an anonymous session, and a same-prompt-already-running
+  refusal maps to `ORACLE_SESSION_ALREADY_RUNNING` with reattach guidance
+  instead of an automatic `--force`.
+- **Architecture projection reclaim is bound to the attempt's own timeout**, so
+  a long-running projection job is no longer reclaimed against a stale window.
+
+## [0.18.0] - 2026-08-29
+
+### Added
+
+- **Attention-first operator worklist.** The `operator serve` board replaces the
+  five-column kanban with a single prioritized worklist — needs you, mergeable,
+  unreadable repo, agent in progress, external, done — with the last three
+  groups collapsed by default. The rail anchors and the separate Repositories
+  section are gone.
+- **Resident detail pane.** The board keeps a detail pane open at all times;
+  with nothing selected it shows the repo × stage matrix and repo health. A
+  persistent status bar reports relative data age, `seq`, and consistency,
+  desaturating the surface when the snapshot is stale and marking
+  `changed_during_read` on the status bar and the affected rows without
+  replacing their stage labels.
+- **Human task labels in the board contract.** `FleetBoardCardV1` carries
+  `task_label` and `task_index`, projected from `row.task` and `row.index` as
+  preimages of the same authority. The digest basis changes with them, so
+  `FLEET_BOARD_PROTOCOL` moves from `1` to `2`.
+- **Task message write channel.** `POST
+  /api/v1/fleet/tasks/{repository_id}/{task_id}/messages` exposes the existing
+  `fleet message` effect as the board's one write action, under `sender_kind:
+  'operator'` with a fixed `control-board` sender id. The endpoint requires an
+  `Origin` header, resolves `repository_id` through the registry, enforces
+  `read_write` access, and mirrors the 8 KiB body limit at the HTTP layer. The
+  composer sits collapsed at the foot of the detail pane, treats its fence as
+  the confirmation, refuses to send under `read_only`, `changed_during_read`,
+  `stale`, or `degraded`, and drives delivery feedback from the authoritative
+  `unread_count` rather than a local sent list.
+- **Board internationalization.** A single in-repo dictionary module
+  (`src/operator-web/i18n.ts`) provides zh/en strings with no third-party
+  dependency. The language switch lives in the status bar, persists through
+  `localStorage`, and initializes from `navigator.language` with `en` as the
+  default. Blocker codes are translated in both languages with the raw code
+  shown alongside; task labels, repo names, ids, and SHAs are never translated.
+- **Canonical brand marks.** The board adopts the canonical pixel logo,
+  favicon, and mascots.
+
+### Changed
+
+- **The board's footer contract now reads `observe-only · one write: task
+  message`** instead of `read-only / localhost`, and the negative test is
+  upgraded from "no writes" to an "exactly one write" invariant guarded on both
+  the server and the client.
+- **Accent color discipline.** Carrot accent as a UI affordance means human
+  write and nothing else, a constraint carried by the `--carrot-*` CSS tokens;
+  brand identity art is the documented exception, where orange is a brand color
+  and carries no interaction semantics. Attention semantics are recolored: user
+  amber, agent neutral blue, external purple, and danger reserved for real
+  errors.
+- **Documentation is aligned** with the rebuilt board across the README and the
+  local human control board design note.
+
+## [0.17.1] - 2026-08-28
+
+### Added
+
+- **Persistent module engineers.** `repo-harness engineer` owns a durable
+  module-engineer control plane: `create`/`enroll`/`bind`/`retire` maintain
+  persistent engineer records and their capability bindings, `offers` and
+  `acquire` hand a bound work envelope to an authenticated engineer principal,
+  and `board`/`status`/`inspect`/`show`/`list` project read-only state. Claims
+  carry an authenticated principal actor, so a claim identifies which engineer
+  holds it rather than only which worktree does. `send`/`receive`/`ack` back a
+  durable task- and claim-scoped engineer inbox whose messages are immutable
+  and supersede on takeover.
+- **Engineering overlay control board and local operator UI.** `repo-harness
+  operator serve` runs a loopback-authenticated human control board over the
+  engineer fleet, backed by a bundled web client built through
+  `build:operator-web`. Request authority is pinned to loopback; the board is a
+  projection surface and never a second mutation authority.
+- **Read-only delegation admission.** `repo-harness delegation` compiles a
+  delegation profile and capability set, admits a delegated run, dispatches it
+  from a frozen argv template, and collects its observations. Admission is
+  fail-closed: a run that cannot be bound to an admitted profile and a
+  writability-checked contract is rejected instead of downgraded.
+- **Verified evidence context.** `repo-harness verified-context` compiles a
+  catalog of verified evidence, binds a decision to it, and persists the
+  resulting receipt. Catalog entries and receipts are validated on write, so a
+  decision cannot cite evidence that was never verified.
+- **Interface change authority.** `repo-harness interface-change` records
+  interface-change proposals against the scheduler projection authority and
+  drives their human transition, with `lookup`/`read` exposing the bound
+  record.
+- **Integration acceptance surface.** `repo-harness integration` reads the
+  acceptance envelope, contract, and matrix and records product acceptance
+  against them.
+- **Engineer MCP profile.** The MCP `engineer` profile exposes
+  `engineer_offers`, `engineer_acquire`, `engineer_status`,
+  `engineer_messages`, `engineer_message_send`, `engineer_message_ack`,
+  `engineer_interface_change_propose`,
+  `engineer_interface_change_transition`, `engineer_thread_effect_capability`,
+  and `engineer_thread_effect_status`. The profile is exclusive: a non-engineer
+  tool called under it returns `TOOL_NOT_AVAILABLE` rather than falling through
+  to the coding profile.
+- **Provider thread effect adapter.** Engineer dispatch resolves provider
+  thread effects through a dedicated adapter, and the thread-effect status read
+  is pure — reading status never mutates thread state.
+- **Official Codex plugin for review on Codex hosts.** Cross-review on a Codex
+  host uses the official Codex plugin and binds the review to an immutable
+  subject.
+- **Incremental sprint verification retry.** `verify-sprint` retries
+  incrementally instead of restarting the whole verification pass.
+
+### Changed
+
+- **ArchContext is pinned to 0.4.7.** Architecture projection acceptance runs
+  against that provider version, and the projection manifest carries explicit
+  provenance for each restamp.
+- **Module engineers are documented as a control plane**, not an execution
+  tier: they schedule, admit, and accept work; they do not hold mutation
+  authority that the contract worktree owns.
+
+### Fixed
+
+- **Engineer CLI errors are layered and typed.** Engineer command failures
+  carry layered error codes, `FleetOffersError` routes through the domain error
+  whitelist, and profile resolution errors stay inside the work-graph domain
+  instead of surfacing as generic runtime faults. Binding comparison is
+  canonical, so an equivalent binding no longer compares unequal.
+- **N-way engineer election proves mutual exclusion.** Concurrent claim
+  election is covered by a test that asserts exactly one winner rather than
+  asserting only that a winner exists.
+- **Header projection into generated helper templates is unconditional.**
+  Generated helpers and acceptance-projection review headers always receive the
+  synced header, so a stale template no longer produces a header that drifts
+  from its source.
+- **Architecture restamp commits are exempt from task sync.** A restamp no
+  longer trips the task-sync gate, and archived acceptance authority survives
+  archival instead of being dropped.
+- **Fixture HOME stays outside the repo under test.** Test fixtures allocate
+  HOME through `mkdtemp` outside the working tree, so a fixture run can no
+  longer write cache state into the repo it is exercising. Install
+  compensation, interactive init, and official Codex plugin fixtures are
+  isolated from each other.
+- **Provider concurrency deadline in fleet tests is stabilized**, removing a
+  timing-dependent failure in the board stability probe.
+
+## [0.17.0] - 2026-08-23
+
+### Added
+
+- **Git-backed publication identity and recovery.** Successful PR publication
+  now produces a deterministic immutable `PublicationReceiptV1` that binds the
+  canonical task revision, claim/generation, verified candidate, provider repo,
+  PR, and exact Head SHA. A bounded PR marker carries the complete canonical
+  receipt for cross-clone rebuild, while the git-common-dir copy remains a
+  local recovery cache. Ship retries converge on the same publication ID;
+  incomplete receipt/marker writes return typed `publication_incomplete`
+  failures instead of reporting success.
+- **Lease protocol 2 PR review lifecycle.** Leases can move from the short
+  `completing` transaction window into `reviewing` with one task-lock-protected
+  `current_publication` pointer. Same-owner reopen revalidates the existing
+  worktree binding; takeover creates a new reserving generation that must pass
+  normal bind before becoming bound; raw sprint steal rejects reviewing leases.
+  Legacy protocol-1 owner records remain readable and upgrade only at the
+  reviewing boundary, while older clients fail closed on protocol 2.
+- **Publication recovery, integration reconcile, and merge readiness.** New
+  publication commands inspect and retry crash-window state, rebuild missing
+  receipts, and reconcile merged/ancestor/absorbed candidates only after
+  fetching the provider target to an isolated observation ref and proving the
+  canonical task row complete. `publication readiness` and `fleet ready`
+  double-read live provider facts and fence PR draft state, Head SHA, base
+  movement, local verification evidence, current publication, and Lease claim.
+- **Deterministic Fleet offer and acquisition protocol.** `fleet offers` scans
+  the adopted repo registry for stable `execution_ready` tasks. `fleet acquire`
+  revalidates registry authorization, task/offer revisions, races the canonical
+  Lease claim, creates a fresh contract worktree, binds it, and returns a
+  `WorkEnvelopeV1`. Claim-race losers retry deterministically and never receive
+  a partially bound envelope.
+- **Cross-repository Fleet Board.** `fleet board --json` emits the versioned
+  `FleetBoardSnapshotV1` projection across registered repositories, including
+  repository health, execution readiness, Lease/publication state, exact merge
+  blockers, feedback, task inbox, no-progress, and orthogonal
+  `attention_owner`. `fleet watch --format jsonl` emits immediate,
+  non-overlapping snapshots with bounded provider concurrency and collection
+  deadlines. Both surfaces remain read-only projections.
+- **Immutable provider feedback and repair redispatch.** GitHub check failures
+  and review threads are stored as idempotent `FeedbackEventV1` observations;
+  mutable delivery state lives in separate `FeedbackDeliveryReceiptV1`
+  records. Repair offers preserve the original task/publication lineage,
+  reopen or take over through fenced lifecycle commands, and use durable
+  reaction receipts to escalate two completed same-token attempts as
+  `no_progress` without treating polling as progress.
+- **Task-addressed cross-agent inbox.** `fleet message send` creates immutable
+  task- or claim-scoped messages, and inbox list/ack tracks per-recipient
+  delivery without mutating Lease authority. Claude and Codex turn hooks inject
+  only bounded untrusted messages for the current owner; stale claim-scoped
+  messages become superseded after takeover.
+- **Fleet MCP mirrors.** The coding MCP profile exposes fenced
+  `fleet_offers`, `fleet_acquire`, `publication_readiness`,
+  `publication_reopen`, and `publication_takeover` tools. Mutation calls require
+  an adopted `read_write` repository and the current registry authorization
+  revision before entering the same core/effects paths as the CLI.
+- **GPT Pro advisory orchestration mode.** The ChatGPT browser skill can prepare
+  a commit-bound planning or review bundle for GPT Pro, while local Codex keeps
+  execution, evidence, commit, push, merge, and deployment authority. Returned
+  prose is advisory and cannot expand contracts or attest to local checks.
+
+### Changed
+
+- **ArchContext 0.4.7 is the exact managed projection runtime.** The package,
+  contracts package, policy/template defaults, provider handshake, and clean-room
+  evidence now pin `0.4.7`. The shared managed Node range is
+  `>=22.22 <26`, matching the published ArchContext engine contract instead of
+  retaining the former Node 24-only floor.
+- **Bun 1.4 is the package runtime floor.** Package engines, installers, global
+  runtime checks, and helper bootstrap diagnostics now require Bun `>=1.4.0`
+  so candidate and installed runtimes use the tested process and test-runner
+  behavior.
+- **Contract worktrees use package-owned execution dependencies.** Verification
+  resolves the declared task test runner and packaged helper siblings from the
+  contract worktree/package instead of silently relying on a source checkout or
+  ambient global install. Gatekeeper acceptance also adds structural-quality
+  hard stops for duplication, placement, and boundary regressions.
+- **Human control and Agent factory direction is documented.** The stable
+  Fleet JSON/JSONL read model is the future Web/TUI component boundary; UI and
+  optional operators remain projections and command routers, never workflow
+  state owners.
+
+### Fixed
+
+- **Tagged ArchContext releases are valid AXR7 producer inputs.** The consumer
+  E2E release preparation is idempotent when the producer already declares the
+  target version, and links producer workspaces from the archived checkout's
+  own manifest instead of the sibling checkout's currently installed scope.
+- **Fleet acquire no longer leaks source-worktree workflow state.** Acquire
+  passes the task identity into contract-worktree start and writes active plan,
+  contract, and claim-token state only inside the newly created execution
+  worktree, preserving isolation between the dispatcher checkout and worker.
+- **Packaged handoff and contract test-runner resolution.** Installed helpers
+  now resolve their package-owned siblings and declared runner paths correctly
+  when downstream repositories do not vendor the source tree.
+
+## [0.16.2] - 2026-08-21
+
+### Fixed
+
+- **MCP runtime fixes for issue #204 (#207).** The initialize session
+  reservation releases on transport/server construction failure instead of
+  leaking a session slot until SESSION_LIMIT_REACHED, and one stale recorded
+  workspace no longer aborts the whole workspace listing — stale rows carry an
+  explicit `stale_reason` with an unknown dirty state.
+- **MCP HTTP sessions bind to the startup profile and fail closed on a config
+  flip (#210).** An HTTP session created under one profile can no longer keep
+  serving after the server's configuration changes underneath it.
+- **Architecture queue lock owner record publishes atomically (#211).**
+  `acquireQueueLock` used to publish the lock with `openSync(..., "wx")` and
+  write the owner JSON afterwards, so a contender that read the lock in that
+  interval saw an empty record, classified it as malformed after two seconds,
+  and could delete a live owner's lock. The complete owner record is now staged
+  under a sibling temp name and published with same-directory hard-link
+  creation, so a parseable authority path never exists before its bytes are
+  complete. The concurrent-queue test now captures child stderr and attaches
+  it to failed status assertions.
+
+### Changed
+
+- **Artifact-hygiene rules land in the global working rules and generated
+  agent contracts.** Comments, commit messages, and PR text must be written
+  from the final diff only: comments carry only the non-obvious reason at the
+  owning boundary, PR text carries final behavior plus only rationale a
+  reviewer cannot recover from the diff, and discarded intermediate attempts,
+  reverted work, and never-merged states are never mentioned. The rule ships
+  in `assets/reference-configs/global-working-rules.md`, the generated
+  `AGENTS.md` Safety Rules, and the generated `CLAUDE.md` Development
+  Protocol.
+- Collapses the stray blank line the template engine left around the
+  `FACTOR_FACTORY` conditional in the generated `AGENTS.md` task-protocol
+  section.
+
+## [0.16.1] - 2026-08-20
+
+### Changed (recorded belatedly; shipped in this release)
+
+- Requires `sandbox_mode` in every Codex custom-agent TOML and validates it
+  fail-closed. A hand-written `~/.codex/agents/*.toml` that omits
+  `sandbox_mode`, or declares anything other than `read-only` or
+  `workspace-write`, now routes the child to native-role-routing `invalid`
+  instead of inheriting a default; writability is never inferred from the agent
+  name.
+- Removes the EXECUTION_BOUNDARY anti-extras clause from generated personas'
+  `developer_instructions`, leaving the role body only. On the native-child path
+  `SubagentStart.context` is the single injection owner, so the clause reaches
+  each rendered task packet exactly once.
+
+Closes ESA-06, the last direct-`writeFileSync` write path on the MCP server.
+The seven workflow-artifact write tools stop being last-writer-wins: a caller
+that wants to replace an artifact must first read the revision it is replacing.
+
+### Removed
+
+- **`overwrite` on the MCP workflow-artifact write tools (breaking MCP surface
+  change).** The boolean `overwrite` flag is deleted from all seven tool
+  schemas and replaced by the optional `expected_sha256` revision
+  precondition. `overwrite` was a caller-supplied assertion about a file the
+  caller had never read, so two sessions targeting one repo through
+  `repo_path` could silently destroy each other's content; `expected_sha256`
+  is an assertion about content, which the server can check. There is no
+  compatibility mode, no dual authority, and no shim — a request carrying
+  `overwrite` is rejected, never reinterpreted:
+
+  | Retired parameter | Replacement |
+  |---|---|
+  | `write_prd` `overwrite` | `write_prd` `expected_sha256` |
+  | `write_prd_from_idea` `overwrite` | `write_prd_from_idea` `expected_sha256` |
+  | `write_sprint` `overwrite` | `write_sprint` `expected_sha256` |
+  | `write_checklist_sprint` `overwrite` | `write_checklist_sprint` `expected_sha256` |
+  | `write_plan` `overwrite` | `write_plan` `expected_sha256` |
+  | `prepare_codex_goal_from_sprint` `overwrite` | `prepare_codex_goal_from_sprint` `expected_sha256` |
+  | `write_codex_goal` `overwrite` | `write_codex_goal` `expected_sha256` |
+
+  Migration: omit the field to create a new artifact (an existing target now
+  returns `WOULD_OVERWRITE`); to replace an existing one, call
+  `read_workflow_file` and pass the `sha256` it returns as `expected_sha256`.
+  A stale hash returns `REVISION_CONFLICT` and the file is left byte-unchanged.
+  Conflict errors deliberately do not echo the current hash: echoing it would
+  let a caller lift the hash and rewrite blindly, which is the clobbering this
+  release removes.
+
+  Migration window: `overwrite` is rejected with `RETIRED_PARAMETER` naming
+  `expected_sha256` throughout `0.16.x`; the retired-parameter table is deleted
+  at `0.17.0`, after which the same request returns `UNKNOWN_PARAMETER`.
+  `append_handoff_note` is unchanged — it still appends without a precondition,
+  because append concurrency is a separate design.
+
+### Changed
+
+- Routes every workflow-artifact write through the new
+  `src/cli/mcp/guarded-write.ts` primitive. The old path was check-then-write
+  with a raw `writeFileSync`; the new one evaluates the revision precondition
+  and then commits durably (temp file in the target directory, `fsync`,
+  `rename`, parent-directory `fsync`). A failed write leaves the previous
+  revision intact and no `.tmp` residue, and the file's mode survives
+  replacement. `paths.ts` remains the sole containment and policy authority.
+- Adds `sha256` and `previousSha256` to every successful write payload
+  (`previousSha256` is `null` on create). Both are bare hex and
+  byte-comparable with `read_workflow_file`'s `sha256`, so a read result feeds
+  straight back into the next write without reshaping.
+- Rejects undeclared parameters on the seven write tools with
+  `UNKNOWN_PARAMETER` and details naming the unknown keys and the allowed set.
+  The MCP server dispatches through the low-level SDK path, which does not
+  enforce per-tool `inputSchema`, so a misspelled or invented key was
+  previously accepted and silently ignored.
+
+### Fixed
+
+- Workflow-artifact writes no longer follow a symlink at the target. A symlink
+  inside the repo (for example `plans/prds/x.prd.md` pointing at
+  `docs/spec.md`) passes the path policy, and the previous writer followed it
+  and overwrote the link target. The target is now `lstat`-checked and any
+  symlink is refused with `SYMLINK_ESCAPE`; a target that exists but is not a
+  regular file is refused with `NOT_A_REGULAR_FILE`.
+
+## [0.16.0] - 2026-08-20
+
+Completes the kanban coordination program that `0.15.3` opened. `0.15.3` shipped
+the lease plane's correctness (WP1 plus its hardening pass); `0.16.0` adds the
+board that makes ownership observable (WP2) and the hook surfaces that put it in
+front of agents at the two moments it matters (WP3).
+
+### Added
+
+- Adds `repo-harness state board --json [--sprint <path>] [--target-ref <ref>]`,
+  emitting the frozen `BoardDocumentV1`: four columns with precedence
+  `done > blocked > doing > todo`, three separated dimensions (task, lease,
+  progress), per-dimension and composite input revisions, and a
+  `snapshot_consistency` verdict of `stable` or `changed_during_read` produced by
+  a collect-project-collect pass with one full-round retry. The board reads
+  canonical sprint bytes through `git show`, this sprint's leases, raw
+  `git worktree list --porcelain`, owner-worktree attempt ledgers, and
+  read-only progress tokens; it never reads worktree metadata and never takes a
+  task lock.
+- Passes the lease vocabulary through the board unchanged
+  (`available | reserving | bound | completing | released | unknown`), derives
+  `orphaned` into diagnostics, keeps residual `released` rows in `blocked`, and
+  marks any `done` row still holding a non-available lease with
+  `lease_cleanup_required` plus an executable reconcile action.
+- Injects a byte-identical read-only `BoardSliceV1` into Codex
+  `SubagentStart.context` and the Claude `PreToolUse.subagent` `Task|Agent`
+  branch, so a freshly spawned subagent starts with peer claims in view instead
+  of blind. One pure projector and one shared renderer produce the slice; the
+  hosts only wrap it, and an `env.HOOK_HOST` guard keeps injection
+  exactly-once. The slice structurally omits `progress_state`, `column`, and all
+  conflict fields, and its collector never resolves effective state or reads
+  attempt ledgers.
+- Adds a `PreToolUse.edit` lease gate that fires only when a unique claim token
+  whose `unit_ref` matches the active-plan marker coexists with a linked
+  worktree. Once armed it runs five checks, each failing closed with its own
+  reason token; an IO failure before arming degrades to an advisory and passes.
+  Non-sprint execution is unaffected, so a stale write-only claim token cannot
+  permanently arm a tree.
+- Adds the shared coordination plane architecture document at
+  `docs/architecture/shared-coordination-plane.md` and a hook route-table
+  annotation in `docs/architecture/global-hook-runtime.md`.
+
+### Changed
+
+- Appends a bind-time `resumed` receipt before the owner record is written, so a
+  steal-then-rebind no longer inherits the previous claim's no-progress receipts
+  and reports a false `stalled` to the first board reader.
+- Extracts the shared task, lease, and diagnostics derivation out of
+  `project-board.ts` so the full board and the hook slice project from one
+  source rather than two parallel readings.
+
+### Fixed
+
+- Retires the merged worktree at the tail of `contract-worktree finish --merge`
+  instead of leaving it behind for a later manual cleanup.
+
+## [0.15.3] - 2026-08-19
+
+### Added
+
+- Adds the shared coordination plane WP1: sprint rows are claimed and completed
+  through a git common-dir lease store behind `sprint claim`, `bind`, `release`,
+  `steal`, `reconcile`, `identify`, and `begin-completion`. The cutover is
+  quiescent and fail-closed rather than dual-authority.
+- Adds a SubagentStart long-command guardrail advisory so delegated runners are
+  warned about output-swallowing pipes before a long command stalls a watchdog.
+- Adds a SessionStart notice for cleanable contract worktrees.
+- Adds `minimal_change` enforce mode: `mode: "enforce"` arms a Stop gate that
+  blocks a `review` verdict until a fingerprint-matching audit receipt at
+  `.ai/harness/checks/minimal-change-audit.latest.json` releases it, bounded by
+  the shared circuit breaker at two blocks per report fingerprint. Defaults stay
+  `advice` with the post-edit observer opt-in; enforce is per-repo opt-in.
+- Adds a Stop advisory when implementation changes carry no active plan.
+- Adds the `debug-ground-truth-eval-v1` benchmark and reports the uncommitted
+  architecture projection backlog from `check-architecture-sync`.
+- Adds a stable aggregate CI context so branch protection has one required
+  check to bind.
+
+### Changed
+
+- Hardens the coordination lease protocol: the owner record carries three
+  explicit fields, a `completing` guard blocks concurrent completion, inline
+  `complete` passes through the same gate, legacy lease shapes are rejected
+  fail-closed instead of being upgraded, and marker writes have a fixed order.
+- Pins `archctx` to 0.4.4 and migrates architecture projections to the
+  `archcontext.docs-renderer/v4` contract.
+- Makes CodeGraph enablement purely explicit. `profileEnablesCodegraph` no
+  longer auto-enables CodeGraph for repositories with at least 2000 tracked
+  files; the only true paths are the `full` profile and an explicit
+  `tooling.codegraph.enabled: true` in the target repo's
+  `.ai/harness/policy.json`. Downstream repos on the minimal profile without
+  that opt-in no longer gain CodeGraph, and policy read or parse failures fail
+  closed to disabled. This repo's own policy carries the explicit opt-in, so
+  self-host behavior is unchanged.
+- Collapses worktree base metadata onto one typed selector in `verify-sprint`,
+  classified fail-closed, and unifies the `.ai` memory layers.
+
+### Fixed
+
+- Guards the `setup-plugins.sh` shift overrun on final-position retired options
+  and the empty-args expansion that preceded it.
+- Guards the empty untracked array in `ship-worktrees` scaffold discard on
+  bash 3.2.
+- Collapses worktree merge determination to one authority.
+- Runs the `minimal_change` enforce gate before the Stop handler's lite early
+  return.
+- Restores machine-owned projection output before the merge gate, and restores
+  the lite-enforce-gap closeout content that a typed-lock publication
+  overwrote.
+
+## [0.15.2] - 2026-08-16
+
+### Added
+
+- Adds `obsidian-memory` as a repo-owned dual-host skill-surface facade, with
+  the official Obsidian skills declared as runtime-referenced tooling in
+  `check-agent-tooling` and authority-boundary tests pinning the facade
+  contract.
+
+### Changed
+
+- Syncs the archctx dependency line to 0.4.3 with docs-renderer v3 and moves
+  the three version anchors, adopting the upstream canonical-body-digest fix
+  that stops projection restamp churn.
+- Strips machine node-runtime authority from faked PATH environments in the CLI
+  tests so local and CI runs agree.
+
+### Fixed
+
+- Resolves archctx from the target repository before the CLI root, closing the
+  window where a freshly refreshed global CLI blocked the Stop-gate
+  architecture projection drain of an unrelated repo.
+
+## [0.15.1] - 2026-08-15
+
+### Added
+
+- Adds a contract-first Change Assessment and typed AcceptanceReceipt path that
+  binds verification, review selection, final subject, and explicit user
+  waivers before a work package can close.
+- Adds durable hook-effect failure semantics with stop, retry, recovery, and
+  event telemetry, plus a Goal Calibration Gate that asks at most one
+  highest-information-gain planning question.
+
+### Changed
+
+- Publishes one commit per contract worktree and makes nested capability
+  architecture routing resolve arbitrary workspace `src/**` depth through the
+  canonical capability registry.
+- Records research on composable agent-harness boundaries without adopting a
+  second runtime authority.
+
+### Fixed
+
+- Makes architecture queue events semantically idempotent per changed file,
+  including mixed severity and alternating capability prefixes, while keeping
+  unchanged requests eligible for index self-healing.
+- Serializes record/archive writers with a rollback-safe queue lock outside the
+  architecture snapshot tree, adds crash recovery and recurrence handling, and
+  rejects forged cards, unsafe symlink targets, and stale migration authority
+  before mutation.
+- Preserves committed Change Assessment oracle IDs through evidence
+  redaction/materialization so assessment, selection-packet, and envelope
+  fingerprints remain verifiable without exempting unrelated IDs or known
+  secrets.
+
 ## [0.15.0] - 2026-08-12
 
 ### Added

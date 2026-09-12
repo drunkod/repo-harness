@@ -10,7 +10,7 @@ transaction passes.
 
 | Profile | Codex hooks | Components and discovery |
 |---|---:|---|
-| `minimal` | 7 | CLI, effective state, scope/worktree/check guards, handoff, adaptive workflow, conditional CodeGraph support, host adapters, root router, `repo-harness-plan`, and `repo-harness-check` |
+| `minimal` | 7 | CLI, effective state, scope/worktree/check guards, handoff, adaptive workflow, conditional CodeGraph support, host adapters, root router, `repo-harness-plan`, `repo-harness-check`, and the repo-owned `obsidian-memory` facade |
 | `full` | 11 | Everything in minimal plus PRD/Sprint/Goal planning integrations, agent fleet, verifier, cross-model acceptance, release/deployment gates, `repo-harness-product`, `repo-harness-ship`, host-aware `repo-harness-cross-review`, Codex-side `claude-plan`, Waza, and Mermaid |
 
 Fresh global installs and adapter-only installs both default to `full`.
@@ -28,7 +28,7 @@ host.
 
 Update also reconciles the installed runtime dependency closure. It requires
 exact package-local `archctx` and `archctx-contracts` versions, ArchContext's
-exact package-local CodeGraph dependency, Node `>=24 <26`, and a successful
+exact package-local CodeGraph dependency, Node `>=22.22 <26`, and a successful
 `archctx capabilities --json` handshake. Both profiles refresh the exact global
 CodeGraph CLI/MCP by default. Waza and Mermaid remain mutable third-party
 providers and refresh only with explicit `--with-external-skills`;
@@ -48,6 +48,27 @@ not a valid repo-harness authority boundary. It is therefore never selected by
 its optional security toolchains remain on-demand. The catalog pins upstream
 commit `539899ddc7608d63dc66e08e794d572e080f1a55` and verifies the selected
 tree's SHA-256 before any host projection.
+
+`obsidian-memory` declares `obsidian-markdown` and `obsidian-cli` as hard
+companion Skill dependencies in the catalog, but both upstream Skills remain
+explicit-only. Ordinary `minimal` and `full` installation does not download
+them. Install or verify the bounded bundle with:
+
+```bash
+repo-harness install --with-obsidian-skills
+repo-harness update --with-obsidian-skills
+```
+
+The catalog pins both subtrees from
+`kepano/obsidian-skills@a1dc48e68138490d522c04cbf5822214c6eb1202`
+and verifies a separate full-tree SHA-256 before projecting either Skill. A
+successful install records the staging directories and host links in the
+existing install transaction; subsequent drift is reported as managed drift,
+and any later transaction failure restores all affected surfaces atomically.
+This option installs Skills only. It does not install or require the
+`obsidian` executable, Obsidian desktop App, or an npm Obsidian runtime.
+`brainRoot` remains optional, and hooks, CI, workflow checks, and releases do
+not read or write a vault.
 
 Installed profile state is protocol 2. Protocol-1 state is never reinterpreted
 in normal reads because its `minimal` name meant the retired 5-hook projection.
@@ -91,9 +112,11 @@ fails closed.
 
 CodeGraph configuration is tracked as a projected host-config surface with its
 owned-entry hash. Reinstall refreshes that ownership only when the entry is new
-or was already package-owned. Minimal keeps CodeGraph conditional; full requires
-the executable projection. Neither profile treats an unrelated pre-existing MCP
-entry as package-owned.
+or was already package-owned. Minimal enables CodeGraph only on an explicit local
+opt-in (`tooling.codegraph.enabled: true` in the target repo's
+`.ai/harness/policy.json`); repo size never enables it. Full requires the
+executable projection. Neither profile treats an unrelated pre-existing MCP entry
+as package-owned.
 
 Install and benchmark transactions must also bind `BUN_INSTALL` to the selected
 host home. Setting `HOME` alone does not isolate Bun global installation when a
@@ -115,7 +138,8 @@ repo-harness update
 # Read-only repair guidance, no writes.
 repo-harness update --check
 
-# Remove managed host adapters without touching sibling or third-party hooks.
+# Preview and remove owned user configuration; preserve user edits and history.
+repo-harness uninstall --dry-run
 repo-harness uninstall
 
 # Install only the host hook adapters (adapter-only surface).

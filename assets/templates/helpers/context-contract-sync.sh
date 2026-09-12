@@ -331,8 +331,21 @@ try {
 
 if (!Array.isArray(data.discoverable_contexts)) data.discoverable_contexts = [];
 
+// Root-facing capabilities declare the root contract files, which the root
+// context already loads. Registering them here would make one path a
+// discoverable context under every root-facing capability id.
+const rootContextFiles = new Set(
+  Array.isArray(data.root_context_files) && data.root_context_files.length > 0
+    ? data.root_context_files
+    : ["CLAUDE.md", "AGENTS.md"]
+);
+
 for (const [fileName, entryPath] of [["CLAUDE.md", contractClaude], ["AGENTS.md", contractAgents]]) {
   const targetAgent = fileName === "CLAUDE.md" ? "claude" : "codex";
+  if (rootContextFiles.has(entryPath)) {
+    console.log(`[ContextContractSync] context map: skipped root context file ${entryPath}`);
+    continue;
+  }
   if (!data.discoverable_contexts.some((entry) => entry && entry.path === entryPath)) {
     data.discoverable_contexts.push({
       path: entryPath,
@@ -486,7 +499,7 @@ ${active_workstreams}
 ## Current Session Projection
 
 - Durable progress lives under \`${workstream_dir}\`.
-- \`tasks/current.md\` is the tracked derived status snapshot; it is not a live lock or task source.
+- \`tasks/current.md\` is the ignored local derived status read model; it is not a live lock or task source.
 - \`tasks/todos.md\` is the deferred-goal ledger; current execution slices stay in the active plan's \`## Task Breakdown\`.
 <!-- END ARCHITECTURE CONTRACT -->
 EOF_BLOCK

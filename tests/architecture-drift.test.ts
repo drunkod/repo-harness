@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import {
+  acknowledgeArchitectureProjectionPublication,
   advanceArchitectureDriftCursor,
   architectureDriftSourceEvent,
   computeArchitectureDriftChangedSet,
+  drainArchitectureDriftCascade,
   readArchitectureDriftCursor,
 } from '../src/cli/hook/architecture-drift';
 
@@ -74,7 +77,7 @@ describe('architecture drift changed set', () => {
     const cwd = fixture();
     write(cwd, 'src/first.ts', 'export const first = 1;\n');
     const anchor = commitAll(cwd, 'first');
-    advanceArchitectureDriftCursor(cwd, anchor);
+    advanceArchitectureDriftCursor(cwd, anchor, null);
 
     write(cwd, 'src/second.ts', 'export const second = 2;\n');
     const head = commitAll(cwd, 'second');
@@ -92,7 +95,7 @@ describe('architecture drift changed set', () => {
   test('reports nothing extra when the cursor is already at HEAD with a clean tree', () => {
     const cwd = fixture();
     const head = git(cwd, ['rev-parse', 'HEAD']);
-    advanceArchitectureDriftCursor(cwd, head);
+    advanceArchitectureDriftCursor(cwd, head, null);
 
     const changed = computeArchitectureDriftChangedSet(cwd);
 
@@ -106,7 +109,7 @@ describe('architecture drift changed set', () => {
     write(cwd, 'src/renamed-from.ts', 'export const moved = 1;\n');
     write(cwd, 'src/removed.ts', 'export const removed = 1;\n');
     const anchor = commitAll(cwd, 'seed rename inputs');
-    advanceArchitectureDriftCursor(cwd, anchor);
+    advanceArchitectureDriftCursor(cwd, anchor, null);
 
     git(cwd, ['mv', 'src/renamed-from.ts', 'src/renamed-to.ts']);
     unlinkSync(join(cwd, 'src/removed.ts'));
@@ -126,7 +129,7 @@ describe('architecture drift changed set', () => {
 
   test('re-anchors with a note when the stored cursor commit no longer resolves', () => {
     const cwd = fixture();
-    advanceArchitectureDriftCursor(cwd, 'b'.repeat(40));
+    advanceArchitectureDriftCursor(cwd, 'b'.repeat(40), null);
     write(cwd, 'src/after-gc.ts', 'export const value = 1;\n');
 
     const changed = computeArchitectureDriftChangedSet(cwd);
@@ -163,14 +166,14 @@ describe('architecture drift cursor slot', () => {
     const head = git(cwd, ['rev-parse', 'HEAD']);
 
     expect(readArchitectureDriftCursor(cwd)).toBeNull();
-    advanceArchitectureDriftCursor(cwd, head, new Date('2026-08-12T00:00:00.000Z'));
+    advanceArchitectureDriftCursor(cwd, head, null, new Date('2026-08-12T00:00:00.000Z'));
     expect(readArchitectureDriftCursor(cwd)).toEqual({
       version: 1,
       head_sha: head,
       updated_at: '2026-08-12T00:00:00.000Z',
     });
 
-    advanceArchitectureDriftCursor(cwd, 'a'.repeat(40), new Date('2026-08-12T01:00:00.000Z'));
+    advanceArchitectureDriftCursor(cwd, 'a'.repeat(40), head, new Date('2026-08-12T01:00:00.000Z'));
     expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe('a'.repeat(40));
   });
 
@@ -187,6 +190,58 @@ describe('architecture drift cursor slot', () => {
 
     writeFileSync(cursorPath, `${JSON.stringify({ version: 1, head_sha: 'nope', updated_at: 'now' })}\n`);
     expect(readArchitectureDriftCursor(cwd)).toBeNull();
+  });
+});
+
+describe('architecture projection publication acknowledgement', () => {
+  function publicationFixture(): { cwd: string; publication: string } {
+    const cwd = fixture();
+    write(cwd, 'docs/architecture/.projection-manifest.json', '{"version":1}\n');
+    commitAll(cwd, 'projection baseline');
+    write(cwd, 'docs/architecture/.projection-manifest.json', '{"version":2}\n');
+    git(cwd, ['add', '-A']);
+    git(cwd, [
+      'commit',
+      '-m',
+      'feat(contract): complete projection-fixture',
+      '-m',
+      `Source-Worktree-Head: ${'a'.repeat(40)}`,
+    ]);
+    return { cwd, publication: git(cwd, ['rev-parse', 'HEAD']) };
+  }
+
+  test('advances the cursor to a clean synthesized publication that changed the manifest', () => {
+    const { cwd, publication } = publicationFixture();
+
+    const acknowledgement = acknowledgeArchitectureProjectionPublication(
+      cwd,
+      publication,
+      new Date('2026-08-20T08:00:00.000Z'),
+    );
+
+    expect(acknowledgement).toEqual({
+      schemaVersion: 'repo-harness.architecture-projection-publication-ack/v1',
+      publicationSha: publication,
+      manifestDigest: `sha256:${createHash('sha256').update('{"version":2}\n').digest('hex')}`,
+      cursorSha: publication,
+    });
+    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(publication);
+    expect(computeArchitectureDriftChangedSet(cwd).paths).toEqual([]);
+  });
+
+  test('rejects a non-HEAD publication, a dirty manifest, and a commit without a manifest delta', () => {
+    const { cwd, publication } = publicationFixture();
+    const parent = git(cwd, ['rev-parse', 'HEAD^']);
+
+    expect(() => acknowledgeArchitectureProjectionPublication(cwd, parent)).toThrow('not checked-out HEAD');
+
+    write(cwd, 'docs/architecture/.projection-manifest.json', '{"dirty":true}\n');
+    expect(() => acknowledgeArchitectureProjectionPublication(cwd, publication)).toThrow('tracked changes');
+    git(cwd, ['checkout', '--', 'docs/architecture/.projection-manifest.json']);
+
+    git(cwd, ['commit', '--allow-empty', '-m', 'feat(contract): complete empty', '-m', `Source-Worktree-Head: ${'b'.repeat(40)}`]);
+    const emptyPublication = git(cwd, ['rev-parse', 'HEAD']);
+    expect(() => acknowledgeArchitectureProjectionPublication(cwd, emptyPublication)).toThrow('did not change the projection manifest');
   });
 });
 
@@ -208,5 +263,100 @@ describe('architecture drift source event', () => {
 
   test('has no delivery to make for an empty changed set', () => {
     expect(architectureDriftSourceEvent({ headSha: 'a'.repeat(40), cursorSha: null, paths: [], warnings: [] })).toBeNull();
+  });
+});
+
+describe('resumable legacy cascade', () => {
+  test('drains a 1592-path backlog across bounded retries without replaying the prefix', () => {
+    const cwd = fixture();
+    const anchor = git(cwd, ['rev-parse', 'HEAD']);
+    advanceArchitectureDriftCursor(cwd, anchor, null);
+    const paths = Array.from({ length: 1592 }, (_, i) => `src/${String(i).padStart(4, '0')}.ts`);
+    const changed = { cursorSha: anchor, headSha: anchor, paths, warnings: [] };
+    const delivered: string[] = [];
+    let runs = 0;
+    while (delivered.length < paths.length) {
+      let clock = 0;
+      runs += 1;
+      try {
+        drainArchitectureDriftCascade(cwd, changed, (path) => { delivered.push(path); clock += 1000; },
+          { deadlineMs: 20_000, nowMs: () => clock });
+      } catch (error) {
+        expect(String(error)).toContain('deadline exhausted');
+      }
+      if (runs > 80) throw new Error('backlog did not converge');
+    }
+    expect(runs).toBe(80);
+    expect(delivered).toEqual(paths);
+  });
+
+  test('retries the failed path but not its completed predecessor', () => {
+    const cwd = fixture();
+    const changed = { ...computeArchitectureDriftChangedSet(cwd), paths: ['a.ts', 'b.ts', 'c.ts'] };
+    const calls: string[] = [];
+    const budget = { deadlineMs: 20_000, nowMs: () => 0 };
+    expect(() => drainArchitectureDriftCascade(cwd, changed, (path) => {
+      calls.push(path);
+      if (path === 'b.ts') throw new Error('follow-up failed');
+    }, budget)).toThrow('follow-up failed');
+    expect(readArchitectureDriftCursor(cwd)).toBeNull();
+    drainArchitectureDriftCascade(cwd, changed, (path) => { calls.push(path); }, budget);
+    expect(calls).toEqual(['a.ts', 'b.ts', 'b.ts', 'c.ts']);
+    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(changed.headSha!);
+  });
+
+  test('rejects malformed progress without acknowledging or delivering paths', () => {
+    const cwd = fixture();
+    write(cwd, '.ai/harness/state/architecture-drift-cascade.json', '{"version":1,"completed":999}');
+    let called = false;
+    expect(() => drainArchitectureDriftCascade(cwd, computeArchitectureDriftChangedSet(cwd),
+      () => { called = true; }, { deadlineMs: 20_000, nowMs: () => 0 })).toThrow('invalid architecture drift cascade batch');
+    expect(called).toBe(false);
+    expect(readArchitectureDriftCursor(cwd)).toBeNull();
+  });
+
+  test('manual CLI drain resumes a failed batch and preserves its JSON contract', () => {
+    const cwd = fixture();
+    advanceArchitectureDriftCursor(cwd, git(cwd, ['rev-parse', 'HEAD']), null);
+    write(cwd, 'a.ts', 'export const a = 1;');
+    write(cwd, 'b.ts', 'export const b = 1;');
+    const head = commitAll(cwd, 'backlog');
+    const stubRoot = realpathSync(mkdtempSync(join(tmpdir(), 'drift-cli-helper-')));
+    workspaces.push(stubRoot);
+    const calls = join(stubRoot, 'calls.txt');
+    const failed = join(stubRoot, 'failed');
+    const stub = join(stubRoot, 'stub.ts');
+    writeFileSync(stub, [
+      "import { appendFileSync, existsSync, writeFileSync } from 'fs';",
+      "if (process.argv[3] === 'architecture-queue') {",
+      " const path = process.argv.at(-1); appendFileSync(process.env.DRIFT_CALLS!, path + '\\n');",
+      " if (path === 'b.ts' && !existsSync(process.env.DRIFT_FAILED!)) { writeFileSync(process.env.DRIFT_FAILED!, 'yes'); process.exit(9); }",
+      "}",
+    ].join('\n'));
+    const run = () => spawnSync(process.execPath, [join(import.meta.dir, '../src/cli/index.ts'), 'architecture-projection', 'drain', '--json'],
+      { cwd, encoding: 'utf8', env: { ...process.env, REPO_HARNESS_CLI: stub, DRIFT_CALLS: calls, DRIFT_FAILED: failed } });
+    const first = run();
+    expect(first.status).toBe(1);
+    expect(first.stderr).toContain('architecture-queue exited 9');
+    const second = run();
+    expect(second.status).toBe(0);
+    expect(JSON.parse(second.stdout).status).toBe('disabled');
+    expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual(['a.ts', 'b.ts', 'b.ts']);
+    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(head);
+  });
+
+  test('does not rewind a cursor acknowledged by another projection', () => {
+    const cwd = fixture();
+    const changed = { ...computeArchitectureDriftChangedSet(cwd), paths: ['a.ts', 'b.ts'] };
+    const budget = { deadlineMs: 20_000, nowMs: () => 0 };
+    expect(() => drainArchitectureDriftCascade(cwd, changed, () => { throw new Error('interrupted'); }, budget)).toThrow();
+    write(cwd, 'new.ts', 'export const value = 1;');
+    const newHead = commitAll(cwd, 'new head');
+    advanceArchitectureDriftCursor(cwd, newHead, null);
+    expect(() => drainArchitectureDriftCascade(cwd, changed, () => {}, budget)).toThrow('cursor changed before cascade');
+    const calls: string[] = [];
+    drainArchitectureDriftCascade(cwd, computeArchitectureDriftChangedSet(cwd), (path) => { calls.push(path); }, budget);
+    expect(calls).toEqual(['a.ts', 'b.ts']);
+    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(newHead);
   });
 });

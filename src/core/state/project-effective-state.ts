@@ -1,3 +1,4 @@
+import { artifactHash, validArtifactRepair } from './artifact-repair';
 import { createHash } from 'crypto';
 import type {
   WorkflowProfile,
@@ -23,7 +24,7 @@ import type {
 } from './types';
 
 const CEREMONY_GUIDANCE: Readonly<Record<WorkflowProfile, string>> = {
-  lite: 'brief -> edit -> targeted test; do not author plan, contract, notes, todos, or checks files (zero ceremony)',
+  lite: 'brief -> edit -> targeted test; no workflow artifacts are required for the currently observed scope. User-requested planning is allowed',
   standard: 'at most one active plan artifact; no contract, notes, or todos scaffolding beyond it',
   strict: 'full envelope: plan, contract, notes, and checks as required',
 };
@@ -56,12 +57,14 @@ export interface EffectiveStateInputs {
   readonly reviewSubject: EffectiveStateReviewSubject;
   readonly checksPath: string;
   readonly checksText: string | null;
+  readonly artifactRepairText?: string | null;
   readonly sprintPath: string | null;
   readonly sprintExists: boolean;
   readonly activeWorktreePath: string;
   readonly currentWorktree: string;
   readonly worktreeOwner: string | null;
   readonly worktreeOwnerIsCurrent: boolean;
+  readonly isolatedContractWorktree: boolean;
   readonly handoffPath: string;
   readonly handoffText: string | null;
   readonly resumePath: string;
@@ -138,6 +141,7 @@ export function projectEffectiveState(input: EffectiveStateInputs): EffectiveSta
   }
   if (reviewFreshness === 'stale') staleSources.push('review');
 
+  let failureClass: string | null = null;
   let checksStatus: string | null = null;
   let checksPlan: string | null = null;
   let checksFingerprint: string | null = null;
@@ -147,10 +151,12 @@ export function projectEffectiveState(input: EffectiveStateInputs): EffectiveSta
     try {
       const checks = JSON.parse(input.checksText) as {
         status?: unknown;
+        failure_class?: unknown;
         active_plan?: unknown;
         review_subject_sha256?: unknown;
         acceptance_receipt?: { status?: unknown; disposition?: unknown };
       };
+      failureClass = typeof checks.failure_class === 'string' ? checks.failure_class : null;
       checksStatus = typeof checks.status === 'string' ? checks.status : null;
       checksPlan = typeof checks.active_plan === 'string' ? checks.active_plan : null;
       checksFingerprint = typeof checks.review_subject_sha256 === 'string'
@@ -268,12 +274,25 @@ export function projectEffectiveState(input: EffectiveStateInputs): EffectiveSta
     }
   }
   if (checksFreshness === 'fresh' && checksStatus && checksStatus !== 'pass') {
-    blockers.push('checks_failed');
+    blockers.push(failureClass === 'missing_artifact' ? 'checks_artifact_invalid' : 'checks_failed');
   }
   if (!input.riskResolution.ok) {
     blockers.push(`workflow_profile:${input.riskResolution.code.toLowerCase()}`);
   }
   if (input.capabilityRegistryInvalid) blockers.push('capability_registry:invalid');
+
+  const artifactRepairValid = checksFreshness === 'fresh' && failureClass === 'missing_artifact'
+    && checksStatus !== null && checksStatus !== 'pass' && input.contractPath !== null
+    && input.contractText !== null && input.checksText !== null
+    && validArtifactRepair(input.artifactRepairText, {
+      contract_path: input.contractPath,
+      contract_sha256: artifactHash(input.contractText),
+      checks_sha256: artifactHash(input.checksText),
+      subject_revision: input.subjectRevision,
+    });
+  const artifactRepairAuthorized = artifactRepairValid && input.unsafeEditTargetPathCount === 0
+    && input.editTargetPaths.length > 0
+    && input.editTargetPaths.every(path => path === input.contractPath);
 
   // Progress token: one deterministic content hash over exactly the audit's
   // recipe. It composes revisions and values the resolver/projector already
@@ -311,20 +330,19 @@ export function projectEffectiveState(input: EffectiveStateInputs): EffectiveSta
     ? (() => {
         const satisfiedRequirements: ArtifactRequirementKey[] = [];
         if (input.contractText) satisfiedRequirements.push('separate_contract');
-        if (input.worktreeOwnerIsCurrent) {
-          satisfiedRequirements.push('isolated_contract_worktree', 'worktree_boundary');
-        }
+        if (input.worktreeOwnerIsCurrent) satisfiedRequirements.push('worktree_boundary');
+        if (input.isolatedContractWorktree) satisfiedRequirements.push('isolated_contract_worktree');
         if (reviewFreshness === 'fresh') satisfiedRequirements.push('fresh_review');
         if (externalFreshness === 'fresh') satisfiedRequirements.push('external_acceptance');
         if (checksFreshness === 'fresh') {
           satisfiedRequirements.push('fresh_checks', 'subject_bound_targeted_evidence');
         }
         if (input.reviewSubject.available) satisfiedRequirements.push('candidate_revision_precondition');
-        if (
-          input.planPath &&
-          (input.planStatus === 'approved' || input.planStatus === 'executing') &&
-          firstOpenTask(input.planText) === null
-        ) {
+        const approvedWorkPackage = Boolean(
+          input.planPath && input.planText?.trim() &&
+          (input.planStatus === 'approved' || input.planStatus === 'executing'),
+        );
+        if (approvedWorkPackage && firstOpenTask(input.planText) === null) {
           satisfiedRequirements.push('complete_approved_work_package');
         }
         // The handoff/resume checkpoint pair is the durable recovery state
@@ -345,9 +363,11 @@ export function projectEffectiveState(input: EffectiveStateInputs): EffectiveSta
             ship: resolveArtifactRequirement({ profile: workflowProfile, operation: 'ship' }),
           },
           evidence: {
+            approvedWorkPackage,
             satisfiedRequirements,
             hardBlockers: blockers,
             checksFailedRepairAuthorized,
+            artifactRepairAuthorized,
           },
         });
       })()
@@ -383,7 +403,9 @@ export function projectEffectiveState(input: EffectiveStateInputs): EffectiveSta
     profile_signals: input.riskResolution.ok ? input.riskResolution.signals : null,
     allowed_paths: allowedPaths,
     next_action: nextAction,
-    guidance: workflowProfile ? CEREMONY_GUIDANCE[workflowProfile] : null,
+    guidance: workflowProfile
+      ? `${CEREMONY_GUIDANCE[workflowProfile]}. This is a state snapshot, not a session-wide restriction; re-resolve for the proposed edit and current diff when scope changes. Current edit-time requirements supersede earlier snapshot guidance.`
+      : null,
     blockers,
     stale_sources: uniqueSorted(staleSources),
     conflicting_sources: uniqueSorted(conflictingSources),
@@ -400,7 +422,10 @@ export function projectEffectiveState(input: EffectiveStateInputs): EffectiveSta
       freshness: externalFreshness,
       status: acceptanceDisposition,
     },
-    checks: { path: input.checksPath, freshness: checksFreshness, status: checksStatus },
+    checks: { path: input.checksPath, freshness: checksFreshness, status: checksStatus,
+      ...(failureClass !== null ? { failure_class: failureClass } : {}),
+      ...(failureClass === 'missing_artifact' ? { artifact_repair: artifactRepairValid ? 'authorized' as const : 'required' as const } : {}),
+    },
     active_sprint: { path: input.sprintPath, freshness: sprintFreshness },
     worktree: {
       path: input.activeWorktreePath,

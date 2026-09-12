@@ -10,7 +10,7 @@ import {
 } from './binding';
 import { resolveBrowserOutputPath } from './file-policy';
 import { checkNativeChatgptSession, nativeDebuggingBlockedByDefaultProfile, nativeProviderAvailable, runNativeProvider } from './native-provider';
-import { buildOracleCommand, probeOracle, resolveOracleBin, runOracleProvider } from './oracle-provider';
+import { buildOracleCommand, ORACLE_FORK_FLAG_RECOVERY, ORACLE_RUNTIME_PROBE_CAPABILITIES, probeOracle, REQUIRED_ORACLE_VERSION, resolveOracleBin, runOracleProvider, supportsBrowserAppPreselect, validateOracleProfileBinding, validateOracleVersion } from './oracle-provider';
 import { assemblePromptBundle } from './prompt-assembler';
 import { scanPromptBundle } from './secret-scan';
 import {
@@ -38,7 +38,7 @@ export interface BrowserDoctorOptions {
 export type BrowserDoctorStatus = 'ready' | 'unavailable' | 'action_required' | 'deprecated';
 
 export interface BrowserDoctorAgentAction {
-  id: 'chatgpt-oracle-install-pinned' | 'chatgpt-oracle-upgrade-pinned' | 'chatgpt-oracle-fix-configured-source';
+  id: 'chatgpt-oracle-install-pinned' | 'chatgpt-oracle-upgrade-pinned' | 'chatgpt-oracle-fix-configured-source' | 'chatgpt-oracle-select-fork-build';
   status: 'needs_agent';
   requires_agent: true;
   reason: string;
@@ -49,8 +49,8 @@ export interface BrowserDoctorAgentAction {
   automatic: false;
 }
 
-const PINNED_ORACLE_INSTALL = 'bun add -g @steipete/oracle@0.14.1';
-const PINNED_ORACLE_REPO_LOCAL_INSTALL = 'bun add -D @steipete/oracle@0.14.1';
+const PINNED_ORACLE_INSTALL = `bun add -g @steipete/oracle@${REQUIRED_ORACLE_VERSION}`;
+const PINNED_ORACLE_REPO_LOCAL_INSTALL = `bun add -D @steipete/oracle@${REQUIRED_ORACLE_VERSION}`;
 
 const EMPTY_ORACLE_CAPABILITIES = {
   browserEngine: false,
@@ -59,8 +59,12 @@ const EMPTY_ORACLE_CAPABILITIES = {
   sessionFollowup: false,
   browserArchive: false,
   browserModelStrategy: false,
-  browserCookiePath: false,
+  copyProfile: false,
+  browserChromeProfile: false,
   browserThinkingTime: false,
+  writeSession: false,
+  networkEvidence: false,
+  conversationEvidence: false,
   chatgptUrl: false,
   heartbeat: false,
 };
@@ -98,7 +102,10 @@ function buildOracleAgentActions(input: {
   provider: BrowserProviderName;
   oraclePresent: boolean;
   oracleCapabilitiesReady: boolean;
+  oracleVersionCompatible: boolean;
   missingOracleCapabilities: string[];
+  forkFlagGap: boolean;
+  missingForkFlags: string[];
   oracleSource?: string;
 }): BrowserDoctorAgentAction[] {
   if (input.provider !== 'oracle') return [];
@@ -146,9 +153,30 @@ function buildOracleAgentActions(input: {
     }];
   }
   if (!input.oracleCapabilitiesReady) {
+    // Upstream Oracle releases never carry the fork flags, so an install/upgrade
+    // action here would loop forever: the only recovery is selecting the fork build.
+    if (input.forkFlagGap) {
+      return [{
+        id: 'chatgpt-oracle-select-fork-build',
+        status: 'needs_agent',
+        requires_agent: true,
+        reason: `Resolved Oracle reports version ${REQUIRED_ORACLE_VERSION} but rejects the repo-harness fork flags (${input.missingForkFlags.join(', ')}). ${ORACLE_FORK_FLAG_RECOVERY}`,
+        risk: 'Repoints GPT Pro browser consults at a different Oracle binary; verify the selected fork build before any real run.',
+        command: 'REPO_HARNESS_ORACLE_BIN=<path-to-fork-oracle> repo-harness chatgpt browser-doctor --repo <repo> --provider oracle --json',
+        alternatives: [
+          'Pass --oracle-bin <path-to-fork-oracle> for this command.',
+          'Build the repo-harness Oracle fork and point REPO_HARNESS_ORACLE_BIN at its CLI entrypoint.',
+        ],
+        verification,
+        automatic: false,
+      }];
+    }
+    const missingRequirements = input.oracleVersionCompatible
+      ? input.missingOracleCapabilities.join(', ') || 'nodeCompatible'
+      : `exact version ${REQUIRED_ORACLE_VERSION}`;
     if (input.oracleSource === '--oracle-bin' || input.oracleSource === 'REPO_HARNESS_ORACLE_BIN') {
       return [configuredSourceAction(
-        `Configured Oracle source ${input.oracleSource} resolved but is missing required browser-mode capabilities: ${input.missingOracleCapabilities.join(', ') || 'nodeCompatible'}.`,
+        `Configured Oracle source ${input.oracleSource} resolved but does not satisfy Oracle compatibility requirements: ${missingRequirements}.`,
       )];
     }
     const repoLocal = input.oracleSource === 'node_modules/.bin';
@@ -156,7 +184,7 @@ function buildOracleAgentActions(input: {
       id: 'chatgpt-oracle-upgrade-pinned',
       status: 'needs_agent',
       requires_agent: true,
-      reason: `Resolved Oracle is missing required browser-mode capabilities: ${input.missingOracleCapabilities.join(', ') || 'nodeCompatible'}.`,
+      reason: `Resolved Oracle does not satisfy compatibility requirements: ${missingRequirements}.`,
       risk: repoLocal
         ? 'Upgrades an optional repo-local external CLI dev dependency; verify the pinned binary before running any real GPT Pro consult.'
         : 'Upgrades an optional external CLI; verify the pinned binary before running any real GPT Pro consult.',
@@ -253,10 +281,26 @@ export async function browserDoctor(
   const oraclePresent = Boolean(oracleResolution.binary);
   const oracleProbe = oracleResolution.binary ? probeOracle(oracleResolution.binary) : undefined;
   const oracleCapabilities = oracleProbe?.capabilities ?? EMPTY_ORACLE_CAPABILITIES;
+  const oracleOptionalCapabilities = {
+    browserAppPreselect: oracleProbe ? supportsBrowserAppPreselect(oracleProbe.helpText) : false,
+  };
   const missingOracleCapabilities = Object.entries(oracleCapabilities)
     .filter(([, supported]) => supported !== true)
     .map(([capability]) => capability);
-  const oracleCapabilitiesReady = Boolean(oracleProbe?.nodeCompatible && missingOracleCapabilities.length === 0);
+  const oracleVersionCompatible = oracleProbe?.versionCompatible === true;
+  const oracleVersionError = oracleProbe ? validateOracleVersion(oracleProbe.version).error : undefined;
+  const missingForkCapabilities = ORACLE_RUNTIME_PROBE_CAPABILITIES
+    .filter(({ capability }) => oracleCapabilities[capability] !== true)
+    .map(({ flag }) => flag);
+  const forkCapabilityNames = new Set<string>(ORACLE_RUNTIME_PROBE_CAPABILITIES.map(({ capability }) => capability));
+  // A fork-flag gap is the narrow case where the resolved binary satisfies every
+  // published requirement and only the fork-only flags are missing. A binary that
+  // also lacks upstream `--help` capabilities is an ordinary version/source problem.
+  const forkFlagGap = oraclePresent
+    && oracleVersionCompatible
+    && missingForkCapabilities.length > 0
+    && missingOracleCapabilities.every((capability) => forkCapabilityNames.has(capability));
+  const oracleCapabilitiesReady = Boolean(oracleProbe?.nodeCompatible && oracleVersionCompatible && missingOracleCapabilities.length === 0);
   const nativePresent = await nativeProviderAvailable();
   const bindingResult = readBrowserBinding(repoRoot);
   const binding = bindingResult.binding;
@@ -298,8 +342,12 @@ export async function browserDoctor(
   if (provider === 'oracle') {
     if (!oraclePresent) {
       next.push('Install oracle (pin the version) or pass --oracle-bin / set REPO_HARNESS_ORACLE_BIN before non-dry-run execution.');
+    } else if (!oracleVersionCompatible) {
+      next.push(oracleVersionError?.message ?? `Resolved oracle must report exactly version ${REQUIRED_ORACLE_VERSION}.`);
     } else if (!oracleCapabilitiesReady) {
-      next.push('Resolved oracle binary did not report the required browser-mode flags; upgrade oracle or check `oracle --help`.');
+      next.push(forkFlagGap
+        ? 'Resolved oracle does not accept the repo-harness fork flags; the fork build is required. Point REPO_HARNESS_ORACLE_BIN=<path-to-fork-oracle> or --oracle-bin <path-to-fork-oracle> at it.'
+        : 'Resolved oracle binary did not report the required browser-mode flags; upgrade oracle or check `oracle --help`.');
     } else {
       next.push('repo-harness chatgpt browser-consult --provider oracle --prompt "Reply exactly OK"');
     }
@@ -320,20 +368,25 @@ export async function browserDoctor(
     }
   }
   const oracleCode = provider === 'oracle'
-    ? (!oraclePresent ? 'ORACLE_NOT_INSTALLED' : oracleCapabilitiesReady ? undefined : 'ORACLE_INCOMPATIBLE')
+    ? (!oraclePresent ? 'ORACLE_NOT_INSTALLED' : oracleCapabilitiesReady ? undefined : !oracleVersionCompatible ? 'ORACLE_VERSION_UNSUPPORTED' : 'ORACLE_INCOMPATIBLE')
     : 'NATIVE_PROVIDER_DEPRECATED';
   const oracleError = provider === 'oracle'
-    ? oracleResolution.error ?? (!oracleCapabilitiesReady && oraclePresent ? {
+    ? oracleResolution.error ?? (!oracleCapabilitiesReady && oraclePresent ? oracleVersionError ?? {
       code: 'ORACLE_INCOMPATIBLE',
       message: `oracle binary did not report required browser-mode capabilities: ${missingOracleCapabilities.join(', ')}`,
-      recovery: 'Upgrade oracle or check `oracle --help`; repo-harness requires every flag it may send at runtime.',
+      recovery: forkFlagGap
+        ? ORACLE_FORK_FLAG_RECOVERY
+        : 'Upgrade oracle or check `oracle --help`; repo-harness requires every flag it may send at runtime.',
     } : undefined)
     : undefined;
   const agentActions = buildOracleAgentActions({
     provider,
     oraclePresent,
     oracleCapabilitiesReady,
+    oracleVersionCompatible,
     missingOracleCapabilities,
+    forkFlagGap,
+    missingForkFlags: missingForkCapabilities,
     oracleSource: oracleResolution.source,
   });
   const json = {
@@ -348,8 +401,11 @@ export async function browserDoctor(
       binary: oracleResolution.binary,
       resolvedFrom: oracleResolution.source,
       version: oracleProbe?.version,
+      requiredVersion: REQUIRED_ORACLE_VERSION,
+      versionCompatible: oracleVersionCompatible,
       nodeCompatible: oracleProbe?.nodeCompatible ?? false,
       capabilities: oracleCapabilities,
+      optionalCapabilities: oracleOptionalCapabilities,
       missingCapabilities: missingOracleCapabilities,
       error: oracleError,
     },
@@ -407,6 +463,21 @@ export async function runBrowserConsult(input: BrowserConsultInput): Promise<Bro
   const secretScan = effectiveInput.requireSecretScan === true
     ? scanPromptBundle(effectiveInput, bundle)
     : undefined;
+  if (effectiveInput.chatgptApp && provider !== 'oracle') {
+    return writeBrowserSession({
+      input: effectiveInput,
+      provider,
+      status: 'failed',
+      bundle,
+      output: `ChatGPT app preselection requires the oracle provider; ${provider} does not select composer apps.`,
+      error: {
+        code: 'CHATGPT_APP_PRESELECT_PROVIDER_UNSUPPORTED',
+        message: `ChatGPT app preselection is not supported by provider "${provider}"`,
+        recovery: 'Use --provider oracle with an Oracle binary that supports --browser-app, or omit --chatgpt-app and select the app manually.',
+      },
+      secretScan,
+    });
+  }
   if (effectiveInput.dryRun !== true) {
     if (provider === 'oracle') {
       const oracle = await runOracleProvider(effectiveInput, bundle);
@@ -420,6 +491,10 @@ export async function runBrowserConsult(input: BrowserConsultInput): Promise<Bro
         conversationUrl: oracle.conversationUrl,
         providerSessionId: oracle.providerSessionId,
         oracle: {
+          observation: oracle.observation,
+          networkCapture: oracle.networkCapture,
+          conversationCapture: oracle.conversationCapture,
+          evidenceError: oracle.evidenceError,
           binary: oracle.oracleBinary,
           version: oracle.oracleVersion,
           captureStatus: oracle.status === 'completed' ? 'completed' : oracle.status === 'recoverable' ? 'recoverable' : undefined,
@@ -440,6 +515,28 @@ export async function runBrowserConsult(input: BrowserConsultInput): Promise<Bro
       error: native.error,
       secretScan,
     });
+  }
+  // A dry run must preview a command the real run would actually execute. An
+  // unusable profile binding cannot produce the `--copy-profile` /
+  // `--browser-chrome-profile` pair, so it fails here for the same reason and
+  // with the same code as the real run instead of rendering a half transport.
+  if (provider === 'oracle') {
+    const bindingError = validateOracleProfileBinding(effectiveInput);
+    if (bindingError) {
+      return writeBrowserSession({
+        input: effectiveInput,
+        provider,
+        status: 'failed',
+        bundle,
+        output: bindingError.message,
+        error: {
+          code: 'ORACLE_PROFILE_NOT_FOUND',
+          message: bindingError.message,
+          recovery: bindingError.recovery,
+        },
+        secretScan,
+      });
+    }
   }
   const command = provider === 'oracle' ? ['oracle', ...buildOracleCommand(effectiveInput)] : undefined;
   return writeBrowserSession({
@@ -479,11 +576,11 @@ export async function runBrowserFollowup(input: Omit<BrowserConsultInput, 'sourc
     requireSecretScan: input.requireSecretScan === true || Boolean(existing.meta.security?.promptSecretScan),
     providerSessionId: input.providerSessionId ?? existing.meta.providerSessionId,
     parentProviderSessionId: existing.meta.providerSessionId,
-    model: input.model ?? existing.meta.model.requested,
-    thinking: input.thinking ?? existing.meta.model.thinking,
+    model: input.model,
+    thinking: input.thinking,
     provider,
     chatgptUrl: input.chatgptUrl ?? existing.meta.browser.conversationUrl ?? existing.meta.browser.chatgptUrl,
-    chatgptApp: undefined,
+    chatgptApp: input.chatgptApp === null ? undefined : input.chatgptApp ?? existing.meta.browser.chatgptApp,
     profileDir: input.profileDir ?? existing.meta.browser.profileDir,
     profileDirectory: input.profileDirectory ?? existing.meta.browser.profileDirectory,
     browserChannel: input.browserChannel ?? existing.meta.browser.channel,

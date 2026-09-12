@@ -5,7 +5,7 @@ ORIGINAL_PATH="${PATH:-}"
 
 PACKAGE_NAME="repo-harness"
 PACKAGE_VERSION="${REPO_HARNESS_VERSION:-latest}"
-MIN_BUN_VERSION="1.1.35"
+MIN_BUN_VERSION="1.4.0"
 
 log() {
   printf '%s\n' "$*"
@@ -81,6 +81,24 @@ verify_repo_harness() {
   [ -n "$version" ] || die "repo-harness installed, but version readback failed"
   log "repo-harness ${version} installed."
 }
+
+
+cat <<'BANNER'
+
+           _____________
+          /             |
+     /\  /|            \|/
+    /  \/ |             V
+   ( o    \            / \
+    \   __/           /___\
+    /  /
+   /  /____
+  /        \        repo-harness
+ /|        |        installer
+  | |  | | |        repoharness.com
+  |_|  |_|_|
+
+BANNER
 
 if [ "${REPO_HARNESS_DRY_RUN:-0}" = "1" ]; then
   log "DRY RUN: would ensure Bun >= ${MIN_BUN_VERSION}, install ${PACKAGE_NAME}@${PACKAGE_VERSION}, and verify repo-harness --version."

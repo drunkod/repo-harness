@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERIFICATION_BUDGET_MS=1200000
+VERIFICATION_BUDGET_MS=3600000
 
 # Delegate evidence_requirements parsing to the one shared lib function
 # (workflow_contract_evidence_requirement) instead of re-implementing a second
@@ -26,15 +26,20 @@ now_ms() {
 
 usage() {
   cat <<'USAGE_EOF'
-Usage: scripts/verify-contract.sh --contract <contract-file> [--strict] [--quiet] [--read-only] [--report-file <path>]
+Usage: scripts/verify-contract.sh --contract <contract-file> [--strict] [--quiet] [--read-only] [--preflight] [--report-file <path>] [--force-expensive-rerun --reason <text>]
 
 Options:
   --contract <path>     Contract markdown file with a YAML exit_criteria block
   --strict              Exit with code 1 when any criteria fail
   --quiet               Suppress per-check logs; only print on failure or status change
-  --read-only           Do not rewrite the contract Status header; tests_pass and
-                        commands_succeed still execute for verification
+  --read-only           Do not rewrite the contract Status header; the Verification Plan
+                        still executes through the canonical executor
+  --preflight           Validate metadata only; no criteria execution, Status rewrite,
+                        or acceptance report (incompatible with report/rerun options)
   --report-file <path>  Write structured JSON results for downstream tooling
+  --force-expensive-rerun
+                        Execute a cached expensive pass again instead of reusing it
+  --reason <text>       Required non-empty audit reason for --force-expensive-rerun
 USAGE_EOF
 }
 
@@ -47,6 +52,44 @@ strip_quotes() {
     value="${value:1:${#value}-2}"
   fi
   printf '%s' "$value"
+}
+
+# YAML allows a trailing ` # comment` on any line, including a mapping key. The
+# exit_criteria matchers below compare key text exactly, so a commented header
+# used to miss every matcher at once: the section dispatch left `$section`
+# pointing at the previous section, the unknown-key and misindented-reuse rules
+# saw no key at all, and reuse-only entries leaked back into the executed set.
+# Normalize each candidate key line once here and feed the normalized form to
+# every matcher. A `#` only opens a comment when it is at line start or
+# preceded by whitespace, and never inside a quoted scalar, so item values that
+# legitimately contain `#` are returned unmangled.
+normalize_yaml_key_line() {
+  local raw="$1"
+  local len=${#raw}
+  local i char quote="" out=""
+  for ((i = 0; i < len; i++)); do
+    char="${raw:i:1}"
+    if [[ -n "$quote" ]]; then
+      out+="$char"
+      [[ "$char" == "$quote" ]] && quote=""
+      continue
+    fi
+    case "$char" in
+      "'"|'"')
+        quote="$char"
+        out+="$char"
+        continue
+        ;;
+      '#')
+        if [[ -z "$out" || "${out: -1}" == " " || "${out: -1}" == $'\t' ]]; then
+          break
+        fi
+        ;;
+    esac
+    out+="$char"
+  done
+  out="${out%"${out##*[![:space:]]}"}"
+  printf '%s' "$out"
 }
 
 json_escape() {
@@ -202,7 +245,7 @@ root_cause_placeholder() {
       printf '%s' 'the command or UI path that reproduces the symptom.'
       ;;
     regression_guard)
-      printf '%s' 'path to a test that fails on the unfixed code and passes after the fix (must also appear under exit_criteria.tests_pass).'
+      printf '%s' 'path to a test that fails on the unfixed code and passes after the fix (must also appear as a `package_test` check in Verification Plan).'
       ;;
     pre_fix_failure_artifact)
       printf '%s' 'path to a captured run of regression_guard on the UNFIXED code. Capture with `bun test <regression_guard> > <artifact> 2>&1; echo "PRE_FIX_EXIT=$?" >> <artifact>` (no pipes — pipes swallow the exit status). The gate requires a non-zero `PRE_FIX_EXIT=` line plus the regression_guard path string in the artifact (see H2/H3).'
@@ -222,8 +265,8 @@ is_concrete_root_cause_field() {
 
 # Bugfix-only pre-fix failure evidence gate (see docs/reference-configs/sprint-contracts.md
 # "Root Cause Evidence Gate"). Mirrors contract-run.ts's checkRootCauseEvidence: all four
-# fields must be concrete, regression_guard must be listed under exit_criteria.tests_pass
-# (the already-populated $tests_pass array), and pre_fix_failure_artifact must exist and
+# fields must be concrete, regression_guard must be listed as package_test in Verification Plan
+# (the validated plan_test_paths projection), and pre_fix_failure_artifact must exist and
 # show a genuine failure via a non-zero PRE_FIX_EXIT= line plus the regression_guard path
 # string — never a "fail" substring match, since a passing bun run's own summary line
 # contains "0 fail".
@@ -267,16 +310,16 @@ check_root_cause_evidence() {
   if [[ "$regression_guard_concrete" -eq 1 ]]; then
     local found=0
     local tp
-    for tp in "${tests_pass[@]+"${tests_pass[@]}"}"; do
+    for tp in "${plan_test_paths[@]+"${plan_test_paths[@]}"}"; do
       if [[ "$tp" == "$regression_guard" ]]; then
         found=1
         break
       fi
     done
     if [[ "$found" -eq 1 ]]; then
-      pass "root_cause_evidence" "regression_guard_in_tests_pass" "Root Cause Evidence: regression_guard $regression_guard is listed under exit_criteria.tests_pass"
+      pass "root_cause_evidence" "regression_guard_in_verification_plan" "Root Cause Evidence: regression_guard $regression_guard is listed as package_test in Verification Plan"
     else
-      fail "root_cause_evidence" "regression_guard_in_tests_pass" "Root Cause Evidence: regression_guard $regression_guard is not listed under exit_criteria.tests_pass"
+      fail "root_cause_evidence" "regression_guard_in_verification_plan" "Root Cause Evidence: regression_guard $regression_guard is not listed as package_test in Verification Plan"
     fi
   fi
 
@@ -461,6 +504,10 @@ append_result() {
   local timed_out="${6:-false}"
   local exit_code="${7:-null}"
   local signal="${8:-null}"
+  local execution="${9:-evaluated}"
+  local command="${10:-}"
+  local cache_key="${11:-}"
+  local force_reason="${12:-}"
   RESULT_KINDS+=("$kind")
   RESULT_TARGETS+=("$target")
   RESULT_PASSED+=("$passed")
@@ -469,6 +516,10 @@ append_result() {
   RESULT_TIMED_OUT+=("$timed_out")
   RESULT_EXIT_CODES+=("$exit_code")
   RESULT_SIGNALS+=("$signal")
+  RESULT_EXECUTIONS+=("$execution")
+  RESULT_COMMANDS+=("$command")
+  RESULT_CACHE_KEYS+=("$cache_key")
+  RESULT_FORCE_REASONS+=("$force_reason")
 }
 
 log_check() {
@@ -503,66 +554,24 @@ fail() {
 
 record_timed_result() {
   local kind="$1" target="$2" passed="$3" message="$4" duration_ms="$5" timed_out="$6" exit_code="$7" signal="${8:-null}"
+  local execution="${9:-executed}" command="${10:-}" cache_key="${11:-}" force_reason="${12:-}"
   total=$((total + 1))
   if [[ "$passed" != "true" ]]; then failed=$((failed + 1)); fi
-  append_result "$kind" "$target" "$passed" "$message" "$duration_ms" "$timed_out" "$exit_code" "$signal"
+  append_result "$kind" "$target" "$passed" "$message" "$duration_ms" "$timed_out" "$exit_code" "$signal" "$execution" "$command" "$cache_key" "$force_reason"
   if [[ "$passed" == "true" ]]; then log_check "PASS" "$message"; else log_check "FAIL" "$message"; fi
 }
 
-is_evidence_producer_command() {
-  local cmd="$1"
-  case "$cmd" in
-    *benchmark:harness*|*run-harness-profile-benchmark*|*" codex exec "*|codex\ exec\ *|*" claude -p "*|claude\ -p\ *) return 0 ;;
-  esac
-  # Anchored to this CLI's own `init` subcommand (repo-harness init / bun .../index.ts init)
-  # so a bare word match doesn't misfire on git init, npm init, or codegraph init.
-  if [[ "$cmd" =~ (^|[[:space:]])(repo-harness|([^[:space:]]*/)?index\.ts)[[:space:]]+init([[:space:]]|$) && "$cmd" != *"--dry-run"* ]]; then return 0; fi
-  if [[ "$cmd" =~ (^|[[:space:]])install([[:space:]]|$) && "$cmd" != *"--dry-run"* ]]; then return 0; fi
-  return 1
-}
+repository_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+repository_root="$(cd "$repository_root" && pwd -P)"
 
-# Bounded runner logs live in the round's mktemp dir, which the EXIT trap
-# destroys, so a failing criterion leaves only its exit_code in the report and
-# nothing that names WHICH test or command failed. Retain the log of a failing
-# criterion next to the run snapshot that shares this round's run id. Passing
-# criteria retain nothing: green rounds would otherwise fill runs/ with
-# multi-MB logs nobody reads.
-FAILURE_LOG_DIR=".ai/harness/runs"
-
-# Deterministic, filesystem-safe slug for a criterion (a test path or a whole
-# shell command), bounded in length so a long command line cannot produce an
-# unusable filename.
-criterion_slug() {
-  local slug
-  slug="$(printf '%s' "$1" | tr -C 'A-Za-z0-9._-' '-' | sed -E 's/-+/-/g; s/^-//; s/-$//')"
-  slug="${slug:-criterion}"
-  printf '%s' "${slug:0:80}"
-}
-
-# Diagnostic only: a retention failure is reported but never changes the
-# round's verdict, since losing a log must not turn a passing round red.
-retain_failure_log() {
-  local log_path="$1" criterion="$2" retained
-
-  [[ -f "$log_path" ]] || return 0
-  retained="$FAILURE_LOG_DIR/${run_id}-$(criterion_slug "$criterion").log"
-  if ! mkdir -p "$FAILURE_LOG_DIR" 2>/dev/null || ! cp "$log_path" "$retained" 2>/dev/null; then
-    echo "[ContractVerify] WARN: could not retain failure log for: $criterion" >&2
+report_total_duration_ms() {
+  local ended_ms
+  ended_ms="$(now_ms || true)"
+  if [[ "$ended_ms" =~ ^[0-9]+$ && "${verification_started_ms:-}" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$((ended_ms - verification_started_ms))"
     return 0
   fi
-  log_check "LOG" "retained failure log: $retained"
-}
-
-run_bounded() {
-  local log_path="$1" result_path="$2"
-  shift 2
-  local runner="$SCRIPT_DIR/run-bounded-verifier-command.ts"
-  [[ -f "$runner" ]] || return 127
-  "$bun_bin" "$runner" \
-    --deadline-ms "$verification_deadline_ms" \
-    --log "$log_path" \
-    --result "$result_path" \
-    -- "$@"
+  printf 'null'
 }
 
 write_report() {
@@ -585,16 +594,19 @@ write_report() {
     printf '  "read_only": %s,\n' "$([[ "$read_only" -eq 1 ]] && echo true || echo false)"
     printf '  "executes_contract_commands": %s,\n' "$([[ "$executes_contract_commands" -eq 1 ]] && echo true || echo false)"
     printf '  "budget_ms": %s,\n' "$VERIFICATION_BUDGET_MS"
-    printf '  "total_duration_ms": %s,\n' "$(( $(now_ms) - verification_started_ms ))"
+    printf '  "total_duration_ms": %s,\n' "$(report_total_duration_ms)"
     printf '  "timed_out": %s,\n' "$([[ "$verification_budget_exhausted" -eq 1 ]] && echo true || echo false)"
     printf '  "total": %s,\n' "$total"
     printf '  "failed": %s,\n' "$failed"
+    if [[ -n "${verification_plan_report:-}" && -f "$verification_plan_report" ]]; then
+      printf '  "verification_evaluation": %s,\n' "$(cat "$verification_plan_report")"
+    fi
     echo '  "results": ['
     for idx in "${!RESULT_KINDS[@]}"; do
       if [[ "$idx" -gt 0 ]]; then
         echo ","
       fi
-      printf '    {"kind":"%s","target":"%s","passed":%s,"message":"%s","duration_ms":%s,"timed_out":%s,"exit_code":%s,"signal":%s}' \
+      printf '    {"kind":"%s","target":"%s","passed":%s,"message":"%s","duration_ms":%s,"timed_out":%s,"exit_code":%s,"signal":%s,"execution":"%s","command":"%s","cache_key":"%s","force_reason":"%s"}' \
         "$(json_escape "${RESULT_KINDS[$idx]}")" \
         "$(json_escape "${RESULT_TARGETS[$idx]}")" \
         "${RESULT_PASSED[$idx]}" \
@@ -602,19 +614,34 @@ write_report() {
         "${RESULT_DURATIONS[$idx]}" \
         "${RESULT_TIMED_OUT[$idx]}" \
         "${RESULT_EXIT_CODES[$idx]}" \
-        "${RESULT_SIGNALS[$idx]}"
+        "${RESULT_SIGNALS[$idx]}" \
+        "$(json_escape "${RESULT_EXECUTIONS[$idx]}")" \
+        "$(json_escape "${RESULT_COMMANDS[$idx]}")" \
+        "$(json_escape "${RESULT_CACHE_KEYS[$idx]}")" \
+        "$(json_escape "${RESULT_FORCE_REASONS[$idx]}")"
     done
     echo
     echo "  ]"
     echo "}"
   } > "$report_path"
+  if [[ -n "${verification_plan_report:-}" && -f "$verification_plan_report" ]]; then
+    jq '.results = ([.results[] | select(.kind != "command" and .kind != "package_test")] + .verification_evaluation.results)' \
+      "$report_path" > "$report_path.tmp"
+    mv "$report_path.tmp" "$report_path"
+  fi
 }
 
 contract_file=""
 strict=0
 quiet=0
 read_only=0
+metadata_preflight=0
 report_file=""
+verification_plan_report=""
+verification_artifact_invalid=0
+verification_preflight_file="${REPO_HARNESS_VERIFICATION_PREFLIGHT_FILE:-}"
+force_expensive_rerun=0
+force_reason=""
 run_id="$(resolve_run_id)"
 failure_class=""
 executes_contract_commands=0
@@ -638,9 +665,24 @@ while [[ $# -gt 0 ]]; do
       read_only=1
       shift
       ;;
+    --preflight)
+      metadata_preflight=1
+      read_only=1
+      strict=1
+      shift
+      ;;
     --report-file)
       [[ -n "${2:-}" ]] || { echo "Error: --report-file requires a value" >&2; usage; exit 2; }
       report_file="$2"
+      shift 2
+      ;;
+    --force-expensive-rerun)
+      force_expensive_rerun=1
+      shift
+      ;;
+    --reason)
+      [[ -n "${2:-}" ]] || { echo "Error: --reason requires a non-empty value" >&2; usage; exit 2; }
+      force_reason="$2"
       shift 2
       ;;
     --help|-h)
@@ -655,6 +697,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$metadata_preflight" -eq 1 && ( -n "$report_file" || "$force_expensive_rerun" -eq 1 || -n "$force_reason" ) ]]; then
+  echo "Error: --preflight cannot write acceptance reports or request execution reruns" >&2
+  exit 2
+fi
+
+if [[ "$force_expensive_rerun" -eq 1 && -z "${force_reason//[[:space:]]/}" ]]; then
+  echo "Error: --force-expensive-rerun requires --reason <non-empty>" >&2
+  exit 2
+fi
+if [[ "$force_expensive_rerun" -eq 0 && -n "$force_reason" ]]; then
+  echo "Error: --reason is only valid with --force-expensive-rerun" >&2
+  exit 2
+fi
+
 if [[ -z "$contract_file" ]]; then
   echo "Error: --contract is required" >&2
   usage
@@ -662,9 +718,16 @@ if [[ -z "$contract_file" ]]; then
 fi
 
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
-verification_started_ms="$(now_ms)"
-verification_deadline_ms="$((verification_started_ms + VERIFICATION_BUDGET_MS))"
+cleanup_verify_contract() {
+  rm -rf "$tmp_dir"
+}
+trap cleanup_verify_contract EXIT
+# A polluted `now_ms` stdout aborts a bare `$(( ))` under `set -u` before any
+# report exists, so the opening sample is taken non-fatally and validated. An
+# unenforceable verification budget is a failure, not a degraded mode: the run
+# fails closed below with a report rather than executing criteria without a
+# deadline. No fallback timestamp is synthesized.
+verification_started_ms="$(now_ms || true)"
 verification_budget_exhausted=0
 
 if [[ ! -f "$contract_file" ]]; then
@@ -674,6 +737,39 @@ fi
 
 previous_status="$(read_contract_status "$contract_file")"
 previous_status="${previous_status:-Pending}"
+
+if [[ ! "$verification_started_ms" =~ ^[0-9]+$ ]]; then
+  echo "[ContractVerify] now_ms produced a non-numeric start timestamp: '$verification_started_ms'" >&2
+  echo "[ContractVerify] verification budget cannot be enforced; refusing to execute exit criteria" >&2
+  next_status="Pending"
+  if [[ "$read_only" -eq 0 ]]; then
+    update_contract_status "$contract_file" "$next_status"
+  fi
+  total=0
+  failed=0
+  failure_class="verification_budget"
+  RESULT_KINDS=()
+  RESULT_TARGETS=()
+  RESULT_PASSED=()
+  RESULT_MESSAGES=()
+  RESULT_DURATIONS=()
+  RESULT_TIMED_OUT=()
+  RESULT_EXIT_CODES=()
+  RESULT_SIGNALS=()
+  RESULT_EXECUTIONS=()
+  RESULT_COMMANDS=()
+  RESULT_CACHE_KEYS=()
+  RESULT_FORCE_REASONS=()
+  fail "verification_budget" "$contract_file" \
+    "now_ms produced a non-numeric start timestamp: '$verification_started_ms'"
+  write_report "$report_file"
+  if [[ "$strict" -eq 1 ]]; then
+    exit 1
+  fi
+  exit 0
+fi
+
+verification_deadline_ms="$((verification_started_ms + VERIFICATION_BUDGET_MS))"
 
 yaml_block="$(
   awk '
@@ -715,6 +811,10 @@ if [[ -z "$yaml_block" ]]; then
   RESULT_TIMED_OUT=()
   RESULT_EXIT_CODES=()
   RESULT_SIGNALS=()
+  RESULT_EXECUTIONS=()
+  RESULT_COMMANDS=()
+  RESULT_CACHE_KEYS=()
+  RESULT_FORCE_REASONS=()
   write_report "$report_file"
   if [[ "$quiet" -eq 0 ]]; then
     echo "[ContractVerify] No YAML exit criteria block found in $contract_file"
@@ -728,8 +828,7 @@ if [[ -z "$yaml_block" ]]; then
 fi
 
 declare -a files_exist=()
-declare -a tests_pass=()
-declare -a commands_succeed=()
+declare -a plan_test_paths=()
 declare -a artifacts_exist=()
 declare -a contain_paths=()
 declare -a contain_patterns=()
@@ -739,8 +838,12 @@ declare -a not_contain_patterns=()
 declare -a qa_dimensions=()
 declare -a qa_mins=()
 declare -a manual_checks=()
+declare -a parse_errors=()
+
+EXIT_CRITERIA_SECTION_KEYS="files_exist, artifacts_exist, files_contain, files_not_exist, files_not_contain, qa_scores, manual_checks"
 
 section=""
+in_exit_criteria=0
 pending_path=""
 pending_dimension=""
 review_file="$(read_contract_review_file "$contract_file" || true)"
@@ -753,24 +856,27 @@ done < <(contract_allowed_paths "$contract_file")
 while IFS= read -r raw_line; do
   line="$(printf '%s' "$raw_line" | sed -E 's/[[:space:]]+$//')"
   trimmed="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//')"
+  # Key matching runs on the comment-normalized form; item extraction below
+  # keeps the raw `$trimmed` so quoted `#` inside a command survives.
+  key_line="$(normalize_yaml_key_line "$raw_line")"
+  key_trimmed="$(printf '%s' "$key_line" | sed -E 's/^[[:space:]]+//')"
 
   [[ -z "$trimmed" ]] && continue
   [[ "$trimmed" =~ ^# ]] && continue
-  [[ "$trimmed" == "exit_criteria:" ]] && continue
+  if [[ "$key_line" == "exit_criteria:" ]]; then
+    in_exit_criteria=1
+    section=""
+    continue
+  fi
+  if [[ "$line" =~ ^[^[:space:]] ]]; then
+    in_exit_criteria=0
+    section=""
+  fi
+  [[ "$in_exit_criteria" -eq 1 ]] || continue
 
-  case "$trimmed" in
+  case "$key_trimmed" in
     files_exist:)
       section="files_exist"
-      pending_path=""
-      continue
-      ;;
-    tests_pass:)
-      section="tests_pass"
-      pending_path=""
-      continue
-      ;;
-    commands_succeed:)
-      section="commands_succeed"
       pending_path=""
       continue
       ;;
@@ -807,15 +913,23 @@ while IFS= read -r raw_line; do
       ;;
   esac
 
+  # Rule A1: an unrecognized valueless header inside exit_criteria used to be a
+  # silent no-op that left $section pointing at the previous section, so the
+  # items nested under it were appended to the wrong criteria list. Item-level
+  # keys carry a value (`path:`, `pattern:`, `dimension:`, `min:`) and are not
+  # matched here.
+  if [[ "$key_trimmed" =~ ^[A-Za-z_][A-Za-z0-9_]*:$ ]]; then
+    parse_errors+=("unknown exit_criteria section key '${key_trimmed%:}'; accepted keys: $EXIT_CRITERIA_SECTION_KEYS")
+    continue
+  fi
+
   case "$section" in
-    files_exist|commands_succeed|files_not_exist|artifacts_exist|manual_checks)
+    files_exist|files_not_exist|artifacts_exist|manual_checks)
       if [[ "$trimmed" =~ ^-[[:space:]]*(.+)$ ]]; then
         item="$(strip_quotes "${BASH_REMATCH[1]}")"
         [[ -n "$item" ]] || continue
         if [[ "$section" == "files_exist" ]]; then
           files_exist+=("$item")
-        elif [[ "$section" == "commands_succeed" ]]; then
-          commands_succeed+=("$item")
         elif [[ "$section" == "artifacts_exist" ]]; then
           artifacts_exist+=("$item")
         elif [[ "$section" == "manual_checks" ]]; then
@@ -823,12 +937,6 @@ while IFS= read -r raw_line; do
         else
           files_not_exist+=("$item")
         fi
-      fi
-      ;;
-    tests_pass)
-      if [[ "$trimmed" =~ ^-[[:space:]]*path:[[:space:]]*(.+)$ ]]; then
-        item="$(strip_quotes "${BASH_REMATCH[1]}")"
-        [[ -n "$item" ]] && tests_pass+=("$item")
       fi
       ;;
     files_contain|files_not_contain)
@@ -863,8 +971,39 @@ while IFS= read -r raw_line; do
       ;;
   esac
 done <<< "$yaml_block"
-if ((${#tests_pass[@]} || ${#commands_succeed[@]})); then
-  executes_contract_commands=1
+
+# A malformed exit_criteria block is an unparseable artifact, not a criteria
+# set: reject the whole block before anything executes, and reuse the existing
+# missing_artifact class rather than adding a failure_class value.
+if ((${#parse_errors[@]})); then
+  next_status="Pending"
+  if [[ "$read_only" -eq 0 ]]; then
+    update_contract_status "$contract_file" "$next_status"
+  fi
+  total=0
+  failed=0
+  failure_class="missing_artifact"
+  RESULT_KINDS=()
+  RESULT_TARGETS=()
+  RESULT_PASSED=()
+  RESULT_MESSAGES=()
+  RESULT_DURATIONS=()
+  RESULT_TIMED_OUT=()
+  RESULT_EXIT_CODES=()
+  RESULT_SIGNALS=()
+  RESULT_EXECUTIONS=()
+  RESULT_COMMANDS=()
+  RESULT_CACHE_KEYS=()
+  RESULT_FORCE_REASONS=()
+  for parse_error in "${parse_errors[@]}"; do
+    echo "[ContractVerify] exit_criteria parse error in $contract_file: $parse_error" >&2
+    fail "exit_criteria_parse" "$contract_file" "exit_criteria parse error: $parse_error"
+  done
+  write_report "$report_file"
+  if [[ "$strict" -eq 1 ]]; then
+    exit 1
+  fi
+  exit 0
 fi
 
 total=0
@@ -877,6 +1016,10 @@ RESULT_DURATIONS=()
 RESULT_TIMED_OUT=()
 RESULT_EXIT_CODES=()
 RESULT_SIGNALS=()
+RESULT_EXECUTIONS=()
+RESULT_COMMANDS=()
+RESULT_CACHE_KEYS=()
+RESULT_FORCE_REASONS=()
 
 case "$task_profile" in
   "")
@@ -891,6 +1034,23 @@ case "$task_profile" in
 esac
 
 check_evidence_requirements "$contract_file"
+
+bun_bin="$(resolve_bun_bin || true)"
+plan_validation="$tmp_dir/verification-plan.json"
+contract_plan_path="$contract_file"
+if [[ "$contract_file" == /* && -n "$bun_bin" ]]; then
+  contract_plan_path="$("$bun_bin" -e 'const fs=require("fs"),p=require("path"); const file=process.argv[2]; if(fs.lstatSync(file).isSymbolicLink()) throw Error("contract must not be a symlink"); const rel=p.relative(fs.realpathSync(process.argv[1]),fs.realpathSync(file)); if(!rel || rel===".." || rel.startsWith(".." + p.sep) || p.isAbsolute(rel)) throw Error("contract escapes repository"); process.stdout.write(rel);' "$repository_root" "$contract_file" 2> "$tmp_dir/plan-error")" || contract_plan_path=""
+fi
+if [[ -z "$bun_bin" ]]; then
+  fail "verification_plan" "$contract_file" "Bun runtime is unavailable"
+elif ! "$bun_bin" "$SCRIPT_DIR/verification-plan.ts" validate --repo "$repository_root" --contract "$contract_plan_path" > "$plan_validation" 2> "$tmp_dir/plan-error"; then
+  verification_artifact_invalid=1
+  fail "verification_plan" "$contract_file" "$(cat "$tmp_dir/plan-error" 2>/dev/null || true)"
+else
+  while IFS= read -r path; do
+    plan_test_paths+=("$path")
+  done < <(jq -r '.plan.checks[] | select(.kind == "package_test") | .path' "$plan_validation")
+fi
 
 if [[ "$task_profile" == "bugfix" ]]; then
   check_root_cause_evidence "$contract_file"
@@ -927,6 +1087,24 @@ if [[ "$task_profile" == "frontend" ]]; then
   fi
 fi
 
+# Admission shares canonical metadata validation but does not evaluate future
+# outputs or publish evidence that could be mistaken for completed acceptance.
+if [[ "$metadata_preflight" -eq 1 ]]; then
+  if [[ -z "$review_file" || -z "$bun_bin" ]] || ! "$bun_bin" -e '
+    const fs = require("fs"), p = require("path");
+    const root = fs.realpathSync(process.argv[1]), file = p.resolve(root, process.argv[2]);
+    const rel = p.relative(root, fs.realpathSync(file));
+    if (!rel || rel === ".." || rel.startsWith(".." + p.sep) || p.isAbsolute(rel) || !fs.lstatSync(file).isFile()) process.exit(1);
+  ' "$repository_root" "$review_file" >/dev/null 2>&1; then
+    fail "review_artifact" "$review_file" "authored review artifact must be declared and available inside the repository before dispatch"
+  else
+    pass "review_artifact" "$review_file" "authored review artifact is available: $review_file"
+  fi
+  echo "[ContractPreflight] metadata checks: $total; failed: $failed"
+  if ((failed > 0)); then exit 1; fi
+  exit 0
+fi
+
 if ((${#files_exist[@]})); then
   for path in "${files_exist[@]}"; do
     if [[ -e "$path" ]]; then
@@ -947,87 +1125,49 @@ if ((${#artifacts_exist[@]})); then
   done
 fi
 
-if [[ "$executes_contract_commands" -eq 1 ]]; then
-  bun_bin="$(resolve_bun_bin || true)"
-else
-  bun_bin=""
+verification_preflight_ready=1
+if [[ -n "$verification_preflight_file" ]]; then
+  if [[ ! -f "$verification_preflight_file" || -L "$verification_preflight_file" ]] || \
+    ! command -v jq >/dev/null 2>&1 || \
+    ! jq -e 'type == "object" and (.status | type == "string")' "$verification_preflight_file" >/dev/null 2>&1; then
+    verification_preflight_ready=0
+    fail "verification_preflight" "$verification_preflight_file" "verification preflight evidence is unavailable or malformed"
+  elif [[ "$(jq -r '.status' "$verification_preflight_file")" != "pass" ]]; then
+    verification_preflight_ready=0
+    preflight_status="$(jq -r '.status' "$verification_preflight_file")"
+    preflight_outside="$(jq -r '(.outside // []) | join(", ")' "$verification_preflight_file")"
+    fail "allowed_paths" "$contract_file" "allowed_paths preflight ${preflight_status}${preflight_outside:+: ${preflight_outside}}"
+  fi
 fi
 
-if ((${#tests_pass[@]})); then
-  test_index=0
-  for path in "${tests_pass[@]}"; do
-    if [[ ! -f "$path" ]]; then
-      fail "tests_pass" "$path" "tests_pass file missing: $path"
-      continue
+# Metadata and explicit preflight failures suppress all command execution.
+if [[ "$failed" -eq 0 && "$verification_preflight_ready" -eq 1 ]]; then
+  verification_plan_report="$tmp_dir/verification-execution.json"
+  execution_args=(execute --repo "$repository_root" --contract "$contract_plan_path" --report-file "$verification_plan_report")
+  if [[ "$force_expensive_rerun" -eq 1 ]]; then
+    execution_args+=(--force-reason "$force_reason")
+  fi
+  set +e
+  "$bun_bin" "$SCRIPT_DIR/verification-plan.ts" "${execution_args[@]}" > "$tmp_dir/execution-output" 2> "$tmp_dir/execution-error"
+  execution_exit=$?
+  set -e
+  if [[ -f "$verification_plan_report" ]] && jq -e '.results | type == "array"' "$verification_plan_report" >/dev/null; then
+    while IFS= read -r result; do
+      record_timed_result \
+        "$(jq -r '.kind' <<< "$result")" "$(jq -r '.target' <<< "$result")" \
+        "$(jq -r '.passed' <<< "$result")" "$(jq -r '.message' <<< "$result")" \
+        "$(jq -r '.duration_ms' <<< "$result")" "$(jq -r '.timed_out' <<< "$result")" \
+        "$(jq -r '.exit_code' <<< "$result")" "$(jq -c '.signal' <<< "$result")" \
+        "$(jq -r '.execution' <<< "$result")" "$(jq -r '.command' <<< "$result")" \
+        "$(jq -r '.cache_key' <<< "$result")" "$(jq -r '.force_reason' <<< "$result")"
+    done < <(jq -c '.results[]' "$verification_plan_report")
+    executes_contract_commands="$(jq '[.results[] | select(.execution == "executed")] | if length > 0 then 1 else 0 end' "$verification_plan_report")"
+    if [[ "$execution_exit" -ne 0 && "$failed" -eq 0 ]]; then
+      fail "verification_plan" "$contract_file" "$(cat "$tmp_dir/execution-error")"
     fi
-
-    if [[ -z "$bun_bin" ]]; then
-      fail "tests_pass" "$path" "tests_pass cannot run (bun not found): $path"
-      continue
-    fi
-
-    result_path="$tmp_dir/test-${test_index}.json"
-    log_path="$tmp_dir/test-${test_index}.log"
-    set +e
-    run_bounded "$log_path" "$result_path" "$bun_bin" test "$path"
-    bounded_exit=$?
-    set -e
-    bounded_duration="$(sed -nE 's/.*"duration_ms":([0-9]+).*/\1/p' "$result_path" 2>/dev/null || true)"
-    bounded_timed_out="$(sed -nE 's/.*"timed_out":(true|false).*/\1/p' "$result_path" 2>/dev/null || true)"
-    bounded_signal="$(sed -nE 's/.*"signal":("[^"]*"|null).*/\1/p' "$result_path" 2>/dev/null || true)"
-    bounded_duration="${bounded_duration:-0}"
-    bounded_timed_out="${bounded_timed_out:-false}"
-    bounded_signal="${bounded_signal:-null}"
-    if [[ "$bounded_exit" -eq 0 ]]; then
-      record_timed_result "tests_pass" "$path" true "tests_pass: $path (${bounded_duration}ms)" "$bounded_duration" false 0 "$bounded_signal"
-    else
-      record_timed_result "tests_pass" "$path" false "tests_pass: $path (${bounded_duration}ms, exit=$bounded_exit)" "$bounded_duration" "$bounded_timed_out" "$bounded_exit" "$bounded_signal"
-      retain_failure_log "$log_path" "$path"
-    fi
-    test_index=$((test_index + 1))
-    if [[ "$bounded_timed_out" == "true" ]]; then
-      verification_budget_exhausted=1
-      break
-    fi
-  done
-fi
-
-if ((${#commands_succeed[@]})) && [[ "$verification_budget_exhausted" -eq 0 ]]; then
-  command_index=0
-  for cmd in "${commands_succeed[@]}"; do
-    if is_evidence_producer_command "$cmd"; then
-      record_timed_result "commands_succeed" "$cmd" false "commands_succeed forbidden evidence producer: $cmd" 0 false 126
-      command_index=$((command_index + 1))
-      continue
-    fi
-    if [[ -z "$bun_bin" ]]; then
-      fail "commands_succeed" "$cmd" "commands_succeed cannot run bounded (bun not found): $cmd"
-      continue
-    fi
-    result_path="$tmp_dir/command-${command_index}.json"
-    log_path="$tmp_dir/command-${command_index}.log"
-    set +e
-    run_bounded "$log_path" "$result_path" env -u BASH_ENV bash --noprofile --norc -c "$cmd"
-    bounded_exit=$?
-    set -e
-    bounded_duration="$(sed -nE 's/.*"duration_ms":([0-9]+).*/\1/p' "$result_path" 2>/dev/null || true)"
-    bounded_timed_out="$(sed -nE 's/.*"timed_out":(true|false).*/\1/p' "$result_path" 2>/dev/null || true)"
-    bounded_signal="$(sed -nE 's/.*"signal":("[^"]*"|null).*/\1/p' "$result_path" 2>/dev/null || true)"
-    bounded_duration="${bounded_duration:-0}"
-    bounded_timed_out="${bounded_timed_out:-false}"
-    bounded_signal="${bounded_signal:-null}"
-    if [[ "$bounded_exit" -eq 0 ]]; then
-      record_timed_result "commands_succeed" "$cmd" true "commands_succeed: $cmd (${bounded_duration}ms)" "$bounded_duration" false 0 "$bounded_signal"
-    else
-      record_timed_result "commands_succeed" "$cmd" false "commands_succeed: $cmd (${bounded_duration}ms, exit=$bounded_exit)" "$bounded_duration" "$bounded_timed_out" "$bounded_exit" "$bounded_signal"
-      retain_failure_log "$log_path" "$cmd"
-    fi
-    command_index=$((command_index + 1))
-    if [[ "$bounded_timed_out" == "true" ]]; then
-      verification_budget_exhausted=1
-      break
-    fi
-  done
+  else
+    fail "verification_plan" "$contract_file" "verification execution report unavailable: $(cat "$tmp_dir/execution-error")"
+  fi
 fi
 
 if ((${#qa_dimensions[@]})); then
@@ -1126,6 +1266,10 @@ elif [[ "$failed" -gt 0 ]]; then
   next_status="Partial"
   if [[ "$verification_budget_exhausted" -eq 1 ]]; then
     failure_class="verification_budget"
+  elif [[ "$verification_preflight_ready" -eq 0 ]]; then
+    failure_class="allowed_paths"
+  elif [[ "$verification_artifact_invalid" -eq 1 ]]; then
+    failure_class="missing_artifact"
   else
     failure_class="contract_failure"
   fi

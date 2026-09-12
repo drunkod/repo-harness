@@ -4,6 +4,9 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { defaultPolicy } from "../src/core/adoption/standard-plan";
+import { parseExternalSourcesPolicy } from "../src/effects/external-sources/policy";
+import { ARCHCTX_REQUIRED_VERSION, readArchitectureProjectionPolicy } from "../src/core/architecture/projection";
+import { REFACTOR_PROVIDER_VERSION, readRefactorPolicy } from "../src/core/refactor/policy";
 
 const ROOT = join(import.meta.dir, "..");
 const REFERENCE_STUB_MARKER = "<!-- repo-harness: reference-config-stub v1 -->";
@@ -111,6 +114,7 @@ describe("create-project-dirs runtime smoke", () => {
       expect(readFileSync(join(cwd, "AGENTS.md"), "utf-8")).toContain("re-derives an authority's semantics");
       const gitignore = readFileSync(join(cwd, ".gitignore"), "utf-8");
       expect(gitignore).toContain("tasks/.current.md.tmp.*");
+      expect(gitignore).toContain("tasks/current.md");
       expect(gitignore).toContain(".claude/.plan-state/");
       expect(gitignore).toContain(".ai/harness/checks/*.latest.json");
       expect(gitignore).toContain(".ai/harness/checks/*.latest.md");
@@ -278,7 +282,9 @@ describe("create-project-dirs runtime smoke", () => {
       expect(workflowContract.artifacts.runtimeFiles).toContain(".ai/harness/triage/inbox.md");
       expect(workflowContract.artifacts.runtimeFiles).not.toContain(".ai/harness/workstreams/events.jsonl");
       expect(workflowContract.artifacts.requiredFiles).toContain("docs/architecture/index.md");
-      expect(workflowContract.artifacts.requiredFiles).toContain("tasks/current.md");
+      expect(workflowContract.artifacts.requiredFiles).not.toContain("tasks/current.md");
+      // ignored local read model: same list membership as .ai/harness/handoff/current.md
+      expect(workflowContract.artifacts.runtimeFiles).toContain("tasks/current.md");
       expect(workflowContract.artifacts.requiredDirectories).toContain("plans/prds");
       expect(workflowContract.artifacts.requiredDirectories).toContain("plans/sprints");
       expect(workflowContract.artifacts.requiredFiles).not.toContain("scripts/refresh-current-status.sh");
@@ -439,7 +445,7 @@ describe("create-project-dirs runtime smoke", () => {
       // above) and src/core/adoption/standard-plan.ts (defaultPolicy, TS-generated) are two
       // independently hardcoded sources for the same agentic_development.routing map. Assert
       // they stay identical so the maps cannot silently diverge again.
-      const tsDefaultPolicy = defaultPolicy("minimal-agentic") as Record<string, any>;
+      const tsDefaultPolicy = defaultPolicy("minimal-agentic", "en") as Record<string, any>;
       expect(policy.agentic_development.routing).toEqual(tsDefaultPolicy.agentic_development.routing);
       expect(policy.agentic_development.due_diligence.levels).toEqual([
         "P1_GLOBAL_ARCHITECTURE",
@@ -460,8 +466,21 @@ describe("create-project-dirs runtime smoke", () => {
       // scripts/ensure-task-workflow.sh (its embedded POLICY_EOF fallback seed).
       const fallbackSeedPolicy = ensureTaskWorkflowSeedPolicy();
       const repoPolicy = JSON.parse(readFileSync(join(ROOT, ".ai/harness/policy.json"), "utf-8"));
+      for (const seeded of [policy, tsDefaultPolicy, fallbackSeedPolicy, repoPolicy]) {
+        expect(seeded.circuit_breakers.semantic_reviews_per_work_package).toBe(1);
+      }
       for (const seeded of [policy, tsDefaultPolicy, fallbackSeedPolicy]) {
         expect(seeded.context.capability_source).toBe("registry");
+      }
+      // External source intake is disabled by absence in every initializer
+      // surface. A generated repository must never infer provider access from
+      // a URL, CLI installation, or registry grant.
+      for (const seeded of [policy, tsDefaultPolicy, fallbackSeedPolicy]) {
+        expect(parseExternalSourcesPolicy(seeded.external_sources).mode).toBe("off");
+      }
+      expect(parseExternalSourcesPolicy(repoPolicy.external_sources).mode).toBe("off");
+      for (const seeded of [policy, tsDefaultPolicy, fallbackSeedPolicy, repoPolicy]) {
+        expect(seeded.development_campaign).toEqual({ version: 1, mode: "off" });
       }
       // This repo cut its own authority over to archcontext nodes (Stage 2); the
       // seeded default above is what a newly generated repo gets, not what this repo
@@ -1024,6 +1043,54 @@ describe("create-project-dirs runtime smoke", () => {
       expect(policy.documentation.profile).toBe("full");
       expect(policy.documentation.reference_source).toBe("user-level-runtime-docs");
       expect(policy.documentation.reference_configs).toContain("spa-day-protocol.md");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, RUNTIME_SMOKE_TIMEOUT_MS);
+
+  /**
+   * `scripts/` ships inside the npm package, so a seeder that hardcodes a stale archctx pin
+   * reaches every generated repository. `readRefactorPolicy` fail-closes on an exact
+   * `provider_version` mismatch, so a stale seed makes the generated repo's own refactor
+   * stages unreadable rather than merely out of date. The guard runs the real seeders and
+   * feeds their output to the real readers instead of comparing version literals, so it
+   * fails on the behavior the consumer actually depends on.
+   */
+  test("every policy seeder emits an archctx pin the runtime readers accept", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "seeder-archctx-pin-parity-"));
+    const libPath = join(ROOT, "scripts/lib/project-init-lib.sh");
+
+    try {
+      const res = spawnSync(
+        "bash",
+        ["-lc", [`source '${libPath}'`, 'pi_write_harness_policy "$PWD" apply'].join("\n")],
+        { cwd, encoding: "utf-8" },
+      );
+      expect(res.status).toBe(0);
+
+      const seeders: Array<[string, Record<string, any>]> = [
+        ["scripts/lib/project-init-lib.sh", JSON.parse(readFileSync(join(cwd, ".ai/harness/policy.json"), "utf-8"))],
+        ["scripts/ensure-task-workflow.sh", ensureTaskWorkflowSeedPolicy()],
+        [".ai/harness/policy.json", JSON.parse(readFileSync(join(ROOT, ".ai/harness/policy.json"), "utf-8"))],
+      ];
+
+      for (const [source, seeded] of seeders) {
+        // readRefactorPolicy takes the whole policy and throws on an exact
+        // provider_version mismatch, so a stale seed surfaces here as the generated
+        // repo's real failure, not as a string diff.
+        const refactor = readRefactorPolicy(seeded);
+        expect([source, refactor.stages.scan.provider_version]).toEqual([source, REFACTOR_PROVIDER_VERSION]);
+        expect([source, refactor.stages.verify.provider_version]).toEqual([source, REFACTOR_PROVIDER_VERSION]);
+
+        // The seeded architecture block defaults to the disabled provider, whose reader
+        // short-circuits before reading projection_version. Flip it to archctx so the
+        // seeded pin is the value the reader actually resolves.
+        const architecture = { ...seeded.architecture, projection_provider: "archctx", projection_apply: "manual" };
+        const projection = readArchitectureProjectionPolicy({ ...seeded, architecture });
+        expect([source, projection.requiredVersion]).toEqual([source, ARCHCTX_REQUIRED_VERSION]);
+      }
+
+      expect(REFACTOR_PROVIDER_VERSION).toBe(ARCHCTX_REQUIRED_VERSION);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

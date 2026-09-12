@@ -97,13 +97,13 @@ function writeManagedHostSurfaces(
 }
 
 describe('install profiles', () => {
-  test('steady-state vocabulary is minimal/full with protocol 2 and exact 7/11 hook projections', () => withHome((env) => {
+  test('steady-state vocabulary is minimal/full with protocol 2 and exact 8/12 hook projections', () => withHome((env) => {
     expect(INSTALL_PROFILES).toEqual(['minimal', 'full']);
     expect(Object.keys(PROFILE_COMPONENTS)).toEqual(['minimal', 'full']);
     const minimal = assertInstallProfile('minimal');
     const full = assertInstallProfile('full');
-    expect(Object.values(buildManagedHooks('codex', minimal)).flat()).toHaveLength(7);
-    expect(Object.values(buildManagedHooks('codex', full)).flat()).toHaveLength(11);
+    expect(Object.values(buildManagedHooks('codex', minimal)).flat()).toHaveLength(8);
+    expect(Object.values(buildManagedHooks('codex', full)).flat()).toHaveLength(12);
     expect(planInstallProfile(full, null, env).protocol).toBe(2);
   }));
 
@@ -453,6 +453,14 @@ describe('install profiles', () => {
     writeFileSync(adapter, JSON.stringify(config));
     expect(installedProfileStatus(applied.state, env).drift.status).toBe('consistent');
 
+    config.hooks.SessionStart[0].hooks.push({
+      type: 'command',
+      command: 'echo user-owned-sibling',
+      timeout: 30,
+    });
+    writeFileSync(adapter, JSON.stringify(config));
+    expect(installedProfileStatus(applied.state, env).drift.status).toBe('consistent');
+
     config.hooks.SessionStart[0].hooks[0].command = ': repo-harness-managed-hook-v1; changed';
     writeFileSync(adapter, JSON.stringify(config));
     expect(installedProfileStatus(applied.state, env).drift.surface_drift).toContain(adapter);
@@ -529,8 +537,74 @@ describe('install profiles', () => {
         expect(paths).toContain(join(env.HOME!, host, 'skills', facade));
       }
       expect(paths).toContain(join(env.HOME!, host, 'skills', 'reverse-skill-router'));
+      expect(paths).toContain(join(env.HOME!, host, 'skills', 'obsidian-markdown'));
+      expect(paths).toContain(join(env.HOME!, host, 'skills', 'obsidian-cli'));
     }
     expect(paths).toContain(join(env.HOME!, '.agents', 'skills', 'reverse-skill-router'));
+    expect(paths).toContain(join(env.HOME!, '.agents', 'skills', 'obsidian-markdown'));
+    expect(paths).toContain(join(env.HOME!, '.agents', 'skills', 'obsidian-cli'));
+  }));
+
+  test('explicit Obsidian companion projections become transaction-owned receipts and roll back atomically', () => withHome((env) => {
+    writeManagedHostSurfaces(env, 'minimal');
+    const transaction = beginInstallHostTransaction(installProfileHostMutationPaths(env), env);
+    const receiptPaths: string[] = [];
+    for (const skill of ['obsidian-markdown', 'obsidian-cli']) {
+      const staging = join(env.HOME!, '.agents', 'skills', skill);
+      writePath(join(staging, 'SKILL.md'), `# ${skill}\n`);
+      receiptPaths.push(staging);
+      for (const host of ['.codex', '.claude']) {
+        const projected = join(env.HOME!, host, 'skills', skill);
+        mkdirSync(join(projected, '..'), { recursive: true });
+        symlinkSync(staging, projected, 'dir');
+        receiptPaths.push(projected);
+      }
+    }
+
+    const installed = applyInstallProfile(
+      'minimal',
+      env,
+      new Date('2026-08-21T00:00:00.000Z'),
+      transaction,
+    ).state;
+    for (const path of receiptPaths) {
+      expect(installed.ownership_manifest.some((surface) => (
+        surface.path === path && surface.components.includes('adaptive-workflow')
+      ))).toBe(true);
+    }
+    expect(installedProfileStatus(installed, env).drift.status).toBe('consistent');
+
+    writeFileSync(join(env.HOME!, '.agents', 'skills', 'obsidian-cli', 'SKILL.md'), '# drift\n');
+    expect(installedProfileStatus(installed, env).drift.surface_drift)
+      .toContain(join(env.HOME!, '.agents', 'skills', 'obsidian-cli'));
+
+    rollbackInstallHostTransaction(transaction);
+    for (const path of receiptPaths) expect(existsSync(path)).toBe(false);
+    expect(readInstalledProfile(env)).toBeNull();
+  }));
+
+  test('managed Obsidian refresh recaptures the changed tree hash in the existing install-state receipt', () => withHome((env) => {
+    writeManagedHostSurfaces(env, 'minimal');
+    const staging = join(env.HOME!, '.agents', 'skills', 'obsidian-cli');
+    const projected = join(env.HOME!, '.codex', 'skills', 'obsidian-cli');
+
+    const first = beginInstallHostTransaction(installProfileHostMutationPaths(env), env);
+    writePath(join(staging, 'SKILL.md'), '# old\n');
+    mkdirSync(join(projected, '..'), { recursive: true });
+    symlinkSync(staging, projected, 'dir');
+    const initial = applyInstallProfile('minimal', env, new Date('2026-08-21T00:00:00.000Z'), first).state;
+    commitInstallHostTransaction(first);
+    const before = initial.ownership_manifest.find((surface) => surface.path === staging)?.content_hash;
+    expect(before).toBeDefined();
+
+    const second = beginInstallHostTransaction(installProfileHostMutationPaths(env), env);
+    writeFileSync(join(staging, 'SKILL.md'), '# refreshed\n');
+    const refreshed = applyInstallProfile('minimal', env, new Date('2026-08-21T00:01:00.000Z'), second).state;
+    commitInstallHostTransaction(second);
+    const after = refreshed.ownership_manifest.find((surface) => surface.path === staging)?.content_hash;
+    expect(after).toBeDefined();
+    expect(after).not.toBe(before);
+    expect(installedProfileStatus(refreshed, env).drift.status).toBe('consistent');
   }));
 
   test('host transaction restores prior bytes and removes later mutations', () => withHome((env) => {
@@ -765,11 +839,34 @@ describe('install profiles', () => {
     expect(rollbackInstallProfile(env).profile).toBe('minimal');
   }));
 
-  test('Minimal CodeGraph stays conditional while Full enables it', () => withHome((env) => {
+  test('CodeGraph enablement is explicit: full profile or policy opt-in, never repo size', () => withHome((env) => {
     const cwd = env.HOME!;
     expect(profileEnablesCodegraph('minimal', cwd)).toBe(false);
     expect(profileEnablesCodegraph('full', cwd)).toBe(true);
-  }));
+
+    // Explicit local policy opt-in enables CodeGraph even on the minimal profile.
+    const optIn = mkdtempSync(join(tmpdir(), 'repo-harness-codegraph-optin-'));
+    try {
+      writePath(join(optIn, '.ai/harness/policy.json'), JSON.stringify({ tooling: { codegraph: { enabled: true } } }));
+      expect(profileEnablesCodegraph('minimal', optIn)).toBe(true);
+    } finally {
+      rmSync(optIn, { recursive: true, force: true });
+    }
+
+    // A large tracked-file count is not an opt-in signal: no policy entry, no CodeGraph.
+    const large = mkdtempSync(join(tmpdir(), 'repo-harness-codegraph-large-'));
+    try {
+      expect(spawnSync('git', ['init', '-q'], { cwd: large, encoding: 'utf-8' }).status).toBe(0);
+      mkdirSync(join(large, 'src'), { recursive: true });
+      for (let i = 0; i < 2_100; i += 1) writeFileSync(join(large, 'src', `f${i}.ts`), 'export const x = 1;\n');
+      expect(spawnSync('git', ['add', '-A'], { cwd: large, encoding: 'utf-8' }).status).toBe(0);
+      const tracked = spawnSync('git', ['ls-files'], { cwd: large, encoding: 'utf-8' });
+      expect(tracked.stdout.split('\n').filter(Boolean).length).toBeGreaterThanOrEqual(2_000);
+      expect(profileEnablesCodegraph('minimal', large)).toBe(false);
+    } finally {
+      rmSync(large, { recursive: true, force: true });
+    }
+  }), 30_000);
 
   test('CLI dry-run and state query expose machine-readable profile authority', () => withHome((env) => {
     const dryRun = spawnSync(process.execPath, [CLI, 'install', '--profile', 'full', '--dry-run', '--json'], {

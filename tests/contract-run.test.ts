@@ -1,3 +1,4 @@
+import { campaignAttemptResultInstruction } from "../scripts/contract-run";
 import { describe, expect, test } from "bun:test";
 import {
   chmodSync,
@@ -15,6 +16,35 @@ import { ROOT_CAUSE_FIXTURE_CASES } from "./fixtures/root-cause/expected-results
 
 const ROOT = join(import.meta.dir, "..");
 
+(process.platform === 'win32' ? test.skip : test)('a killed supervisor cannot reuse an earlier quiescence receipt from the same output directory', () => {
+  const repo = makeRepo('contract-stale-supervisor-');
+  try {
+    writePilotContract(repo);
+    const out = '.ai/harness/runs/stale-supervisor';
+    mkdirSync(join(repo, out), { recursive: true });
+    writeFileSync(join(repo, out, 'worker.bounded-result.json'), JSON.stringify({ exit_code: 0, timed_out: false, process_group_quiescence: { scope: 'posix_process_group', state: 'quiescent' } }));
+    const result = runContractRun(repo, ['run', '--repo', repo, '--contract', 'tasks/contracts/pilot.contract.md', '--worker-command', 'kill -KILL "$PPID"', '--verifier-command', 'touch verifier-started', '--out', out, '--json']);
+    expect(result.status, result.stderr + result.stdout).toBe(1);
+    const manifest = JSON.parse(result.stdout);
+    expect(manifest.children[0].process_group_quiescence).toEqual({ scope: 'unsupported', state: 'unknown' });
+    expect(existsSync(join(repo, 'verifier-started'))).toBe(false);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+}, 30_000);
+
+for (const stream of ['stdout', 'stderr']) test(`contract-run rejects reused ${stream} FIFO without blocking its caller`, () => {
+  const repo = makeRepo('contract-fifo-');
+  try {
+    writePilotContract(repo);
+    const out = '.ai/harness/runs/fifo'; mkdirSync(join(repo, out), { recursive: true });
+    expect(spawnSync('mkfifo', [join(repo, out, `worker.${stream}.log`)]).status).toBe(0);
+    const run = spawnSync(process.execPath, ['scripts/contract-run.ts', 'run', '--repo', repo,
+      '--contract', 'tasks/contracts/pilot.contract.md', '--worker-command', 'true', '--verifier-command', 'touch verifier-started',
+      '--out', out, '--json'], { cwd: ROOT, encoding: 'utf8', timeout: 3000 });
+    expect((run.error as NodeJS.ErrnoException | undefined)?.code).not.toBe('ETIMEDOUT');
+    expect(run.status).not.toBe(0); expect(existsSync(join(repo, 'verifier-started'))).toBe(false);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+}, 5000);
+
 function makeRepo(prefix = "contract-run-"): string {
   const repo = mkdtempSync(join(tmpdir(), prefix));
   mkdirSync(join(repo, "plans"), { recursive: true });
@@ -26,6 +56,20 @@ function makeRepo(prefix = "contract-run-"): string {
   writeFileSync(join(repo, "plans/plan.md"), "# Plan\n");
   writeFileSync(join(repo, "tasks/notes/pilot.notes.md"), "# Notes\n");
   return repo;
+}
+
+function initGitRepo(repo: string): void {
+  writeFileSync(join(repo, ".gitignore"), ".ai/harness/runs/\n.ai/harness/checks/\n.ai/harness/evidence/\n");
+  for (const args of [
+    ["init", "-b", "main"],
+    ["config", "user.name", "Contract Run Fixture"],
+    ["config", "user.email", "contract-run@example.com"],
+    ["add", "."],
+    ["commit", "-m", "fixture"],
+  ]) {
+    const result = spawnSync("git", args, { cwd: repo, encoding: "utf-8" });
+    expect(result.status, result.stderr).toBe(0);
+  }
 }
 
 function writePilotContract(
@@ -121,8 +165,6 @@ function writePilotContract(
       "exit_criteria:",
       "  files_exist:",
       "    - src/pilot.txt",
-      "  commands_succeed:",
-      "    - test -f src/pilot.txt",
       "  files_contain:",
       "    - path: src/pilot.txt",
       "      pattern: worker-output",
@@ -131,6 +173,25 @@ function writePilotContract(
       "      min: 7",
       "  manual_checks:",
       '    - "Verifier observed src/pilot.txt contains worker-output"',
+      "```",
+      "",
+      "## Verification Plan",
+      "",
+      "```json",
+      JSON.stringify({
+        protocol: 1,
+        checks: [{
+          id: "pilot-file-present",
+          kind: "command",
+          command: "test -f src/pilot.txt",
+          cwd: ".",
+          phase: "verification",
+          cost: "normal",
+          evidence_policy: "current_exact",
+          necessity: "The worker must create the file that the non-executable exit criteria inspect.",
+          inputs: { env: [] },
+        }],
+      }, null, 2),
       "```",
       "",
     ].join("\n"),
@@ -317,12 +378,19 @@ describe("contract-run helper", () => {
       expect(workerPromptContent).toContain("Permission scope: inherit_allowed_paths");
       expect(workerPromptContent).toContain("## Why this task matters");
       expect(workerPromptContent).toContain("## Before you finish (mandatory self-verification)");
+      expect(workerPromptContent).toContain("repo-harness run verify-sprint --prepare-acceptance");
+      expect(workerPromptContent).toContain("Verification Plan");
+      expect(workerPromptContent).toContain("do not rerun the old full-suite criterion merely because the subject changed");
+      expect(workerPromptContent).not.toContain("Run every command listed under exit_criteria.commands_succeed");
       expect(workerPromptContent).toContain("## Record what you learned");
+      expect(workerPromptContent).toContain("If the Notes file is outside Writable paths, report those observations in your final response for the parent to record; do not write that file.");
       expect(workerPromptContent).toContain("## Stop / escalate");
       expect(workerPromptContent).not.toContain("Exemplar:");
       const verifierPromptContent = readFileSync(join(repo, ".ai/harness/runs/dry-run/verifier-prompt.md"), "utf-8");
       expect(verifierPromptContent).toContain("## Intent (context only)");
       expect(verifierPromptContent).toContain("Score PASS or FAIL strictly against the Exit Criteria");
+      expect(verifierPromptContent).toContain("subject-bound");
+      expect(verifierPromptContent).not.toContain("re-run any item");
       expect(existsSync(join(repo, "src/pilot.txt"))).toBe(false);
     } finally {
       rmSync(repo, { recursive: true, force: true });
@@ -443,6 +511,8 @@ describe("contract-run helper", () => {
       expect((manifest.children as unknown[])).toHaveLength(2);
       expect(readFileSync(join(repo, "src/pilot.txt"), "utf-8")).toContain("worker-output");
       expect(existsSync(join(repo, "tasks/reviews/pilot.review.md"))).toBe(true);
+
+      initGitRepo(repo);
 
       const verifyReport = ".ai/harness/runs/pilot/verify-report.json";
       const verify = spawnSync(
@@ -1410,4 +1480,17 @@ describe("contract-run helper", () => {
       }
     }, 30_000);
   });
+});
+
+
+test("campaign result output authority names only the current runner-owned file", () => {
+  for (const path of [".ai/harness/runs/one/campaign-attempt-result.json", ".ai/harness/runs/two/campaign-attempt-result.json"]) {
+    const instruction = campaignAttemptResultInstruction(path);
+    expect(instruction).toContain(`explicitly authorizes writing only ${path},`);
+    expect(instruction).toContain("Even when blocked, write this file before returning");
+    expect(instruction).toContain("Select exactly one outcome supported by observed evidence");
+    expect(instruction).toContain("This authorizes no other file outside Writable paths");
+    expect(instruction).not.toContain("tasks/notes/");
+    expect(instruction.match(/campaign-attempt-result\.json/g)).toHaveLength(1);
+  }
 });

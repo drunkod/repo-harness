@@ -1,3 +1,4 @@
+import { readOracleSessionEvidence, readOracleNetworkCapture, readOracleConversationCapture, type OracleSessionEvidence } from './oracle-session-evidence';
 import { spawn, spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
@@ -5,7 +6,7 @@ import { tmpdir } from 'os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import type { BrowserConsultInput, BrowserImportedArtifact, PromptBundle } from './types';
 
-export interface OracleProviderResult {
+export interface OracleProviderResult extends OracleSessionEvidence {
   status: 'completed' | 'recoverable' | 'failed';
   output: string;
   conversationUrl?: string;
@@ -40,8 +41,12 @@ export interface OracleCapabilities {
   sessionFollowup: boolean;
   browserArchive: boolean;
   browserModelStrategy: boolean;
-  browserCookiePath: boolean;
+  copyProfile: boolean;
+  browserChromeProfile: boolean;
   browserThinkingTime: boolean;
+  writeSession: boolean;
+  networkEvidence: boolean;
+  conversationEvidence: boolean;
   chatgptUrl: boolean;
   heartbeat: boolean;
 }
@@ -49,10 +54,27 @@ export interface OracleCapabilities {
 export interface OracleProbe {
   binary: string;
   version?: string;
+  /** True only when the binary reports the one Oracle release this transport supports. */
+  versionCompatible: boolean;
   /** True when the binary responded to a `--help`/`--version` probe at all. */
   nodeCompatible: boolean;
   capabilities: OracleCapabilities;
   helpText: string;
+}
+
+/**
+ * Oracle's browser command/output contract is release-specific. Keep this as the
+ * single version authority for both consultation and browser-doctor diagnostics.
+ */
+export const REQUIRED_ORACLE_VERSION = '0.20.0';
+
+const ORACLE_TERM_GRACE_MS = 5_000;
+
+/** Verbatim Oracle refusal when a detached worker still holds the same prompt. */
+const ORACLE_SESSION_ALREADY_RUNNING_MARKER = 'A session with the same prompt is already running';
+
+export function supportsBrowserAppPreselect(helpText: string): boolean {
+  return helpText.includes('--browser-app');
 }
 
 /**
@@ -111,7 +133,7 @@ export function resolveOracleBin(input: Pick<BrowserConsultInput, 'repoRoot' | '
   };
 }
 
-function detectCapabilities(helpText: string, browserThinkingTime: boolean): OracleCapabilities {
+function detectCapabilities(helpText: string, runtimeFlagsAccepted: boolean): OracleCapabilities {
   const has = (flag: string) => helpText.includes(flag);
   return {
     browserEngine: has('--engine'),
@@ -120,8 +142,17 @@ function detectCapabilities(helpText: string, browserThinkingTime: boolean): Ora
     sessionFollowup: has('--followup'),
     browserArchive: has('--browser-archive'),
     browserModelStrategy: has('--browser-model-strategy'),
-    browserCookiePath: has('--browser-cookie-path'),
-    browserThinkingTime,
+    // Oracle hides --browser-chrome-profile from `--help`; probeOracle folds
+    // `--debug-help` into the same text so both transport flags are visible.
+    copyProfile: has('--copy-profile'),
+    browserChromeProfile: has('--browser-chrome-profile'),
+    // Session-descriptor, evidence and thinking-time flags are only observable
+    // through an argument-parse probe: the repo-harness Oracle fork accepts them,
+    // upstream rejects them, and neither reliably lists them in `--help`.
+    browserThinkingTime: runtimeFlagsAccepted,
+    writeSession: runtimeFlagsAccepted,
+    networkEvidence: runtimeFlagsAccepted,
+    conversationEvidence: runtimeFlagsAccepted,
     chatgptUrl: has('--chatgpt-url'),
     heartbeat: has('--heartbeat'),
   };
@@ -129,6 +160,27 @@ function detectCapabilities(helpText: string, browserThinkingTime: boolean): Ora
 
 function detectVersion(text: string): string | undefined {
   return text.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/)?.[0];
+}
+
+export function validateOracleVersion(version: string | undefined): {
+  compatible: boolean;
+  error?: { code: 'ORACLE_VERSION_UNSUPPORTED'; message: string; recovery: string };
+} {
+  if (version === REQUIRED_ORACLE_VERSION) return { compatible: true };
+  const detected = version ? `detected ${version}` : 'could not detect a version';
+  return {
+    compatible: false,
+    error: {
+      code: 'ORACLE_VERSION_UNSUPPORTED',
+      message: `oracle ${detected}; repo-harness requires exactly ${REQUIRED_ORACLE_VERSION}`,
+      recovery: `Install or select @steipete/oracle@${REQUIRED_ORACLE_VERSION}, then rerun browser-doctor before a real consult.`,
+    },
+  };
+}
+
+function probeOracleVersion(binary: string): string | undefined {
+  const versionRun = spawnSync(binary, ['--version'], { encoding: 'utf-8', timeout: 30_000, maxBuffer: 1024 * 1024 });
+  return detectVersion(`${versionRun.stdout ?? ''}\n${versionRun.stderr ?? ''}`);
 }
 
 /**
@@ -140,32 +192,72 @@ export function probeOracle(binary: string): OracleProbe {
   const help = spawnSync(binary, ['--help'], { encoding: 'utf-8', timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
   const debugHelp = spawnSync(binary, ['--debug-help'], { encoding: 'utf-8', timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
   const helpText = `${help.stdout ?? ''}\n${help.stderr ?? ''}\n${debugHelp.stdout ?? ''}\n${debugHelp.stderr ?? ''}`;
-  const versionRun = spawnSync(binary, ['--version'], { encoding: 'utf-8', timeout: 30_000, maxBuffer: 1024 * 1024 });
-  const versionText = `${versionRun.stdout ?? ''}\n${versionRun.stderr ?? ''}`;
+  // `--version` is the compatibility authority. A help banner is not a valid
+  // substitute: it can omit or embed unrelated version-like strings.
+  const version = probeOracleVersion(binary);
   const ranOk = !help.error && (help.status === 0 || helpText.trim().length > 0);
-  const browserThinkingTime = probeBrowserThinkingTime(binary);
+  const runtimeFlagsAccepted = probeRuntimeFlagAcceptance(binary);
   return {
     binary,
-    version: detectVersion(versionText) ?? detectVersion(helpText),
+    version,
+    versionCompatible: validateOracleVersion(version).compatible,
     nodeCompatible: ranOk,
-    capabilities: detectCapabilities(helpText, browserThinkingTime),
+    capabilities: detectCapabilities(helpText, runtimeFlagsAccepted),
     helpText,
   };
 }
 
-function probeBrowserThinkingTime(binary: string): boolean {
+/**
+ * Runtime flags whose acceptance cannot be read from `--help`. The probe below
+ * sends the exact argument vector `buildOracleCommand` emits, so this list only
+ * maps a flag to the capability it reports; the flags themselves are never
+ * hand-authored a second time.
+ */
+export const ORACLE_RUNTIME_PROBE_CAPABILITIES: ReadonlyArray<{
+  flag: string;
+  capability: 'writeSession' | 'networkEvidence' | 'conversationEvidence' | 'browserThinkingTime';
+}> = [
+  { flag: '--write-session', capability: 'writeSession' },
+  { flag: '--write-network-evidence', capability: 'networkEvidence' },
+  { flag: '--write-conversation-evidence', capability: 'conversationEvidence' },
+  { flag: '--browser-thinking-time', capability: 'browserThinkingTime' },
+];
+
+/** Shared recovery for a resolved oracle that lacks the repo-harness fork flags. */
+export const ORACLE_FORK_FLAG_RECOVERY = 'The resolved oracle lacks the repo-harness fork flags (session descriptor and evidence capture). Point repo-harness at the fork build with --oracle-bin <path-to-fork-oracle> or REPO_HARNESS_ORACLE_BIN=<path-to-fork-oracle>, then rerun repo-harness chatgpt browser-doctor --provider oracle --json.';
+
+/**
+ * Build the probe argument vector from `buildOracleCommand` itself so the probed
+ * surface cannot drift from the surface the real consult sends. A mapped flag that
+ * the builder stopped emitting is a source-of-truth break, not a probe result.
+ */
+export function buildRuntimeAcceptanceProbeArgs(
+  probeDir: string,
+  probeCapabilities: typeof ORACLE_RUNTIME_PROBE_CAPABILITIES = ORACLE_RUNTIME_PROBE_CAPABILITIES,
+): string[] {
+  const args = buildOracleCommand(
+    { repoRoot: probeDir, prompt: 'repo-harness parser probe', thinking: 'heavy' },
+    undefined,
+    join(probeDir, 'session.json'),
+    join(probeDir, 'network.jsonl'),
+    join(probeDir, 'conversation.json'),
+  );
+  const unmapped = probeCapabilities.filter(({ flag }) => !args.includes(flag)).map(({ flag }) => flag);
+  if (unmapped.length > 0) {
+    throw new Error(`oracle runtime probe is out of sync with buildOracleCommand: ${unmapped.join(', ')} is no longer emitted`);
+  }
+  return [...args, '--dry-run', 'json'];
+}
+
+/**
+ * Probe whether the resolved binary accepts every runtime flag the real consult
+ * sends. Oracle's `--dry-run json` preview is side-effect free, so a rejected flag
+ * surfaces at argument parsing instead of mid-consult.
+ */
+function probeRuntimeFlagAcceptance(binary: string): boolean {
   const probeDir = mkdtempSync(join(tmpdir(), 'repo-harness-oracle-probe-'));
   try {
-    const result = spawnSync(binary, [
-      '--engine',
-      'browser',
-      '--browser-thinking-time',
-      'heavy',
-      '--dry-run',
-      'json',
-      '--prompt',
-      'repo-harness parser probe',
-    ], {
+    const result = spawnSync(binary, buildRuntimeAcceptanceProbeArgs(probeDir), {
       cwd: probeDir,
       env: buildOracleEnv(probeDir),
       encoding: 'utf-8',
@@ -174,7 +266,8 @@ function probeBrowserThinkingTime(binary: string): boolean {
     });
     const text = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
     return !result.error && result.status === 0 && !/unknown option|error: option/i.test(text);
-  } catch (_error) {
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('oracle runtime probe is out of sync')) throw error;
     return false;
   } finally {
     rmSync(probeDir, { recursive: true, force: true });
@@ -187,17 +280,23 @@ function probeBrowserThinkingTime(binary: string): boolean {
  * is oracle's authoritative `--write-output` answer file (an internal managed path,
  * distinct from the user's repo-relative `--write-output` copy-out).
  */
-export function buildOracleCommand(input: BrowserConsultInput, answerPath?: string): string[] {
+export function buildOracleCommand(input: BrowserConsultInput, answerPath?: string, sessionPath?: string, networkPath?: string, historyPath?: string): string[] {
   const args = ['--engine', 'browser', '--browser-archive', 'never', '--prompt', input.prompt];
   if (answerPath) args.push('--write-output', answerPath);
+  if (sessionPath) args.push('--write-session', sessionPath);
+  if (networkPath) args.push('--wait', '--write-network-evidence', networkPath);
+  if (historyPath) args.push('--wait', '--write-conversation-evidence', historyPath);
   if (input.providerSessionId) args.push('--followup', input.providerSessionId);
   if (input.model) args.push('--model', input.model, '--browser-model-strategy', 'select');
   else args.push('--browser-model-strategy', 'current');
   if (input.thinking) args.push('--browser-thinking-time', input.thinking);
+  if (input.chatgptApp) args.push('--browser-app', input.chatgptApp);
   if (input.chatgptUrl) args.push('--chatgpt-url', input.chatgptUrl);
   args.push('--heartbeat', String(input.heartbeatSeconds ?? 59));
-  const cookiePath = resolveOracleCookiePath(input);
-  if (cookiePath) args.push('--browser-cookie-path', cookiePath);
+  if (input.profileDir) {
+    args.push('--copy-profile', input.profileDir);
+    if (input.profileDirectory) args.push('--browser-chrome-profile', input.profileDirectory);
+  }
   for (const file of input.files ?? []) args.push('--file', resolveOracleFilePath(input, file.path));
   for (const followup of input.followups ?? []) args.push('--browser-follow-up', followup);
   return args;
@@ -236,16 +335,45 @@ function stageScanBoundOracleFiles(input: BrowserConsultInput, bundle: PromptBun
   }
 }
 
-export function resolveOracleCookiePath(input: Pick<BrowserConsultInput, 'profileDir' | 'profileDirectory'>): string | undefined {
+/**
+ * Validate the bound Chrome profile against what `--copy-profile` needs: a real
+ * Chrome user data directory, its `Local State`, and an explicitly named profile
+ * subdirectory. Without the explicit name Oracle would fall back to `Local
+ * State`'s `last_used` profile, which is not deterministic, so this fails closed
+ * instead of guessing.
+ */
+export function validateOracleProfileBinding(
+  input: Pick<BrowserConsultInput, 'profileDir' | 'profileDirectory'>,
+): { message: string; recovery: string } | undefined {
   if (!input.profileDir) return undefined;
-  const selectedProfilePath = input.profileDirectory
-    ? join(input.profileDir, input.profileDirectory)
-    : input.profileDir;
-  const candidates = [
-    join(selectedProfilePath, 'Network', 'Cookies'),
-    join(selectedProfilePath, 'Cookies'),
-  ];
-  return candidates.find((candidate) => regularFileExists(candidate));
+  const recovery = 'Re-run browser-setup against the signed-in Chrome user data directory with an explicit --profile-directory, or omit the profile binding only if you intentionally want Oracle to use its own browser session.';
+  if (!directoryExists(input.profileDir)) {
+    return { message: `Chrome user data directory for the selected ChatGPT profile is not a directory: ${input.profileDir}`, recovery };
+  }
+  const localState = join(input.profileDir, 'Local State');
+  if (!regularFileExists(localState)) {
+    return { message: `Chrome user data directory has no readable Local State file: ${localState}`, recovery };
+  }
+  if (!input.profileDirectory) {
+    return {
+      message: `ChatGPT profile binding for ${input.profileDir} names no Chrome profile directory; Oracle would pick the Local State last_used profile instead`,
+      recovery,
+    };
+  }
+  const selectedProfilePath = join(input.profileDir, input.profileDirectory);
+  if (!directoryExists(selectedProfilePath)) {
+    return { message: `Selected Chrome profile directory does not exist: ${selectedProfilePath}`, recovery };
+  }
+  return undefined;
+}
+
+function directoryExists(path: string): boolean {
+  try {
+    if (lstatSync(path).isSymbolicLink()) return false;
+    return statSync(path).isDirectory();
+  } catch (_error) {
+    return false;
+  }
 }
 
 function regularFileExists(path: string): boolean {
@@ -277,16 +405,32 @@ function extractConversationUrl(text: string): string | undefined {
   return text.match(/https:\/\/chatgpt\.com\/c\/[^\s)]+/)?.[0];
 }
 
-function extractProviderSessionId(text: string): string | undefined {
-  return text.match(/\b(?:oracle[_ -]?session|session(?: id)?)[:=]\s*([A-Za-z0-9_.:-]+)/i)?.[1];
-}
-
 interface OracleProcessResult {
   stdout: string;
   stderr: string;
   status: number | null;
   signal: NodeJS.Signals | null;
   error?: Error;
+}
+
+function oracleProcessTreeSupportError(): { code: 'ORACLE_PROCESS_TREE_UNSUPPORTED'; message: string; recovery: string } | undefined {
+  if (process.platform !== 'win32') return undefined;
+  return {
+    code: 'ORACLE_PROCESS_TREE_UNSUPPORTED',
+    message: 'Oracle browser consults are unsupported on win32 because repo-harness cannot guarantee bounded process-tree termination.',
+    recovery: 'Run the Oracle consult from a POSIX host where repo-harness can supervise the dedicated Oracle process group.',
+  };
+}
+
+function signalOracleProcessGroup(pid: number | undefined, signal: NodeJS.Signals): Error | undefined {
+  if (!pid) return new Error('oracle process did not report a PID for process-group supervision');
+  try {
+    process.kill(-pid, signal);
+    return undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return undefined;
+    return error instanceof Error ? error : new Error(String(error));
+  }
 }
 
 function runOracleProcess(
@@ -300,40 +444,81 @@ function runOracleProcess(
     let spawnError: Error | undefined;
     let timedOut = false;
     let killTimer: NodeJS.Timeout | undefined;
+    let settled = false;
     const child = spawn(binary, args, {
       cwd: opts.cwd,
       env: opts.env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // A fresh POSIX process group lets a timeout terminate Oracle wrappers and
+      // their descendants together instead of leaving inherited pipes open.
+      detached: true,
     });
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      killTimer = setTimeout(() => child.kill('SIGKILL'), 5_000);
-    }, opts.timeoutMs);
     const collect = (chunk: Buffer | string, stream: 'stdout' | 'stderr') => {
       const text = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
       if (stream === 'stdout') stdout += text;
       else stderr += text;
       process.stderr.write(text);
     };
-    child.stdout?.setEncoding('utf-8');
-    child.stderr?.setEncoding('utf-8');
-    child.stdout?.on('data', (chunk) => collect(chunk, 'stdout'));
-    child.stderr?.on('data', (chunk) => collect(chunk, 'stderr'));
-    child.on('error', (error) => {
-      spawnError = error;
-    });
-    child.on('close', (status, signal) => {
+    const stopCollecting = () => {
+      child.stdout?.removeListener('data', onStdout);
+      child.stderr?.removeListener('data', onStderr);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    };
+    const settle = (result: OracleProcessResult, destroyPipes = false) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
-      resolveResult({
+      child.removeListener('error', onError);
+      child.removeListener('close', onClose);
+      if (destroyPipes) stopCollecting();
+      resolveResult(result);
+    };
+    const onStdout = (chunk: Buffer | string) => collect(chunk, 'stdout');
+    const onStderr = (chunk: Buffer | string) => collect(chunk, 'stderr');
+    const onError = (error: Error) => {
+      spawnError = error;
+      settle({ stdout, stderr, status: null, signal: null, error }, true);
+    };
+    const onClose = (status: number | null, signal: NodeJS.Signals | null) => {
+      // A wrapper can exit from TERM before a SIGTERM-resistant descendant. Keep
+      // the group watchdog alive until the bounded SIGKILL pass has completed.
+      if (timedOut) return;
+      settle({
         stdout,
         stderr,
         status,
         signal,
         error: spawnError ?? (timedOut ? new Error(`oracle timed out after ${opts.timeoutMs}ms`) : undefined),
       });
-    });
+    };
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      timedOut = true;
+      const termError = signalOracleProcessGroup(child.pid, 'SIGTERM');
+      killTimer = setTimeout(() => {
+        if (settled) return;
+        const killError = signalOracleProcessGroup(child.pid, 'SIGKILL');
+        settle({
+          stdout,
+          stderr,
+          status: null,
+          signal: 'SIGKILL',
+          error: killError
+            ? new Error(`oracle process-group forced termination failed: ${killError.message}`)
+            : termError
+              ? new Error(`oracle process-group termination failed: ${termError.message}`)
+              : new Error(`oracle timed out after ${opts.timeoutMs}ms`),
+        }, true);
+      }, ORACLE_TERM_GRACE_MS);
+    }, opts.timeoutMs);
+    child.stdout?.setEncoding('utf-8');
+    child.stderr?.setEncoding('utf-8');
+    child.stdout?.on('data', onStdout);
+    child.stderr?.on('data', onStderr);
+    child.on('error', onError);
+    child.on('close', onClose);
   });
 }
 
@@ -364,21 +549,108 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
       },
     };
   }
-  if (input.profileDir && !resolveOracleCookiePath(input)) {
-    const selectedProfilePath = input.profileDirectory
-      ? join(input.profileDir, input.profileDirectory)
-      : input.profileDir;
+  const resolvedOracleVersion = probeOracleVersion(resolution.binary);
+  const versionValidation = validateOracleVersion(resolvedOracleVersion);
+  if (!versionValidation.compatible) {
     return {
       status: 'failed',
-      output: `Oracle could not find a Chrome cookie database for the selected ChatGPT profile: ${selectedProfilePath}`,
+      output: versionValidation.error!.message,
       command: [resolution.binary, ...buildOracleCommand(input)],
       oracleBinary: resolution.binary,
+      oracleVersion: resolvedOracleVersion,
+      error: versionValidation.error,
+    };
+  }
+  const processTreeSupportError = oracleProcessTreeSupportError();
+  if (processTreeSupportError) {
+    return {
+      status: 'failed',
+      output: processTreeSupportError.message,
+      command: [resolution.binary, ...buildOracleCommand(input)],
+      oracleBinary: resolution.binary,
+      oracleVersion: resolvedOracleVersion,
+      error: processTreeSupportError,
+    };
+  }
+  const oracleBinary = resolution.binary;
+  let cachedProbe: OracleProbe | undefined;
+  const probeResolvedOracle = (): OracleProbe => (cachedProbe ??= probeOracle(oracleBinary));
+  // The session descriptor and evidence flags exist only in the repo-harness
+  // Oracle fork. Without them the real command dies at argument parsing, so it is
+  // refused before the browser is ever launched.
+  const unsupportedRuntimeFlags = ORACLE_RUNTIME_PROBE_CAPABILITIES
+    .filter(({ capability }) => probeResolvedOracle().capabilities[capability] !== true)
+    .map(({ flag }) => flag);
+  if (unsupportedRuntimeFlags.length > 0) {
+    const message = `oracle binary did not accept ${unsupportedRuntimeFlags.join(', ')}, which every browser consult sends`;
+    return {
+      status: 'failed',
+      output: `${message}. The resolved oracle lacks the repo-harness fork flags.`,
+      command: [oracleBinary, ...buildOracleCommand(input)],
+      oracleBinary,
+      oracleVersion: resolvedOracleVersion,
       error: {
-        code: 'ORACLE_PROFILE_COOKIE_NOT_FOUND',
-        message: 'Oracle could not find a Chrome cookie database for the selected ChatGPT profile',
-        recovery: 'Re-run browser-setup with the correct Chrome profile directory, or omit the profile binding only if you intentionally want Oracle to use its own browser session.',
+        code: 'ORACLE_RUNTIME_FLAGS_UNSUPPORTED',
+        message,
+        recovery: ORACLE_FORK_FLAG_RECOVERY,
       },
     };
+  }
+  if (input.chatgptApp) {
+    if (!supportsBrowserAppPreselect(probeResolvedOracle().helpText)) {
+      return {
+        status: 'failed',
+        output: `Oracle binary does not support ChatGPT app preselection for "${input.chatgptApp}".`,
+        command: [oracleBinary, ...buildOracleCommand(input)],
+        oracleBinary,
+        oracleVersion: resolvedOracleVersion,
+        error: {
+          code: 'ORACLE_APP_PRESELECT_UNSUPPORTED',
+          message: 'oracle binary did not report --browser-app support',
+          recovery: 'Upgrade or point repo-harness at an Oracle binary that supports --browser-app, omit --chatgpt-app, or manually select the ChatGPT app in the composer before relying on MCP tools.',
+        },
+      };
+    }
+  }
+  if (input.profileDir) {
+    // The bound-profile transport is `--copy-profile` plus an explicit
+    // `--browser-chrome-profile`. There is no second transport to fall back to,
+    // so a binary without both flags fails before the prompt is submitted.
+    const capabilities = probeResolvedOracle().capabilities;
+    const missingTransportFlags = [
+      ...(capabilities.copyProfile ? [] : ['--copy-profile']),
+      ...(capabilities.browserChromeProfile ? [] : ['--browser-chrome-profile']),
+    ];
+    if (missingTransportFlags.length > 0) {
+      const message = `oracle binary did not report ${missingTransportFlags.join(' and ')} support, which the bound ChatGPT profile transport requires`;
+      return {
+        status: 'failed',
+        output: message,
+        command: [oracleBinary, ...buildOracleCommand(input)],
+        oracleBinary,
+        oracleVersion: resolvedOracleVersion,
+        error: {
+          code: 'ORACLE_COPY_PROFILE_UNSUPPORTED',
+          message,
+          recovery: 'Upgrade or point repo-harness at an Oracle binary that supports --copy-profile and --browser-chrome-profile, then rerun browser-doctor --provider oracle --json.',
+        },
+      };
+    }
+    const bindingError = validateOracleProfileBinding(input);
+    if (bindingError) {
+      return {
+        status: 'failed',
+        output: bindingError.message,
+        command: [oracleBinary, ...buildOracleCommand(input)],
+        oracleBinary,
+        oracleVersion: resolvedOracleVersion,
+        error: {
+          code: 'ORACLE_PROFILE_NOT_FOUND',
+          message: bindingError.message,
+          recovery: bindingError.recovery,
+        },
+      };
+    }
   }
   const answerDir = mkdtempSync(join(tmpdir(), 'repo-harness-oracle-answer-'));
   const runCwd = mkdtempSync(join(tmpdir(), 'repo-harness-oracle-cwd-'));
@@ -397,7 +669,11 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
     const oracleHomeDir = resolveOracleHomeDir(input);
     mkdirSync(oracleHomeDir, { recursive: true });
     const answerPath = join(answerDir, 'answer.md');
-    const args = buildOracleCommand(providerInput, answerPath);
+    const sessionPath = join(answerDir, 'session.json');
+    const capturePath = input.captureNetworkEvidence === true
+      ? join(mkdtempSync(join(oracleHomeDir, 'response-capture-')), 'streams.jsonl') : undefined;
+    const historyPath = input.captureConversationEvidence === true ? join(mkdtempSync(join(oracleHomeDir, 'history-capture-')), 'history.json') : undefined;
+    const args = buildOracleCommand(providerInput, answerPath, sessionPath, capturePath, historyPath);
     const command = [resolution.binary, ...args];
     const result = await runOracleProcess(resolution.binary, args, {
       cwd: runCwd,
@@ -407,14 +683,19 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
     const stdout = result.stdout?.trimEnd() ?? '';
     const stderr = result.stderr?.trimEnd() ?? '';
     const log = [stdout, stderr ? `\n[stderr]\n${stderr}` : ''].filter(Boolean).join('\n').trimEnd();
-    const oracleVersion = detectVersion(`${stdout}\n${stderr}`);
+    const oracleVersion = resolvedOracleVersion;
     const conversationUrl = extractConversationUrl(log);
-    const providerSessionId = extractProviderSessionId(log);
+    const evidence = readOracleSessionEvidence(sessionPath, oracleHomeDir, input.providerSessionId);
+    const providerSessionId = evidence.providerSessionId;
+    if (historyPath) evidence.conversationCapture = readOracleConversationCapture(historyPath, providerSessionId, oracleHomeDir);
+    if (capturePath) evidence.networkCapture = readOracleNetworkCapture(capturePath, providerSessionId, new URL(input.chatgptUrl ?? 'https://chatgpt.com/').origin);
 
     // Pre/at-start failures are safe to surface as failed; the prompt never landed.
     if (result.error) {
       return {
         status: 'failed',
+        ...evidence,
+        conversationUrl,
         output: log || result.error.message,
         command,
         oracleBinary: resolution.binary,
@@ -423,8 +704,31 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
       };
     }
     if (result.status !== 0) {
+      // A detached Oracle worker from an earlier run of the same prompt blocks the
+      // new run. Reattaching or cleaning up is the user's call; repo-harness never
+      // adds `--force` on its own because that would abandon a live session. Only a
+      // refusal exit classifies here: on a clean exit the answer file stays the
+      // authority even when the log happens to carry this sentence.
+      if (log.includes(ORACLE_SESSION_ALREADY_RUNNING_MARKER)) {
+        return {
+          status: 'failed',
+          ...evidence,
+          output: log,
+          command,
+          oracleBinary: resolution.binary,
+          oracleVersion,
+          conversationUrl,
+          providerSessionId,
+          error: {
+            code: 'ORACLE_SESSION_ALREADY_RUNNING',
+            message: 'oracle refused the prompt because a session with the same prompt is already running',
+            recovery: `Reattach to the running session with \`oracle session <id>\` under the repo-harness-controlled ORACLE_HOME_DIR (${oracleHomeDir}), or terminate the detached Oracle worker and its throwaway Chrome before retrying. repo-harness never adds \`--force\` on your behalf.`,
+          },
+        };
+      }
       return {
         status: 'failed',
+        ...evidence,
         output: log || `oracle exited with status ${result.status ?? result.signal ?? 'unknown'}`,
         command,
         oracleBinary: resolution.binary,
@@ -442,6 +746,7 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
     if (answer.trim().length === 0) {
       return {
         status: 'recoverable',
+        ...evidence,
         output: [
           'Oracle exited successfully but produced no answer file.',
           'The prompt may have been submitted; do not auto-retry on another provider.',
@@ -463,6 +768,7 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
 
     return {
       status: 'completed',
+      ...evidence,
       output: answer.trimEnd(),
       conversationUrl,
       providerSessionId,

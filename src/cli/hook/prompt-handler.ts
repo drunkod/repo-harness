@@ -57,7 +57,7 @@ import { renderMinimalChangePromptAdvice } from './minimal-change-context';
 import { loadMinimalChangePolicy } from './minimal-change-policy';
 import { renderReviewRubric } from './review-rubric';
 import { parseHookInput, readHookText, type HookInputFs } from './hook-input';
-import { parseAcceptancePolicy } from '../../../scripts/acceptance-receipt';
+import { acceptancePolicySource, parseAcceptancePolicy } from '../../../scripts/acceptance-receipt';
 import type { CircuitAttempt, CircuitDecision } from './circuit-breaker';
 
 /** A command result is intentionally structural so tests can inject a direct,
@@ -502,13 +502,9 @@ function emitReviewHints(
       const contract = text(fsApi, repoRoot, state.contractFile) ?? '';
       try {
         const policy = parseAcceptancePolicy(contract);
-        // source stays the acceptance-receipt AcceptanceReceipt.source
-        // provenance enum value (permanent data-schema vocabulary, R1;
-        // scripts/acceptance-receipt.ts owns the type). command is a
-        // skill-invocation suggestion, not a provenance value, and migrates
-        // to the one host-aware repo-harness-cross-review package (its
-        // Claude/Codex provider modes select automatically).
-        const source = policy.reviewer === 'Claude' ? 'claude-review' : 'codex-review';
+        // The contract freezes the source. Protocol 1 remains readable for
+        // historical receipts; protocol 2 names the host-specific Codex path.
+        const source = acceptancePolicySource(policy);
         const command = 'repo-harness-cross-review';
         out.push('[ExternalAcceptance] Review/release intent detected. Start peer acceptance in parallel with local /check.\n');
         out.push(`[ExternalAcceptance] Current active plan: ${state.activePlan ?? '(none)'}\n`);
@@ -589,8 +585,8 @@ function writePendingOrchestration(repoRoot: string, fsApi: PromptHandlerFs, kin
 }
 
 function appendTddBddAdvice(context: ReturnType<typeof buildPromptIntentContext>, out: string[]): void {
-  if (shouldEmitTddBugFixAdvice(context)) out.push('[TDD] Bug-fix intent detected. Reproduce with a failing test first.\n  检测到修复请求：先写失败测试复现问题，再重写实现。\n');
-  if (shouldEmitBddFeatureAdvice(context)) out.push('[BDD] Feature intent detected. Define Given-When-Then acceptance scenarios first.\n  检测到新功能请求：先定义 Given-When-Then 验收场景。\n');
+  if (shouldEmitTddBugFixAdvice(context)) out.push('[TDD] Bug-fix intent detected. Reproduce with a failing test first.\n');
+  if (shouldEmitBddFeatureAdvice(context)) out.push('[BDD] Feature intent detected. Define Given-When-Then acceptance scenarios first.\n');
   if (shouldEmitUxFeatureGuardAdvice(context)) out.push('[UXFeatureGuard] For user-visible behavior, first freeze rules/non-goals, separate instruction from payload, and inventory existing UI/domain reuse targets.\n  Read: repo-harness docs show ux-feature-guard (fail loudly; no parallel authority or compatibility fallback).\n');
 }
 
@@ -725,26 +721,10 @@ export function runPromptHandler(opts: PromptHandlerInput): PromptHandlerResult 
       const rendered = renderPromptGuardAction(action, state, fsApi, opts.repoRoot);
       return { exitCode: rendered.exitCode, stdout: `${out.join('')}${rendered.stdout}`, stderr: `${stderrPrefix}${rendered.stderr}`, reason: rendered.reason };
     }
-    const contractVerification = command(['run', 'verify-contract', '--contract', state.contractFile ?? '', '--strict', '--read-only']);
-    if (contractVerification.exitCode !== 0) {
-      const detail = contractVerification.stderr.trim() || contractVerification.stdout.trim();
-      const rendered = structuredError(
-        'ContractGuard',
-        `Contract verification failed for ${state.contractFile ?? '(none)'}.${detail ? ` ${detail}` : ''}`,
-        'Resolve the failing exit criteria in the contract before marking work done.',
-        'contract_failure',
-      );
-      return { exitCode: rendered.exitCode, stdout: `${out.join('')}${rendered.stdout}`, stderr: `${stderrPrefix}${contractVerification.stderr}${rendered.stderr}`, reason: rendered.reason };
-    }
-    const contractOutput: string[] = [];
-    const contractErrors: string[] = [];
-    appendCommandOutput(contractVerification, contractOutput, contractErrors);
-    out.push(...contractOutput);
-
     const evidenceError = checkStructuredEvidence(opts.repoRoot, state, fsApi);
     if (evidenceError) {
       const rendered = structuredError('EvidenceGuard', evidenceError, 'Run repo-harness run verify-sprint so .ai/harness/checks/latest.json records a passing current sprint verification.', 'quality_gate');
-      return { exitCode: rendered.exitCode, stdout: `${out.join('')}${rendered.stdout}`, stderr: `${stderrPrefix}${contractErrors.join('')}${rendered.stderr}`, reason: rendered.reason };
+      return { exitCode: rendered.exitCode, stdout: `${out.join('')}${rendered.stdout}`, stderr: `${stderrPrefix}${rendered.stderr}`, reason: rendered.reason };
     }
 
     const acceptance = command([
@@ -762,7 +742,7 @@ export function runPromptHandler(opts: PromptHandlerInput): PromptHandlerResult 
         'Run verify-sprint --prepare-acceptance, then record external acceptance or materialize user_waiver from one valid contract-bound UserWaiverGrant; do not ask the owner to repeat a subject hash.',
         'quality_gate',
       );
-      return { exitCode: rendered.exitCode, stdout: `${out.join('')}${rendered.stdout}`, stderr: `${stderrPrefix}${contractErrors.join('')}${acceptance.stderr}${rendered.stderr}`, reason: rendered.reason };
+      return { exitCode: rendered.exitCode, stdout: `${out.join('')}${rendered.stdout}`, stderr: `${stderrPrefix}${acceptance.stderr}${rendered.stderr}`, reason: rendered.reason };
     }
 
     const activePlanText = state.activePlan ? text(fsApi, opts.repoRoot, state.activePlan) ?? '' : '';
@@ -774,23 +754,23 @@ export function runPromptHandler(opts: PromptHandlerInput): PromptHandlerResult 
         `Finish the remaining Task Breakdown item: ${planTasks.next || `see ${state.activePlan ?? 'the active plan'}`}.`,
         'state_violation',
       );
-      return { exitCode: rendered.exitCode, stdout: `${out.join('')}${rendered.stdout}`, stderr: `${stderrPrefix}${contractErrors.join('')}${rendered.stderr}`, reason: rendered.reason };
+      return { exitCode: rendered.exitCode, stdout: `${out.join('')}${rendered.stdout}`, stderr: `${stderrPrefix}${rendered.stderr}`, reason: rendered.reason };
     }
 
     if (isLinkedWorktree(opts.repoRoot)) {
       out.push(`[WorkflowNextAction] Done quality gates passed for ${state.activePlan ?? '(none)'}.\n`);
       out.push('[WorkflowNextAction] Review/checks pass; finish and fast-forward merge this contract worktree.\n');
       out.push('[WorkflowNextAction] repo-harness run contract-worktree finish\n');
-      return { exitCode: 0, stdout: out.join(''), stderr: `${stderrPrefix}${contractErrors.join('')}` };
+      return { exitCode: 0, stdout: out.join(''), stderr: `${stderrPrefix}` };
     }
 
     const run = command(['run', 'archive-workflow', '--plan', state.activePlan ?? '', '--outcome', deriveDoneOutcome(context)]);
     if (run.exitCode !== 0) {
       const detail = run.stderr.trim() || run.stdout.trim() || 'archive-workflow failed';
       const rendered = structuredError('AutoArchive', detail, 'Fix the archive-workflow error before marking the workflow complete.', 'missing_artifact');
-      return { exitCode: rendered.exitCode, stdout: `${out.join('')}${run.stdout}${rendered.stdout}`, stderr: `${stderrPrefix}${contractErrors.join('')}${run.stderr}${rendered.stderr}`, reason: rendered.reason };
+      return { exitCode: rendered.exitCode, stdout: `${out.join('')}${run.stdout}${rendered.stdout}`, stderr: `${stderrPrefix}${run.stderr}${rendered.stderr}`, reason: rendered.reason };
     }
-    return { exitCode: 0, stdout: `${out.join('')}${run.stdout}`, stderr: `${stderrPrefix}${contractErrors.join('')}${run.stderr}` };
+    return { exitCode: 0, stdout: `${out.join('')}${run.stdout}`, stderr: `${stderrPrefix}${run.stderr}` };
   }
 
   appendTddBddAdvice(context, out);

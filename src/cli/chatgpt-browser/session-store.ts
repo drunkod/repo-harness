@@ -1,5 +1,5 @@
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { basename, dirname, join, relative } from 'path';
+import { basename, dirname, isAbsolute, join, relative } from 'path';
 import { resolveBrowserOutputPath } from './file-policy';
 import type {
   BrowserConsultInput,
@@ -10,6 +10,7 @@ import type {
   BrowserSessionMode,
   BrowserSessionPaths,
   BrowserSessionStatus,
+  BrowserSessionTransport,
   PromptBundle,
   PromptSecretScanReceipt,
   StoredBrowserSession,
@@ -39,7 +40,7 @@ function timestamp(date = new Date()): string {
 }
 
 function sessionRoot(repoRoot: string, customRoot?: string): string {
-  return customRoot?.startsWith('/') ? customRoot : join(repoRoot, customRoot ?? DEFAULT_SESSION_ROOT);
+  return customRoot && isAbsolute(customRoot) ? customRoot : join(repoRoot, customRoot ?? DEFAULT_SESSION_ROOT);
 }
 
 function assertValidSessionId(sessionId: string): void {
@@ -112,6 +113,28 @@ function copyArtifacts(artifactsDir: string, artifacts?: BrowserImportedArtifact
   });
 }
 
+function validateArtifactNames(artifacts?: BrowserImportedArtifact[]): void {
+  if (!artifacts?.length) return;
+  const seen = new Map<string, string>();
+  for (const artifact of artifacts) {
+    const targetName = basename(artifact.fileName);
+    if (seen.has(targetName)) {
+      const previous = seen.get(targetName)!;
+      throw new Error(`duplicate imported artifact basename "${targetName}" from "${previous}" and "${artifact.fileName}"`);
+    }
+    seen.set(targetName, artifact.fileName);
+  }
+}
+
+/**
+ * Transport is provider-specific: only Oracle copies a bound profile into its
+ * own throwaway browser, so the native provider never reports `copy_profile`.
+ */
+function resolveSessionTransport(provider: BrowserProviderName, profileDir?: string): BrowserSessionTransport {
+  if (provider === 'native') return 'native_profile';
+  return profileDir ? 'copy_profile' : 'oracle_session';
+}
+
 function allocateBrowserSessionPaths(input: BrowserConsultInput): { sessionId: string; paths: BrowserSessionPaths } {
   const baseSessionId = createBrowserSessionId(input);
   const root = sessionRoot(input.repoRoot, input.sessionRoot);
@@ -155,7 +178,7 @@ export function writeBrowserSession(opts: {
   conversationUrl?: string;
   providerSessionId?: string;
   parentProviderSessionId?: string;
-  oracle?: { binary?: string; version?: string; captureStatus?: 'completed' | 'recoverable' };
+  oracle?: BrowserSessionMeta['oracle'];
   artifacts?: BrowserImportedArtifact[];
   command?: string[];
   secretScan?: PromptSecretScanReceipt;
@@ -169,6 +192,7 @@ export function writeBrowserSession(opts: {
     : undefined;
   if (outputTarget && !outputTarget.ok) throw new Error(outputTarget.reason);
 
+  validateArtifactNames(opts.artifacts);
   const { sessionId, paths } = allocateBrowserSessionPaths(opts.input);
   const now = new Date().toISOString();
   const copiedArtifacts = copyArtifacts(paths.artifactsDir, opts.artifacts);
@@ -202,8 +226,9 @@ export function writeBrowserSession(opts: {
     },
     browser: {
       mode: 'manual-login',
+      transport: resolveSessionTransport(opts.provider, opts.input.profileDir),
       chatgptUrl: opts.input.chatgptUrl ?? 'https://chatgpt.com/',
-      chatgptApp: opts.input.chatgptApp,
+      chatgptApp: opts.input.chatgptApp ?? undefined,
       channel: opts.input.browserChannel,
       profileDir: opts.input.profileDir,
       profileDirectory: opts.input.profileDirectory,
@@ -247,7 +272,18 @@ export function writeBrowserSession(opts: {
   writeFileSync(paths.events, JSON.stringify({ ts: now, event: 'session.created', sessionId, mode, status: opts.status }) + '\n', 'utf-8');
   if (outputTarget?.ok) {
     mkdirSync(dirname(outputTarget.absolutePath), { recursive: true });
-    writeFileSync(outputTarget.absolutePath, opts.output.trimEnd() + '\n', 'utf-8');
+    try {
+      writeFileSync(outputTarget.absolutePath, opts.output.trimEnd() + '\n', {
+        encoding: 'utf-8',
+        flag: opts.input.overwriteOutput === true ? 'w' : 'wx',
+      });
+    } catch (error) {
+      rmSync(paths.sessionDir, { recursive: true, force: true });
+      if (opts.input.overwriteOutput !== true && (error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`write output already exists: ${outputTarget.path}`);
+      }
+      throw error;
+    }
   }
   return {
     sessionId,
@@ -339,8 +375,16 @@ export function listBrowserSessions(
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt,
       title: basename(meta.sessionId).replace(/^chgpt_\d{8}_\d{6}_/, ''),
-      outputPath: `${DEFAULT_SESSION_ROOT}/${meta.sessionId}/output.md`,
-      transcriptPath: `${DEFAULT_SESSION_ROOT}/${meta.sessionId}/transcript.md`,
+      outputPath: customRoot === undefined
+        ? `${DEFAULT_SESSION_ROOT}/${meta.sessionId}/output.md`
+        : isAbsolute(customRoot)
+          ? join(root, meta.sessionId, 'output.md')
+          : rel(repoRoot, join(root, meta.sessionId, 'output.md')),
+      transcriptPath: customRoot === undefined
+        ? `${DEFAULT_SESSION_ROOT}/${meta.sessionId}/transcript.md`
+        : isAbsolute(customRoot)
+          ? join(root, meta.sessionId, 'transcript.md')
+          : rel(repoRoot, join(root, meta.sessionId, 'transcript.md')),
       conversationUrl: meta.browser.conversationUrl,
       createOutcome: meta.create?.outcome,
     }));

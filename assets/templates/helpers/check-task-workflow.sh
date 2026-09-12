@@ -181,6 +181,16 @@ extract_status() {
     | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
 }
 
+extract_sprint_status() {
+  local file="$1"
+  awk '/^> \*\*Status\*\*:[[:space:]]*/ {
+    sub(/^> \*\*Status\*\*:[[:space:]]*/, "")
+    gsub(/\r/, "")
+    print
+    exit
+  }' "$file" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
 plan_field_value() {
   local file="$1"
   local label="$2"
@@ -512,23 +522,80 @@ sprint_ready_error() {
     missing=1
   fi
 
-  if ! grep -Eq '^\|[[:space:]]*#[[:space:]]*\|[[:space:]]*Status[[:space:]]*\|[[:space:]]*Task[[:space:]]*\|[[:space:]]*Mode[[:space:]]*\|[[:space:]]*Acceptance[[:space:]]*\|[[:space:]]*Plan[[:space:]]*\|' "$file"; then
-    echo "missing backlog table header '| # | Status | Task | Mode | Acceptance | Plan |'"
+  # Execution readiness is only ever asked of an Approved or Executing sprint,
+  # and such a sprint must carry persisted task ids: schema 1 derives identity
+  # from the Task cell, so activating one means every title edit silently
+  # deletes a task and creates another. Schema 1 stays readable for archived
+  # sprints and for the migration input, never for live execution.
+  # Counted over the pre-'## Backlog' preamble only, because that is the exact
+  # region both parsers read: sprintBacklogSchema() stops at the heading and so
+  # does backlog_rows()'s awk. A whole-file grep would let a marker quoted in
+  # prose below the table fail this gate on a file both parsers accept.
+  local schema_declarations schema_twos schema_ready
+  read -r schema_declarations schema_twos <<<"$(awk '
+    /^## Backlog[[:space:]]*$/ { exit }
+    /^>[[:space:]]*\*\*Backlog Schema\*\*:/ {
+      count++
+      declared = $0
+      sub(/^>[[:space:]]*\*\*Backlog Schema\*\*:[[:space:]]*/, "", declared)
+      gsub(/[[:space:]]+$/, "", declared)
+      if (declared == "2") two++
+    }
+    END { printf "%d %d\n", count + 0, two + 0 }
+  ' "$file")"
+  schema_ready=0
+  if [[ "$schema_declarations" -eq 1 && "$schema_twos" -eq 1 ]]; then
+    schema_ready=1
+  fi
+  if [[ "$schema_ready" -ne 1 ]]; then
+    if [[ "$schema_declarations" -gt 1 ]]; then
+      echo "backlog schema is declared ${schema_declarations} times; exactly one '> **Backlog Schema**: 2' line is allowed"
+    else
+      echo "backlog is not schema 2 and carries no persisted task ids; run 'repo-harness sprint migrate-schema --sprint ${file} --target-ref <ref>' before approving or executing it"
+    fi
+    missing=1
+  fi
+
+  if [[ "$schema_ready" -ne 1 ]]; then
+    :
+  elif ! LC_ALL=C awk -F '|' '
+    /^## Backlog[[:space:]]*$/ { in_section = 1; next }
+    in_section && /^## / { exit }
+    in_section && /^\|/ {
+      for (i = 2; i <= 8; i++) {
+        cell[i] = $i
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", cell[i])
+      }
+      if (cell[2] == "#" && cell[3] == "ID" && cell[4] == "Status" && cell[5] == "Task" && cell[6] == "Mode" && cell[7] == "Acceptance" && cell[8] == "Plan") {
+        found = 1
+        exit
+      }
+    }
+    END { exit found ? 0 : 1 }
+  ' "$file"; then
+    echo "backlog table header does not match the declared backlog schema"
     missing=1
   else
     local row_errors
     row_errors="$(LC_ALL=C awk -F '|' '
+      !in_section && /^>[[:space:]]*\*\*Backlog Schema\*\*:[[:space:]]*2[[:space:]]*$/ { off = 1; next }
       /^## Backlog[[:space:]]*$/ { in_section = 1; next }
       in_section && /^## / { exit }
       !in_section { next }
       /^\|[[:space:]]*[0-9]+[[:space:]]*\|/ {
         rows++
-        idx = $2; status = $3; task = $4; mode = $5; acceptance = $6
+        idx = $2; id = (off ? $3 : ""); status = $(3 + off); task = $(4 + off); mode = $(5 + off); acceptance = $(6 + off)
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", idx)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", status)
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", task)
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", mode)
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", acceptance)
+        if (off) {
+          if (id == "") printf "row %s is missing its persisted task id\n", idx
+          else if (id !~ /^[0-9a-f]{64}$/) printf "row %s has a malformed task id\n", idx
+          else seen_id[id]++
+        }
         if (status !~ /^\[[ xX]\]$/) printf "row %s has an invalid status cell (expected [ ] or [x])\n", idx
         if (task == "" || task == "...") printf "row %s is missing a task\n", idx
         if (mode != "contract" && mode != "inline") printf "row %s has an invalid mode (expected contract or inline)\n", idx
@@ -541,6 +608,7 @@ sprint_ready_error() {
         if (rows == 0) print "backlog table has no task rows"
         for (i in seen_idx) if (seen_idx[i] > 1) printf "duplicate backlog index %s\n", i
         for (t in seen_task) if (seen_task[t] > 1) printf "duplicate backlog task %s\n", t
+        for (d in seen_id) if (seen_id[d] > 1) printf "duplicate backlog task id %s\n", d
       }
     ' "$file")"
     if [[ -n "$row_errors" ]]; then
@@ -550,6 +618,30 @@ sprint_ready_error() {
   fi
 
   [[ "$missing" -eq 0 ]]
+}
+
+# Lease and task-message subjects are keyed by persisted ID alone, while Sprint
+# files are independent carriers.  Reuse the schema-2 row shape above across
+# the complete live set so the strict working-tree gate catches a collision
+# before a canonical read can reach shared coordination state.
+live_sprint_task_id_collision_error() {
+  LC_ALL=C awk -F '|' '
+    FNR == 1 { schema_two = 0; in_section = 0 }
+    !in_section && /^>[[:space:]]*\*\*Backlog Schema\*\*:[[:space:]]*2[[:space:]]*$/ { schema_two = 1; next }
+    /^## Backlog[[:space:]]*$/ { in_section = 1; next }
+    in_section && /^## / { in_section = 0; next }
+    in_section && schema_two && /^\|[[:space:]]*[0-9]+[[:space:]]*\|/ {
+      id = $3
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+      if (id ~ /^[0-9a-f]{64}$/) {
+        if (id in owner && owner[id] != FILENAME) {
+          printf "duplicate live Sprint task id %s in %s and %s\n", id, owner[id], FILENAME
+        } else {
+          owner[id] = FILENAME
+        }
+      }
+    }
+  ' "$@"
 }
 
 prd_ready_error() {
@@ -1060,7 +1152,9 @@ check_required_file ".claude/templates/implementation-notes.template.md"
 check_required_file ".claude/templates/prd.template.md"
 check_helper_runtime_files
 check_required_file "$todo_file"
-check_required_file "$current_status_file"
+# $current_status_file is deliberately absent from this list: it is an ignored local
+# read model regenerated per worktree, so a fresh checkout legitimately has none.
+# When it does exist it is still validated below.
 check_required_file "$lessons_file"
 check_required_dir "$research_dir"
 check_required_file "$context_map_file"
@@ -1190,10 +1284,11 @@ if [[ -d "plans/prds" ]]; then
   done < <(find plans/prds -maxdepth 1 -type f -name '*.prd.md' 2>/dev/null | sort)
 fi
 
+live_sprint_files=()
 if [[ -d "$sprints_dir" ]]; then
   while IFS= read -r sprint_file; do
     [[ -n "$sprint_file" ]] || continue
-    sprint_status="$(extract_status "$sprint_file")"
+    sprint_status="$(extract_sprint_status "$sprint_file")"
     if [[ -z "$sprint_status" ]]; then
       report_issue "Sprint is missing a '**Status**' line: $sprint_file"
       continue
@@ -1203,11 +1298,23 @@ if [[ -d "$sprints_dir" ]]; then
       continue
     fi
     if [[ "$sprint_status" == "Approved" || "$sprint_status" == "Executing" ]]; then
+      live_sprint_files+=("$sprint_file")
       if ! sprint_error="$(sprint_ready_error "$sprint_file")"; then
         report_issue "Sprint $sprint_file is not execution-ready: ${sprint_error//$'\n'/; }"
       fi
     fi
   done < <(find "$sprints_dir" -maxdepth 1 -type f -name '*.sprint.md' 2>/dev/null | sort)
+fi
+
+if [[ "$strict" -eq 1 && "${#live_sprint_files[@]}" -gt 1 ]]; then
+  if ! live_sprint_collisions="$(live_sprint_task_id_collision_error "${live_sprint_files[@]}")"; then
+    report_issue "Could not validate live Sprint task ids"
+  elif [[ -n "$live_sprint_collisions" ]]; then
+    while IFS= read -r live_sprint_collision; do
+      [[ -n "$live_sprint_collision" ]] || continue
+      report_issue "$live_sprint_collision"
+    done <<<"$live_sprint_collisions"
+  fi
 fi
 
 if [[ "$sprints_dir" != "$legacy_sprints_dir" && -d "$legacy_sprints_dir" ]]; then
@@ -1256,6 +1363,12 @@ fi
 check_handoff_resume_pair "$handoff_file" "$resume_file"
 check_current_resume_freshness "$current_status_file" "$resume_file"
 
+if [[ -f scripts/check-task-sync.sh ]]; then
+  if ! waiver_error="$(bash scripts/check-task-sync.sh --validate-waivers-only 2>&1)"; then
+    report_issue "Substantive-change waiver validation failed: ${waiver_error//$'\n'/; }"
+  fi
+fi
+
 active_plan="$(get_active_plan || true)"
 if [[ -z "$active_plan" ]]; then
   if [[ -f "$ACTIVE_WORKTREE_MARKER" ]]; then
@@ -1296,7 +1409,12 @@ else
 
     contract_file="$(derive_contract_path "$active_plan")"
     if [[ ! -f "$contract_file" ]]; then
-      report_issue "Active $plan_status plan is missing its task contract: $contract_file"
+      # The canonical resolver owns separate-contract requirements and rejects
+      # missing required contracts. Do not impose strict ceremony on standard.
+      if ! resolved_profile="$(repo-harness state resolve --json --field workflow_profile)" \
+        || [[ ! "$resolved_profile" =~ ^(lite|standard|strict)$ ]]; then
+        report_issue "Active $plan_status plan has no task contract and canonical state resolution did not admit that state: $contract_file"
+      fi
     elif ! grep -Eq '^> \*\*Capability ID\*\*: .+' "$contract_file"; then
       report_issue "Active task contract is missing a capability binding: $contract_file"
     fi

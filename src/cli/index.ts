@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { withRuntimeHostTransactionLock } from './installer/runtime-host-lock';
+import { captureConfigurationRestores } from './installer/configuration-ownership';
 /**
  * repo-harness CLI entry.
  *
@@ -7,9 +9,12 @@
  */
 
 import { Command } from 'commander';
+import { randomBytes } from 'crypto';
 import { readFileSync, realpathSync } from 'fs';
 import { homedir } from 'os';
+import { dirname, join } from 'path';
 import { createInterface } from 'readline/promises';
+import { fileURLToPath } from 'url';
 import { askConfirm } from './tty-prompt';
 import { runInstall, runUninstall, type InstallTargetSpec } from './commands/install';
 import { writeAllSync } from './runtime/write-all-sync';
@@ -20,6 +25,7 @@ import { formatDoctor, runDoctor } from './commands/doctor';
 import { buildInitHookCommand, buildSetupCommand, formatInitHook, runInitHook } from './commands/init-hook';
 import { formatMigratePlan, runMigrate } from './commands/migrate';
 import { formatCrossReviewResult, runCrossReviewCommand } from './commands/cross-review';
+import { buildClaudeReviewCommand } from './commands/claude-review';
 import { CROSS_REVIEW_PROVIDER_MODES, type CrossReviewProviderMode } from '../core/review/cross-review';
 import { buildToolsCommand } from './commands/tools';
 import { buildBrainCommand } from './commands/brain';
@@ -29,9 +35,41 @@ import { buildMcpCommand } from './commands/mcp';
 import { buildChatgptCommand } from './commands/chatgpt';
 import { buildRunCommand } from './commands/run';
 import { buildStateCommand } from './commands/state';
+import { buildSprintCommand } from './commands/sprint';
+import { buildPublicationCommand } from './commands/publication';
+import { buildFleetCommand } from './commands/fleet';
+import { buildAutomationCommand } from './commands/automation';
+import { buildRefactorCommand } from './commands/refactor';
+import { buildCampaignCommand } from './commands/campaign';
+import { buildOperatorCommand } from './commands/operator';
+import { buildEngineerCommand } from './commands/engineer';
 import { buildArchitectureProjectionCommand } from './commands/architecture-projection';
+import { buildIntegrationCommand } from './commands/integration';
+import { buildDelegationCommand } from './commands/delegation';
+import { buildCollaborationCommand } from './commands/collaboration';
+import { buildVerifiedContextCommand } from './commands/verified-context';
+import { buildInterfaceChangeCommand } from './commands/interface-change';
+import { buildExternalSourceCommand } from './commands/external-source';
 import { formatSecurityScan, runSecurityScan } from './commands/security';
-import { runGlobalRuntimeSetup, type GlobalRuntimeOptions, type GlobalRuntimeResult } from './commands/global-runtime';
+import {
+  MIN_BUN_VERSION,
+  bunVersionIsSupported,
+  runGlobalRuntimeSetup,
+  type GlobalRuntimeOptions,
+  type GlobalRuntimeResult,
+} from './commands/global-runtime';
+import {
+  assertCandidateReconciliationReceipt,
+  assertInstalledAdapterProjection,
+  candidatePackageIdentity,
+  consumeCandidateReconciliationCapability,
+  parseCandidateRequest,
+  publishCandidateReconciliationCapability,
+  routeRegistryDigest,
+  sha256,
+  type CandidateReconciliationReceipt,
+} from './runtime/candidate-reconciliation';
+import { windowsProtectedHelperConfigPath } from '../effects/runtime/protected-helper-platform';
 import {
   applyInstallProfile,
   beginInstallHostTransaction,
@@ -60,7 +98,9 @@ import { runReviewRubricCli } from './hook/review-rubric';
 import { runReviewSubjectCli } from './hook/review-subject';
 import { runAdoptionPlan } from './commands/adoption-plan';
 import { rollbackAdoptionTransaction } from '../effects/fs-transaction';
-import { withExclusiveDirectoryLock } from '../effects/locking/exclusive-directory-lock';
+import {
+  type ExclusiveDirectoryLockHandle,
+} from '../effects/locking/exclusive-directory-lock';
 import {
   assertTarget,
   assertLocation,
@@ -90,7 +130,16 @@ export const SUBCOMMANDS = [
   'mcp',
   'chatgpt',
   'state',
+  'publication',
+  'fleet',
+  'engineer',
   'architecture-projection',
+  'integration',
+  'delegation',
+  'verified-context',
+  'interface-change',
+  'external-source',
+  'refactor',
 ] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
@@ -104,6 +153,7 @@ interface GlobalRuntimeCommandOptions {
   hooks?: string | false;
   externalSkills?: boolean;
   withReverseSkill?: boolean;
+  withObsidianSkills?: boolean;
   codegraph?: boolean;
   brainRoot?: string;
   json?: boolean;
@@ -177,7 +227,7 @@ function runTransactionalProfileProjection(
 ): { result: GlobalRuntimeResult; state: InstalledProfileState | null } {
   const transactionEnv = runtimeHostTransactionEnv(options.env);
   return withRuntimeHostTransactionLock(transactionEnv, () => {
-    const transaction = beginInstallHostTransaction(installProfileHostMutationPaths(transactionEnv), transactionEnv);
+    const transaction = beginInstallHostTransaction(runtimeHostMutationPaths(transactionEnv), transactionEnv);
     let migrationSource: LegacyInstalledProfileState | null;
     let result: GlobalRuntimeResult;
     try {
@@ -193,6 +243,7 @@ function runTransactionalProfileProjection(
     }
     try {
       const state = commitState(transaction, migrationSource);
+      captureConfigurationRestores(transaction, transactionEnv);
       commitInstallHostTransaction(transaction);
       return { result, state };
     } catch (error) {
@@ -214,16 +265,119 @@ function runtimeHostTransactionEnv(env: NodeJS.ProcessEnv | undefined): NodeJS.P
   };
 }
 
-function withRuntimeHostTransactionLock<T>(env: NodeJS.ProcessEnv | undefined, run: () => T): T {
-  // Resolve the protected root with the same precedence as runtime mutations.
-  // A partial injected env must not make the lock fall back to a different HOME.
-  const home = env?.HOME ?? process.env.HOME ?? homedir();
-  return withExclusiveDirectoryLock(
-    realpathSync(home),
-    '.repo-harness/transactions/global-runtime.lock',
-    run,
-    { reclaimStaleOwner: true },
-  );
+function runtimeHostMutationPaths(env: NodeJS.ProcessEnv): readonly string[] {
+  const paths = [...installProfileHostMutationPaths(env)];
+  if (process.platform === 'win32') paths.push(windowsProtectedHelperConfigPath());
+  return [...new Set(paths)];
+}
+
+
+function candidateSourceRoot(): string {
+  return realpathSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..'));
+}
+
+/**
+ * Internal candidate entrypoint. It intentionally never acquires the global
+ * runtime lock: the predecessor process owns that lock and its transaction.
+ */
+export function runCandidateRuntimeReconciliation(
+  encodedRequest: string,
+  env: NodeJS.ProcessEnv = process.env,
+): CandidateReconciliationReceipt {
+  const request = parseCandidateRequest(encodedRequest);
+  if (
+    env.REPO_HARNESS_RUNTIME_RECONCILIATION_PARENT !== '1'
+    || env.REPO_HARNESS_RUNTIME_RECONCILIATION_TOKEN !== request.parent_token
+  ) {
+    throw new Error('candidate reconciliation requires an explicit parent transaction capability');
+  }
+  const home = realpathSync(env.HOME ?? homedir());
+  consumeCandidateReconciliationCapability(request, home);
+  const sourceRoot = candidateSourceRoot();
+  const candidate = candidatePackageIdentity(sourceRoot);
+  if (
+    candidate.root !== request.candidate.root
+    || candidate.version !== request.candidate.version
+    || candidate.package_digest !== request.candidate.package_digest
+  ) {
+    throw new Error('candidate reconciliation package authority mismatch');
+  }
+
+  const runtime = runGlobalRuntimeSetup({
+    sourceRoot,
+    cwd: request.cwd,
+    env,
+    target: request.target,
+    profile: request.profile,
+    installCli: false,
+    syncSkill: request.sync_skill,
+    hostAdapters: request.host_adapters,
+    externalSkills: request.external_skills,
+    reverseSkill: request.reverse_skill,
+    obsidianSkills: request.obsidian_skills,
+    codegraph: request.codegraph,
+    brainRoot: request.brain_root,
+    updateMode: true,
+  });
+  if (runtime.exitCode !== 0) {
+    throw new Error(`candidate reconciliation failed: ${runtime.lines.join('; ')}`);
+  }
+
+  const complete = request.sync_skill && request.host_adapters;
+  const adapterDigests = request.host_adapters
+    ? assertInstalledAdapterProjection(request.target, request.profile, env)
+    : {};
+  let ownershipManifestDigest: string | null = null;
+  if (complete) {
+    const applied = applyInstallProfile(request.profile, env);
+    const status = installedProfileStatus(applied.state, env);
+    if (status.drift.status !== 'consistent') {
+      throw new Error(`candidate reconciliation ownership ledger drift: ${status.drift.surface_drift.join(',') || '(unknown)'}`);
+    }
+    ownershipManifestDigest = sha256(JSON.stringify(applied.state.ownership_manifest));
+  }
+  const receipt: CandidateReconciliationReceipt = {
+    protocol: 1,
+    transaction_id: request.transaction_id,
+    candidate_package_root: candidate.root,
+    candidate_version: candidate.version,
+    candidate_package_digest: candidate.package_digest,
+    route_registry_digest: routeRegistryDigest(),
+    selected_target: request.target,
+    adapter_projection_digests: adapterDigests,
+    ownership_manifest_digest: ownershipManifestDigest,
+    reconciliation_scope: complete ? 'complete' : 'partial',
+    verified_at: new Date().toISOString(),
+  };
+  assertCandidateReconciliationReceipt(receipt, {
+    transaction_id: request.transaction_id,
+    candidate,
+    target: request.target,
+    profile: request.profile,
+    require_complete: complete,
+    require_adapter_projection: request.host_adapters,
+  });
+  return receipt;
+}
+
+function candidateHandoffContext(
+  transaction: ReturnType<typeof beginInstallHostTransaction>,
+  lock: ExclusiveDirectoryLockHandle,
+): NonNullable<GlobalRuntimeOptions['candidateHandoff']> {
+  const context = {
+    transactionId: sha256(transaction.backup_root),
+    transactionBackupRoot: transaction.backup_root,
+    parentToken: randomBytes(32).toString('hex'),
+  };
+  publishCandidateReconciliationCapability({
+    transactionId: context.transactionId,
+    transactionBackupRoot: context.transactionBackupRoot,
+    parentToken: context.parentToken,
+    parentPid: process.pid,
+    lockPath: lock.lockPath,
+    lockOwnerToken: lock.ownerToken,
+  });
+  return context;
 }
 
 export function runTransactionalRuntimeRefresh(
@@ -231,11 +385,11 @@ export function runTransactionalRuntimeRefresh(
   setup: (options: GlobalRuntimeOptions) => GlobalRuntimeResult = runGlobalRuntimeSetup,
 ): GlobalRuntimeResult {
   const transactionEnv = runtimeHostTransactionEnv(options.env);
-  return withRuntimeHostTransactionLock(transactionEnv, () => {
-    const transaction = beginInstallHostTransaction(installProfileHostMutationPaths(transactionEnv), transactionEnv);
+  return withRuntimeHostTransactionLock(transactionEnv, (lock) => {
+    const transaction = beginInstallHostTransaction(runtimeHostMutationPaths(transactionEnv), transactionEnv);
     let result: GlobalRuntimeResult;
     try {
-      result = setup(options);
+      result = setup({ ...options, candidateHandoff: candidateHandoffContext(transaction, lock) });
     } catch (error) {
       rollbackInstallHostTransaction(transaction);
       throw error;
@@ -245,6 +399,7 @@ export function runTransactionalRuntimeRefresh(
       return result;
     }
     try {
+      captureConfigurationRestores(transaction, transactionEnv);
       commitInstallHostTransaction(transaction);
       return result;
     } catch (error) {
@@ -306,6 +461,7 @@ async function runGlobalRuntimeBootstrap(
     hostAdapters: rawOpts.hooks !== false,
     externalSkills,
     reverseSkill: rawOpts.withReverseSkill === true,
+    obsidianSkills: rawOpts.withObsidianSkills === true,
     codegraph,
     brainRoot: rawOpts.brainRoot,
     profile,
@@ -354,6 +510,7 @@ export function buildProgram(): Command {
     .option('--no-hooks', 'Skip global hook adapter installation during full runtime install')
     .option('--no-external-skills', 'Skip mutable third-party Waza and Mermaid skill bootstrap')
     .option('--with-reverse-skill', 'Explicitly install the high-risk reverse-skill-router after independent authorization review')
+    .option('--with-obsidian-skills', 'Explicitly install the pinned obsidian-markdown and obsidian-cli companion Skills')
     .option('--no-codegraph', 'Skip CodeGraph CLI/MCP configuration')
     .option('--brain-root <path>', 'Brain vault root to persist for repo-harness brain commands')
     .option('--json', 'Output JSON instead of human-readable text')
@@ -531,6 +688,7 @@ export function buildProgram(): Command {
     .option('--no-hooks', 'Skip global hook adapter installation')
     .option('--with-external-skills', 'Also refresh mutable third-party Waza and Mermaid providers')
     .option('--with-reverse-skill', 'Explicitly install the high-risk reverse-skill-router after independent authorization review')
+    .option('--with-obsidian-skills', 'Explicitly install or verify the pinned obsidian-markdown and obsidian-cli companion Skills')
     .option('--no-external-skills', 'Do not refresh third-party Waza and Mermaid providers (default)')
     .option('--configure-codegraph', 'Refresh CodeGraph CLI/MCP (default during update)')
     .option('--no-codegraph', 'Skip refreshing the global CodeGraph CLI/MCP')
@@ -553,6 +711,7 @@ export function buildProgram(): Command {
       hooks?: string | false;
       withExternalSkills?: boolean;
       withReverseSkill?: boolean;
+      withObsidianSkills?: boolean;
       externalSkills?: boolean;
       codegraph?: boolean;
       configureCodegraph?: boolean;
@@ -593,6 +752,7 @@ export function buildProgram(): Command {
         hostAdapters: rawOpts.hooks !== false,
         externalSkills: rawOpts.externalSkills === false ? false : rawOpts.withExternalSkills === true ? true : undefined,
         reverseSkill: rawOpts.withReverseSkill === true,
+        obsidianSkills: rawOpts.withObsidianSkills === true,
         codegraph: rawOpts.codegraph === false ? false : rawOpts.configureCodegraph === true ? true : undefined,
         brainRoot: rawOpts.brainRoot,
       });
@@ -606,17 +766,21 @@ export function buildProgram(): Command {
 
   program
     .command('uninstall')
-    .description('Remove repo-harness managed hook adapters from Codex and/or Claude host config')
+    .description('Remove owned user-level configuration; preserve user changes and static history')
     .option('--target <target>', `Target host: ${TARGET_HELP}`, 'both')
     .option('--location <location>', `Install location: ${LOCATION_HELP}`, 'global')
-    .action((rawOpts: { target: string; location: string }) => {
+    .option('--dry-run', 'Preview cleanup without filesystem writes')
+    .option('--recover-interrupted', 'Restore recorded fragments after interrupted setup; overwrites later edits to those fragments')
+    .option('--json', 'Output the cleanup result as JSON')
+    .action((rawOpts: { target: string; location: string; dryRun?: boolean; recoverInterrupted?: boolean; json?: boolean }) => {
       const target = assertTarget(rawOpts.target, 'uninstall');
       const location = assertLocation(rawOpts.location, 'uninstall');
-      const uninstallAdapters = () => runUninstall({ target, location });
-      const result = location === 'global'
+      const uninstallAdapters = () => runUninstall({ target, location, dryRun: rawOpts.dryRun, recoverInterrupted: rawOpts.recoverInterrupted });
+      const result = location === 'global' && !rawOpts.dryRun
         ? withRuntimeHostTransactionLock(process.env, uninstallAdapters)
         : uninstallAdapters();
-      for (const line of result.lines) console.log(line);
+      if (rawOpts.json) console.log(JSON.stringify(result, null, 2));
+      else for (const line of result.lines) console.log(line);
       process.exit(result.exitCode);
     });
 
@@ -661,6 +825,7 @@ export function buildProgram(): Command {
     });
 
   program.addCommand(buildInitHookCommand());
+  program.addCommand(buildClaudeReviewCommand());
   program.addCommand(buildSetupCommand());
 
   program
@@ -676,7 +841,7 @@ export function buildProgram(): Command {
 
   program
     .command('cross-review')
-    .description('Deterministic opposite-provider review of the current review scope (repo-harness-cross-review)')
+    .description('Deterministic independent review of the current review scope (repo-harness-cross-review)')
     .requiredOption('--provider <mode>', `Provider to run: ${CROSS_REVIEW_PROVIDER_MODES.join('|')}`)
     .option('--repo <path>', 'Target repo root (defaults to cwd)')
     .option('--base <revision>', 'Base revision to diff against (defaults to the review-subject default base)')
@@ -721,7 +886,34 @@ export function buildProgram(): Command {
   program.addCommand(buildChatgptCommand());
   program.addCommand(buildRunCommand());
   program.addCommand(buildStateCommand());
+  program.addCommand(buildSprintCommand());
+  program.addCommand(buildPublicationCommand());
+  program.addCommand(buildFleetCommand());
+  program.addCommand(buildOperatorCommand());
+  program.addCommand(buildAutomationCommand());
+  program.addCommand(buildRefactorCommand());
+  program.addCommand(buildCampaignCommand());
+  program.addCommand(buildEngineerCommand());
   program.addCommand(buildArchitectureProjectionCommand());
+  program.addCommand(buildIntegrationCommand());
+  program.addCommand(buildDelegationCommand());
+  program.addCommand(buildCollaborationCommand());
+  program.addCommand(buildVerifiedContextCommand());
+  program.addCommand(buildInterfaceChangeCommand());
+  program.addCommand(buildExternalSourceCommand());
+  program
+    .command('__reconcile-installed-runtime', { hidden: true })
+    .description('Internal candidate-owned managed runtime reconciliation')
+    .requiredOption('--request <base64url>', 'Parent transaction capability payload')
+    .action((rawOpts: { request: string }) => {
+      try {
+        console.log(JSON.stringify(runCandidateRuntimeReconciliation(rawOpts.request)));
+        process.exit(0);
+      } catch (error) {
+        console.error(`candidate reconciliation: ${(error as Error).message}`);
+        process.exit(1);
+      }
+    });
   program
     .command('circuit-breaker-record', { hidden: true })
     .description('Internal persistent workflow circuit breaker')
@@ -799,6 +991,12 @@ export function buildProgram(): Command {
 }
 
 export async function runCli(argv: string[] = process.argv): Promise<void> {
+  const bunVersion = process.versions.bun;
+  if (!bunVersionIsSupported(bunVersion)) {
+    throw new Error(
+      `repo-harness requires Bun >= ${MIN_BUN_VERSION}; found ${bunVersion ?? 'unknown'}. Upgrade Bun and retry.`,
+    );
+  }
   const args = argv.slice(2);
   if (args.length === 1 && (args[0] === '--version' || args[0] === '-V')) {
     console.log(CLI_VERSION);

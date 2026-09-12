@@ -19,7 +19,7 @@ The boundary has four layers:
    `.ai/harness/workflow-contract.json`, and invokes the hook-only CLI entry
    point (with the full CLI as the install-time command fallback when the
    small binary is unavailable).
-3. `ROUTES` contains the 11 public `(event, routeId, matcher)` tuples. Every
+3. `ROUTES` contains the 12 public `(event, routeId, matcher)` tuples. Every
    tuple has exactly one `handler`; there is no `scripts` field and no Bash
    host-event dispatcher.
 4. `handler-registry.ts` runs one typed in-process handler. `runtime.ts` owns
@@ -64,10 +64,26 @@ The public route inventory is:
 | `PostToolUse` | `bash` | `Bash` | `command-observed` |
 | `PostToolUse` | `always` | all | `trace-observer` |
 | `UserPromptSubmit` | `default` | all | `prompt` |
+| `UserPromptSubmit` | `inbox` | all | `task-inbox` |
 | `UserPromptSubmit` | `delegation` | Codex only | `subagent` |
 | `SubagentStart` | `context` | Codex only | `subagent` |
 | `SubagentStop` | `quality` | Codex only | `subagent` |
 | `Stop` | `default` | all | `stop` |
+
+The tuple order and membership are a stable public contract that Codex trust-
+hashes, so additions require an explicit installer projection and trust
+transition. Task Inbox uses a dedicated `UserPromptSubmit.inbox` row because
+peer bodies are untrusted and must remain outside prompt classification and
+authorization. Three pre-existing rows carry the earlier coordination surface:
+
+| Route | WP3 addition | Failure mode |
+| --- | --- | --- |
+| `SubagentStart` / `context` | `BoardSliceV1` appended to the context array | advisory; resolution failure means no block |
+| `PreToolUse` / `subagent` | the same slice appended to the `Task\|Agent` prompt, guarded by `HOOK_HOST != codex` for exactly-once; the `SendUserMessage` branch is untouched | advisory |
+| `PreToolUse` / `edit` | `LeaseOwnershipGuard`, armed only by a claim token whose `unit_ref` is the active-plan marker AND a linked worktree | fail-closed `exit(2)` once armed; advisory before arming |
+
+See `docs/architecture/shared-coordination-plane.md` §9 for the arming
+predicate, the five ownership steps, and the measured cost basis.
 
 The event result is fail-closed for unknown routes and missing handler
 bindings. A non-git or non-opt-in repository exits quietly without creating a
@@ -76,7 +92,26 @@ runtime event record.
 ## Telemetry contract
 
 `src/cli/hook/event-telemetry.ts` is the sole writer for
-`.ai/harness/runs/hook-events.jsonl`. A valid handled event record has:
+`.ai/harness/runs/hook-events.jsonl`. Storage maintenance lives in
+`src/effects/hook-event-log.ts`: before the next append, an active file at or
+above 8 MiB is atomically renamed into `hook-events.jsonl.archive/`. The archive
+retains at most 32 owned segments and 256 MiB, deleting oldest segments first.
+The active threshold may be exceeded by the last record or concurrent appends;
+individual records larger than 8 MiB are rejected by the non-authoritative sink.
+No elapsed-time retention setting or operator configuration is required.
+
+The diet report and benchmark read the retained archive plus active file,
+streaming UTF-8 lines. Report samples describe retained history, not lifetime
+history. An explicitly selected custom diet-report log remains a single file.
+Rotation/retention and snapshot file opening share the existing owner-fenced
+lock; appends remain O_APPEND, and a renamed inode is never truncated. Readers
+open their descriptors under that lock and consume them unlocked, so subsequent
+retention cannot invalidate the selected snapshot. Foreign archive filenames and
+symlink targets are never pruned. Telemetry write failure cannot change hook
+safety. Existing large logs within the archive budget are preserved as one
+segment on their first rotation; no migration command or second writer exists.
+
+A valid handled event record has:
 
 - protocol `loop-engine-hook-event/v1`;
 - `runtime_entries: 1`;

@@ -370,6 +370,52 @@ describe("D6 redaction: typed-field exemption (EPC-05 gatekeeper CRITICAL fix)",
     expect(result.active_plan).toBe(LONG_SLUG_ACTIVE_PLAN);
   });
 
+  test("repo-harness schema and kind discriminants survive while arbitrary long values under those keys remain redacted", () => {
+    const schema = "repo-harness-change-assessment-evidence.v1";
+    const kind = "repo-harness-review-selection-packet";
+    const token = "Zx9Qk3mP7vRt2Nw8Ly5Ju1Hb6Fg4Ds0Ac";
+    const prefixedToken = `repo-harness-${token.toLowerCase()}`;
+    const result = redactPayloadStrings({ schema, kind, nested: { schema: token, kind: prefixedToken } }, []) as {
+      schema: string;
+      kind: string;
+      nested: { schema: string; kind: string };
+    };
+    expect(result.schema).toBe(schema);
+    expect(result.kind).toBe(kind);
+    expect(result.nested.schema).not.toBe(token);
+    expect(result.nested.kind).not.toBe(prefixedToken);
+  });
+
+  test("Change Assessment oracle IDs survive only at the fingerprinted required_oracles path", () => {
+    const oracleId = "published-package-runtime-readback";
+    expect(oracleId.length).toBeGreaterThanOrEqual(32);
+    const result = redactPayloadStrings({
+      change_assessment: {
+        assessment: { required_oracles: [{ id: oracleId }] },
+        selection_packet: { required_oracles: [{ id: oracleId }] },
+      },
+      unrelated: { id: oracleId },
+    }, []) as {
+      change_assessment: {
+        assessment: { required_oracles: Array<{ id: string }> };
+        selection_packet: { required_oracles: Array<{ id: string }> };
+      };
+      unrelated: { id: string };
+    };
+    expect(result.change_assessment.assessment.required_oracles[0]?.id).toBe(oracleId);
+    expect(result.change_assessment.selection_packet.required_oracles[0]?.id).toBe(oracleId);
+    expect(result.unrelated.id).not.toBe(oracleId);
+  });
+
+  test("known-secret matching still redacts a Change Assessment oracle ID", () => {
+    const oracleId = "published-package-runtime-readback";
+    const result = redactPayloadStrings({ required_oracles: [{ id: oracleId }] }, [oracleId]) as {
+      required_oracles: Array<{ id: string }>;
+    };
+    expect(result.required_oracles[0]?.id).not.toContain(oracleId);
+    expect(result.required_oracles[0]?.id).toContain("sha256:");
+  });
+
   test("array entries that are whole-value safe repo-relative paths are exempt too (allowed_paths/files_changed)", () => {
     const result = redactPayloadStrings(
       { allowed_paths: [LONG_SLUG_CONTRACT_PATH, "scripts/verify-sprint.sh"] },
@@ -429,4 +475,37 @@ describe("D6 redaction: typed-field exemption (EPC-05 gatekeeper CRITICAL fix)",
       expect(stored).toEqual(runTrace);
     });
   });
+});
+
+
+test("declared path arrays preserve extensionless files through ledger redaction", () => {
+  const path = "deploy/campaign-container/Dockerfile";
+  const payload = { change_assessment: { assessment: { subject_paths: [path], selected_paths: [path], reasons: [{ paths: [path] }] }, selection_packet: { subject_paths: [path] } } };
+  expect(redactPayloadStrings(payload, [])).toEqual(payload);
+  withTempRepo("evidence-extensionless-path", root => {
+    freshGenesisRepo(root);
+    const record = appendEvidenceEvent(root, baseInput({ payload: { kind: "json", value: payload } }));
+    expect(record.payload).toEqual(payload);
+  });
+});
+test("declared path arrays do not exempt known secrets, traversal or free text", () => {
+  const path = "deploy/campaign-container/Dockerfile";
+  expect(redactPayloadStrings({ subject_paths: [path] }, [path])).not.toEqual({ subject_paths: [path] });
+  for (const value of ["../" + path, "/" + path, "token=" + "a".repeat(40)]) {
+    expect(redactPayloadStrings({ subject_paths: [value] }, [])).not.toEqual({ subject_paths: [value] });
+  }
+  expect(redactPayloadStrings({ note: path }, [])).not.toEqual({ note: path });
+});
+
+test("declared extensionless path arrays still redact unknown token segments in the ledger", () => {
+  const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB";
+  for (const collection of ["paths", "subject_paths", "selected_paths", "allowed_paths", "files_changed", "reviewed_paths"]) {
+    const payload = { [collection]: ["deploy/" + token] };
+    expect(JSON.stringify(redactPayloadStrings(payload, []))).not.toContain(token);
+    withTempRepo("evidence-path-token", root => {
+      freshGenesisRepo(root);
+      const record = appendEvidenceEvent(root, baseInput({ payload: { kind: "json", value: payload } }));
+      expect(JSON.stringify(record.payload)).not.toContain(token);
+    });
+  }
 });

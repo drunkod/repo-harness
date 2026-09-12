@@ -19,7 +19,7 @@
  * ledger (a real `verify-sprint` run against this package's own,
  * realistic-length contract slug).
  *
- * Two typed exemptions from entropy redaction are applied structurally --
+ * Four typed exemptions from entropy redaction are applied structurally --
  * classified BEFORE the entropy pass runs, never a post-hoc unhash:
  *
  *   1. Declared hash: a whole string value matching
@@ -48,8 +48,21 @@
  *      remains the actual fail-closed check for path-key-convention fields,
  *      unchanged and still enforced by `event-writer.ts` independently of
  *      this module.
+ *   3. Repo-harness protocol identifiers: whole values under `schema` or
+ *      `kind` that match the public `repo-harness-...` identifier grammar.
+ *      These values are consumer-facing discriminants, not secrets; hashing
+ *      them makes an otherwise fingerprinted nested evidence envelope
+ *      unverifiable after ledger materialization. Known-secret matching still
+ *      runs before this exemption, exactly as for hashes and paths.
+ *   4. Change Assessment oracle identifiers: the whole `id` leaf only when
+ *      its structural path ends in `required_oracles/<array-index>/id`.
+ *      Oracle IDs are committed contract authority and participate in the
+ *      assessment, selection-packet, and evidence fingerprints; rewriting
+ *      one while preserving those hashes creates a self-inconsistent
+ *      verification envelope. This is deliberately not a general `id`
+ *      exemption. Known-secret matching still runs first.
  *
- * Both exemptions skip ONLY the entropy pattern. The secret-value denylist
+ * All exemptions skip ONLY the entropy pattern. The secret-value denylist
  * check (`findKnownSecretSpans`) still runs unconditionally over every
  * field, exempted or not -- a literal secret value sitting in a hash-shaped
  * or path-shaped position must still be replaced. Free-text fields (no
@@ -107,12 +120,61 @@ export function looksLikeSafeRepoRelativePath(value: string): boolean {
   return /\.[^./]+$/.test(value);
 }
 
+const REPO_HARNESS_PROTOCOL_IDENTIFIERS = new Set([
+  "repo-harness-change-assessment-evidence.v1",
+  "repo-harness-review-selection-packet",
+]);
+
+/** Rule 3: a closed public protocol-discriminant allowlist. Key, whole-value,
+ * and exact-membership checks keep attacker-shaped `repo-harness-...` strings
+ * subject to entropy redaction while preserving the two consumer contracts
+ * whose fingerprints must survive ledger materialization byte-for-byte. */
+export function isRepoHarnessProtocolIdentifier(key: string | undefined, value: string): boolean {
+  if (key !== "schema" && key !== "kind") return false;
+  return REPO_HARNESS_PROTOCOL_IDENTIFIERS.has(value);
+}
+
+/** Rule 4: only the fingerprinted Change Assessment oracle-array position.
+ * The numeric segment proves this is an array entry; a free-form object such
+ * as `{ required_oracles: { attacker: { id } } }` does not qualify. */
+export function isChangeAssessmentOracleIdPath(path: readonly string[]): boolean {
+  if (path.length < 3) return false;
+  const idKey = path[path.length - 1];
+  const arrayIndex = path[path.length - 2];
+  const collection = path[path.length - 3];
+  return idKey === "id"
+    && collection === "required_oracles"
+    && typeof arrayIndex === "string"
+    && /^(?:0|[1-9][0-9]*)$/.test(arrayIndex);
+}
+
 /** Structural classification: does this leaf (key + value) qualify for
  * either typed exemption? Computed once, up front -- see the module doc
  * comment's "order of operations" note (classify first, then redact the
  * rest; never a post-hoc unhash). */
-export function isEntropyExemptLeaf(key: string | undefined, value: string): boolean {
-  return isDeclaredHashValue(value) || isPathConventionKey(key) || looksLikeSafeRepoRelativePath(value);
+/** Typed path collections also contain extensionless files such as Dockerfile.
+ * A long token inside a segment must still take the existing entropy pass. */
+function isDeclaredPathArrayEntry(path: readonly string[], value: string): boolean {
+  const index = path.at(-1), collection = path.at(-2);
+  return typeof index === 'string' && /^(?:0|[1-9][0-9]*)$/.test(index)
+    && typeof collection === 'string'
+    && ['paths', 'subject_paths', 'selected_paths', 'allowed_paths', 'files_changed', 'reviewed_paths'].includes(collection)
+    && !value.startsWith('/') && value.includes('/') && !/[\\\s]/.test(value)
+    && value.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..'
+      && !new RegExp(HIGH_ENTROPY_TOKEN_SOURCE).test(segment));
+}
+
+export function isEntropyExemptLeaf(
+  key: string | undefined,
+  value: string,
+  path: readonly string[] = [],
+): boolean {
+  return isDeclaredHashValue(value)
+    || isPathConventionKey(key)
+    || isDeclaredPathArrayEntry(path, value)
+    || looksLikeSafeRepoRelativePath(value)
+    || isRepoHarnessProtocolIdentifier(key, value)
+    || isChangeAssessmentOracleIdPath(path);
 }
 
 interface Span {
@@ -203,7 +265,7 @@ export function redactSecretValue(
 export function redactPayloadStrings(value: JsonValue, knownSecretValues: readonly string[]): JsonValue {
   return mapStringLeaves(value, (path, leaf) => {
     const key = path[path.length - 1];
-    const exempt = isEntropyExemptLeaf(key, leaf);
+    const exempt = isEntropyExemptLeaf(key, leaf, path);
     return redactSecretValue(leaf, knownSecretValues, { entropyExempt: exempt });
   });
 }

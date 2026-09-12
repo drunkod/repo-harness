@@ -405,6 +405,22 @@ rewrite_plan_artifact_references() {
   mv "$tmp_file" "$plan_file"
 }
 
+contract_acceptance_policy_json() {
+  local codex_host=0
+  local claude_host=0
+  [[ -n "${CODEX_SESSION_ID:-}" ]] && codex_host=1
+  [[ -n "${CLAUDE_SESSION_ID:-}" ]] && claude_host=1
+  if [[ "$codex_host" -eq 1 && "$claude_host" -eq 1 ]]; then
+    echo "[PlanToTodo] ambiguous host identity: both CODEX_SESSION_ID and CLAUDE_SESSION_ID are set" >&2
+    return 1
+  fi
+  if [[ "$codex_host" -eq 1 ]]; then
+    printf '%s' '{"protocol":2,"reviewer":"Codex","source":"codex-plugin","user_waiver":"allowed"}'
+  else
+    printf '%s' '{"protocol":2,"reviewer":"Codex","source":"codex-review","user_waiver":"allowed"}'
+  fi
+}
+
 render_contract_file() {
   local plan_file="$1"
   local contract_file="$2"
@@ -415,159 +431,16 @@ render_contract_file() {
   local capability_id="$7"
   local owner="${USER:-AI Agent}"
   local task_profile
+  local acceptance_policy
   local template_file=".claude/templates/contract.template.md"
   local tmp_file
 
   task_profile="$(plan_task_profile_from_file "$plan_file")"
+  acceptance_policy="$(contract_acceptance_policy_json)"
 
   if [[ ! -f "$template_file" ]]; then
-    mkdir -p .claude/templates
-    cat > "$template_file" <<'CONTRACT_TEMPLATE_EOF'
-# Task Contract: {{TASK_SLUG}}
-
-> **Status**: Active
-> **Plan**: {{PLAN_FILE}}
-> **Task Profile**: {{TASK_PROFILE}}
-> <!-- legal values: code-change | docs-only | ledger-closeout | migration | eval-only | delegated-run | bugfix (omit for legacy passthrough); see docs/reference-configs/sprint-contracts.md -->
-> **Owner**: {{OWNER}}
-> **Capability ID**: {{CAPABILITY_ID}}
-> **Last Updated**: {{TIMESTAMP}}
-> **Review File**: `{{REVIEW_FILE}}`
-> **Notes File**: `{{NOTES_FILE}}`
-> **Exemplar**: `docs/reference-configs/contract-brief-example.md`
-
-## Why
-
-Why this task matters and what breaks downstream if it ships wrong or is skipped.
-
-## Goal
-
-Describe the exact outcome this task must deliver.
-
-## Scope
-
-- In scope:
-- Out of scope:
-- Taste constraints: <!-- advisory only, no run gate; default style/taste lives in AGENTS.md and the minimal-change policy, use this to record a per-task override -->
-
-## Stop Conditions
-
-- Stop and hand back to the parent if the change would require editing a path outside Allowed Paths.
-- Stop if an Exit Criteria command cannot be run in this environment.
-- Stop if Goal, Scope, or Exit Criteria are internally contradictory.
-
-## Falsifier
-
-What observable evidence would prove this task's direction wrong, and the cheapest proof point to check first. Leave as-is if not applicable.
-
-## Root Cause Evidence
-
-Required when Task Profile is `bugfix`; leave as-is otherwise.
-
-- root_cause: one sentence naming file:line/condition (testable, not "a state issue").
-- repro: the command or UI path that reproduces the symptom.
-- regression_guard: path to a test that fails on the unfixed code and passes after the fix (must also appear under exit_criteria.tests_pass).
-- pre_fix_failure_artifact: path to a captured run of regression_guard on the UNFIXED code. Capture with `bun test <regression_guard> > <artifact> 2>&1; echo "PRE_FIX_EXIT=$?" >> <artifact>` (no pipes — pipes swallow the exit status). The gate requires a non-zero `PRE_FIX_EXIT=` line plus the regression_guard path string in the artifact (see the Root Cause Evidence Gate section in docs/reference-configs/sprint-contracts.md).
-
-## Workflow Inventory
-
-- Source plan: `{{PLAN_FILE}}`
-- Deferred-goal ledger: `tasks/todos.md`
-- Review file: `{{REVIEW_FILE}}`
-- Notes file: `{{NOTES_FILE}}`
-- Checks file: `.ai/harness/checks/latest.json`
-- Run snapshots: `.ai/harness/runs/`
-- Scope gate: edit only paths listed under `allowed_paths`; update this contract before widening scope.
-- Completion gate: run `verify-sprint --prepare-acceptance`, record one typed AcceptanceReceipt under the frozen policy below, then run `verify-sprint`; review Markdown is projection only.
-
-## Acceptance Policy
-
-```json
-{"protocol":1,"reviewer":"Claude","user_waiver":"allowed"}
-```
-
-## Allowed Paths
-
-```yaml
-allowed_paths:
-  - docs/spec.md
-  - plans/
-  - tasks/todos.md
-  - {{CONTRACT_FILE}}
-  - {{REVIEW_FILE}}
-  - {{NOTES_FILE}}
-  - .ai/context/capabilities.json
-  - .claude/templates/
-  - src/
-  - tests/
-```
-
-## Evidence Requirements
-
-```yaml
-evidence_requirements:
-  # Set benchmark to required when this contract consumes the harness profile benchmark matrix.
-  benchmark: not_applicable
-```
-
-## Delegation Contract
-
-```yaml
-delegation:
-  budget:
-    tokens: null
-    runner_invocations: null
-    wall_time_minutes: null
-  permission_scope:
-    mode: inherit_allowed_paths
-    writable_paths: []
-    network: inherited
-  roles:
-    parent:
-      mode: narrate_and_gatekeep
-      purpose: approval_checkpoint_owner
-    explorer:
-      mode: read_only
-      purpose: codebase_research
-    worker:
-      mode: edit_within_allowed_paths
-      purpose: implementation
-    verifier:
-      mode: read_only
-      purpose: exit_criteria_review
-  runner:
-    preferred:
-      - subagent
-    fallback: null
-    brief_is_authoritative: true
-```
-
-## Exit Criteria (Machine Verifiable)
-
-```yaml
-exit_criteria:
-  files_exist:
-    - docs/spec.md
-  artifacts_exist:
-    - .ai/harness/checks/latest.json
-    - {{NOTES_FILE}}
-  tests_pass:
-    - path: tests/unit/{{TASK_SLUG}}.test.ts
-  commands_succeed:
-    - bun run check:type
-```
-
-## Acceptance Notes (Human Review)
-
-- Functional behavior:
-- Edge cases:
-- Regression risks:
-
-## Rollback Point
-
-- Commit / checkpoint:
-- Revert strategy:
-CONTRACT_TEMPLATE_EOF
+    echo "canonical contract template is required: $template_file" >&2
+    return 1
   fi
 
   tmp_file="$(mktemp)"
@@ -587,6 +460,10 @@ CONTRACT_TEMPLATE_EOF
       -e "s|tasks/reviews/${slug}\\.review\\.md|${review_file}|g" \
       -e "s|tasks/notes/${slug}\\.notes\\.md|${notes_file}|g" \
       > "$tmp_file"
+  mv "$tmp_file" "$contract_file"
+  tmp_file="$(mktemp)"
+  sed "s|^{\"protocol\":2,\"reviewer\":\"Codex\",\"source\":\"codex-review\",\"user_waiver\":\"allowed\"}$|${acceptance_policy}|" \
+    "$contract_file" > "$tmp_file"
   mv "$tmp_file" "$contract_file"
 }
 
@@ -668,13 +545,13 @@ maybe_advise_contract_brief_preflight() {
   fi
 }
 
-# Advisory-only geju (格局) freeze reminder at projection time. geju judgment stays
+# Advisory-only geju freeze reminder at projection time. geju judgment stays
 # live, pre-contract exploration; only its output (thesis/direction/falsifier)
 # belongs in the contract. This MUST NOT affect exit code -- callers append
 # `|| true` -- it only nudges the author to freeze geju output into the
 # just-rendered contract before delegating.
 maybe_advise_geju_freeze() {
-  echo "[Geju] If this task came from a 格局/geju pass, freeze its output into the contract before delegating:" >&2
+  echo "[Geju] If this task came from a geju pass, freeze its output into the contract before delegating:" >&2
   echo "[Geju]   thesis + high-level direction -> ## Why ; falsifier + cheapest proof point -> ## Falsifier" >&2
   echo "[Geju] Live geju is pre-contract exploration only; once frozen, the contract is authoritative." >&2
 }
@@ -1070,9 +947,13 @@ screenshot/artifact path, or reviewer observation.
 REVIEW_TEMPLATE_EOF
 fi
 
-render_contract_file "$plan_file" "$contract_file" "$review_file" "$notes_file" "$slug" "$timestamp_human" "$capability_id"
+# An existing contract may already be admitted by digest. Projection initializes
+# missing contracts only; preflight owns rejection of incomplete existing briefs.
+if [[ ! -e "$contract_file" && ! -L "$contract_file" ]]; then
+  render_contract_file "$plan_file" "$contract_file" "$review_file" "$notes_file" "$slug" "$timestamp_human" "$capability_id"
+  carry_forward_plan_scope_boundary "$plan_file" "$contract_file"
+fi
 maybe_advise_geju_freeze || true
-carry_forward_plan_scope_boundary "$plan_file" "$contract_file"
 maybe_advise_contract_brief_preflight "$contract_file"
 render_implementation_notes_file "$plan_file" "$contract_file" "$review_file" "$notes_file" "$slug" "$timestamp_human"
 sed \

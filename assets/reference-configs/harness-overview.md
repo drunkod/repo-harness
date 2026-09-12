@@ -32,7 +32,7 @@ with the project.
 1. `docs/spec.md` captures stable product intent.
 2. `plans/plan-*.md` captures a concrete execution approach.
 3. `tasks/contracts/<plan-stem>.contract.md` defines done for the active sprint.
-4. `tasks/current.md` is a tracked mainline status snapshot derived from workflow artifacts; it is not a live lock, kanban board, or implementation gate.
+4. `tasks/current.md` is an ignored local read model derived from workflow artifacts; it is not tracked, not a live lock, kanban board, or implementation gate.
 5. `tasks/todos.md` is the deferred-goal ledger; the plan's `## Task Breakdown` and active contract carry sprint execution.
 6. `tasks/notes/<plan-stem>.notes.md` records design decisions, deviations, tradeoffs, open questions, and promotion candidates for this sprint only.
 7. `tasks/reviews/<plan-stem>.review.md` records evaluator judgment.
@@ -55,8 +55,9 @@ with the project.
 - Implementation should prefer `docs/spec.md`, an approved plan, and an active sprint contract.
 - Claiming completion should include contract verification evidence, a run snapshot, implementation notes, and a passing Waza `/check` review artifact.
 - Stopping a session should refresh `.ai/harness/handoff/current.md` for easier resume; while pending planning orchestration is open, Stop may block once to force a plan completeness self-review before execution.
-- Refresh `tasks/current.md` with `repo-harness run refresh-current-status --write --reason <reason>` only at explicit lifecycle boundaries or as a deliberate maintainer action; ordinary hooks should not dirty tracked files.
-- In non-target worktrees, read the target branch snapshot with `git show <target>:tasks/current.md` and verify stale or surprising state against the source artifacts before acting.
+- Refresh `tasks/current.md` with `repo-harness run refresh-current-status --write --reason <reason>` only at explicit lifecycle boundaries or as a deliberate maintainer action; ordinary hooks should not rewrite the local snapshot on every event.
+- `tasks/current.md` is regenerated per worktree and never read across branches; verify stale or surprising state against the source artifacts before acting.
+- Existing repos adopted before this file became ignored still have it committed; run `git rm --cached tasks/current.md` once to untrack it. The file stays on disk and the next refresh regenerates it.
 - Use `docs/reference-configs/agentic-development-flow.md` for skill routing and `docs/reference-configs/external-tooling.md` for install/update commands.
 - Use `docs/reference-configs/global-working-rules.md` as the user-level Claude/Codex rule template; keep repo-local workflow contracts in repo files.
 - Externalized reference docs may be indexed by `.ai/harness/brain-manifest.json`. Validation and export through `repo-harness run check-brain-manifest` / `sync-brain-docs` are explicit operator actions and never part of hook or workflow correctness.
@@ -77,8 +78,9 @@ with the project.
 
 ## Information Lifecycle
 
+- Task synchronization: `check-task-sync.sh` accepts existing diff-bound workflow evidence or a valid scoped waiver. Otherwise it passes the complete changed-path inventory, including the configured Git base range, to `repo-harness state resolve`. A successful `lite` result needs no workflow artifact; `standard` and `strict` still require bound evidence. Missing, failed, or malformed resolver output fails closed. This is a ceremony exemption, not a substitute for behavior-specific verification.
 - Notes: `tasks/notes/<plan-stem>.notes.md` is task-local and auditable. It should not be treated as durable knowledge by default.
-- Current status: `tasks/current.md` is a tracked derived snapshot for orientation only. It must be regenerated from source artifacts and must not contain hand-written kanban/checklist state.
+- Current status: `tasks/current.md` is an ignored local read model for orientation only. It must be regenerated from source artifacts and must not contain hand-written kanban/checklist state.
 - Evidence: `.ai/harness/checks/latest.json` is the current gate, while `.ai/harness/runs/*.json` keeps ignored local verification snapshots for the current workflow audit. Task-specific `.ai/harness/checks/*.latest.{json,md}` reports are ignored runtime cache; promote durable conclusions into reviews, contracts, notes, or research.
 - Human reading surface: `docs/spec.md`, `docs/architecture/`, and durable `docs/researches/` conclusions are the default entrypoint. Root workflow artifacts should describe active work only; completed plan/contract/review/notes/todo artifacts move to `plans/archive/` or `tasks/archive/`, and `.rgignore` keeps those archives plus runtime evidence out of default `rg` results.
 - Closeout order: promote durable truth first, then archive the workflow artifacts. If a fact only lives in a review/contract/checks file, the workflow is not ready to disappear from the active reading surface.
@@ -201,7 +203,7 @@ rather than inferring those values from turns, tool names, or timestamps.
 - Use `repo-harness capability-context status|request|sync` to keep paired local context files aligned with the registry. The command writes only the controlled `CAPABILITY CONTEXT` block and preserves hand-authored content plus the separate architecture contract block.
 - `.ai/context/capability-source-map.json` is the optional human-edited source-map manifest for capability positioning and source pointers. Missing entries fall back to registry/architecture/workstream metadata; `--auto-fill-positioning` writes deterministic draft entries explicitly, not from hooks.
 - `.ai/harness/capability-context/` is ignored runtime queue state. Post-edit hooks may enqueue requests, and `SessionStart` only reminds the current agent to run `repo-harness capability-context sync --pending --apply`.
-- `.ai/harness/architecture-projection/` is ignored durable projection runtime state. It owns one running provider job per repository, pending jobs, typed receipts, refresh receipts, and dead letters; source observations are acknowledged only after a terminal receipt. SessionStart exposes the exact oldest dead-letter id for the explicit `architecture-projection retry-dead-letter` recovery command.
+- `.ai/harness/architecture-projection/` is ignored durable projection runtime state. It owns one running provider job per repository, pending jobs, typed receipts, refresh receipts, unresolved-major acceptance candidates, content-bound acceptance or proof-reconciliation receipts, and dead letters; source observations are acknowledged only after a terminal receipt. `architecture-projection accept` binds an explicit approval reference to one exact fresh candidate and resolves its dead letter without inferring semantic scope. `architecture-projection reconcile` retires only an exact proof-only candidate after a current CodeGraph-ready empty check-mode `noop`; it cannot carry approval or apply evidence, is mutually exclusive with acceptance, and converts an automatic-drain dead letter to its terminal job receipt. SessionStart exposes the exact oldest dead-letter id for the explicit `architecture-projection retry-dead-letter` recovery command.
 - `SessionStart` also summarizes pending architecture request cards so a resumed agent can see drift debt before claiming finish.
 
 ## Initializer and Runtime Model

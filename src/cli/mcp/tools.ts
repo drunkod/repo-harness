@@ -1,14 +1,15 @@
 import { createHash } from 'crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync, appendFileSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, appendFileSync } from 'fs';
 import { homedir } from 'os';
 import { basename, dirname, isAbsolute, join, resolve } from 'path';
 import { isRegisteredRepoHarnessRoot, readRegisteredRepoHarnessRepos } from '../../effects/repo-registry';
 import { runProcess } from '../../effects/process-runner';
-import { runHelper } from '../runtime/helper-runner';
+import { runHelper } from '../../effects/runtime/helper-runner';
 import { listSessions, openSession, readSession, runBrowserConsult, runBrowserFollowup } from '../chatgpt-browser/engine';
-import type { BrowserProviderName, NativeBrowserChannel, ThinkingLevel } from '../chatgpt-browser/types';
+import type { BrowserProviderName, NativeBrowserChannel } from '../chatgpt-browser/types';
 import { hashMcpInput, tryWriteMcpAuditEntry } from './audit';
 import { loadMcpLocalConfig } from './auth';
+import { guardedWriteFile } from './guarded-write';
 import { isPathInside, resolveMcpPath } from './paths';
 import { buildReaderToolDefinitions, callReaderTool, createReaderToolContext, isReaderTool } from './reader-tools';
 import { buildCodingToolDefinitions, callCodingTool, isCodingTool, type CodingToolContext } from './coding-tools';
@@ -18,6 +19,13 @@ import type { McpProcessSessionManager } from './process-sessions';
 import { currentGitBranch, isRepoHarnessAdopted, resolveMcpRepoRoot } from './repo';
 import { redactMcpText } from './redaction';
 import { buildStateToolDefinitions, callStateTool, isStateTool } from './state-tools';
+import { buildFleetToolDefinitions, callFleetTool, fleetToolArgumentError, isFleetTool } from './fleet-tools';
+import {
+  buildCollaborationToolDefinitions,
+  callCollaborationTool,
+  isCollaborationTool,
+} from './collaboration-tools';
+import { buildEngineerToolDefinitions, callEngineerTool, isEngineerTool } from './engineer-tools';
 import type { McpAgentRunnerName, McpPolicy } from './types';
 import type { WorkspaceManager } from './workspaces';
 
@@ -30,6 +38,7 @@ export interface McpToolContext {
   processManager?: McpProcessSessionManager;
   sessionOwnerId?: string;
   codeGraphAdapter?: GeneralRepoCodeGraphAdapter;
+  engineerAuthorizationId?: string;
 }
 
 function codingContext(ctx: McpToolContext): CodingToolContext {
@@ -573,6 +582,64 @@ function bodyWithFrontmatter(title: string, kind: string, body: string): string 
   return body.trimStart().startsWith('---') ? body.trimEnd() + '\n' : `${frontmatter(title, kind)}${body.trimEnd()}\n`;
 }
 
+/**
+ * The workflow-artifact write tools. Each one commits through
+ * `guardedWriteFile` and accepts `expected_sha256` as its revision
+ * precondition. `append_handoff_note` is deliberately not a member: append
+ * concurrency is a separate design.
+ */
+const GUARDED_WRITE_TOOLS: readonly string[] = [
+  'write_prd',
+  'write_prd_from_idea',
+  'write_sprint',
+  'write_checklist_sprint',
+  'write_plan',
+  'prepare_codex_goal_from_sprint',
+  'write_codex_goal',
+];
+
+/**
+ * Parameters removed from the write surface, mapped to their replacement.
+ * `server.ts` dispatches through the low-level SDK path, so per-tool
+ * `inputSchema` is advisory and a retired key would otherwise be silently
+ * ignored — which is exactly the last-writer-wins behavior this release
+ * removes. Bounded migration window: rejected through 0.16.x, this table is
+ * deleted at 0.17.0.
+ */
+const RETIRED_WRITE_PARAMETERS: Record<string, string> = {
+  overwrite: 'expected_sha256',
+};
+
+function expectedSha256Arg(args: Record<string, unknown>): string | undefined {
+  return typeof args.expected_sha256 === 'string' ? args.expected_sha256 : undefined;
+}
+
+function checkWriteToolParameters(ctx: McpToolContext, tool: string, args: Record<string, unknown>): CallToolResult | null {
+  const definition = buildMcpToolDefinitions(ctx.policy).find((entry) => entry.name === tool);
+  const properties = (definition?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  if (!properties) return null;
+  const allowed = Object.keys(properties);
+  const supplied = Object.keys(args);
+
+  const retired = supplied.find((key) => !allowed.includes(key) && RETIRED_WRITE_PARAMETERS[key] !== undefined);
+  if (retired !== undefined) {
+    const replacement = RETIRED_WRITE_PARAMETERS[retired];
+    audit(ctx, tool, 'blocked', args, undefined, `retired parameter: ${retired}`);
+    return errorResult(
+      'RETIRED_PARAMETER',
+      `${retired} was removed from the repo-harness MCP workflow write tools in 0.16.1; pass ${replacement} instead. Read the target with read_workflow_file and send its sha256 as ${replacement} to replace an existing file, or omit ${replacement} to create a new one.`,
+      { retired, replacement, version: '0.16.1' },
+    );
+  }
+
+  const unknown = supplied.filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    audit(ctx, tool, 'blocked', args, undefined, `unknown parameters: ${unknown.join(', ')}`);
+    return errorResult('UNKNOWN_PARAMETER', `unknown parameter for ${tool}: ${unknown.join(', ')}`, { unknown, allowed });
+  }
+  return null;
+}
+
 function writeMarkdownArtifact(
   ctx: McpToolContext,
   repoRoot: string,
@@ -581,7 +648,7 @@ function writeMarkdownArtifact(
   title: string,
   kind: string,
   body: string,
-  overwrite: boolean,
+  expectedSha256: string | undefined,
   input: unknown,
   extra?: Record<string, unknown>,
 ): CallToolResult {
@@ -590,14 +657,20 @@ function writeMarkdownArtifact(
     audit(ctx, tool, 'blocked', input, relativePath, decision.reason);
     return errorResult('POLICY_DENIED', decision.reason ?? 'path denied', { path: relativePath });
   }
-  if (existsSync(decision.absolutePath) && !overwrite) {
-    audit(ctx, tool, 'blocked', input, relativePath, 'target exists and overwrite was not requested');
-    return errorResult('WOULD_OVERWRITE', `target already exists: ${relativePath}`);
+  const outcome = guardedWriteFile(decision.absolutePath, relativePath, bodyWithFrontmatter(title, kind, body), expectedSha256);
+  if (!outcome.ok) {
+    audit(ctx, tool, outcome.code === 'WRITE_FAILED' ? 'failed' : 'blocked', input, relativePath, outcome.code);
+    return errorResult(outcome.code, outcome.message, outcome.details);
   }
-  mkdirSync(dirname(decision.absolutePath), { recursive: true });
-  writeFileSync(decision.absolutePath, bodyWithFrontmatter(title, kind, body), 'utf-8');
   audit(ctx, tool, 'ok', input, relativePath);
-  return textResult({ status: 'written', repoRoot, path: relativePath, ...(extra ?? {}) });
+  return textResult({
+    status: 'written',
+    repoRoot,
+    path: relativePath,
+    sha256: outcome.sha256,
+    previousSha256: outcome.previousSha256,
+    ...(extra ?? {}),
+  });
 }
 
 // Canonical anti-extras clause injected into every runner-reachable surface (this
@@ -814,12 +887,6 @@ function renderCodexGoalFromSprint(args: Record<string, unknown>): { body: strin
   return { body, prompt };
 }
 
-function parseThinking(value: unknown): ThinkingLevel | undefined {
-  if (value === undefined || value === null || value === '') return undefined;
-  if (value === 'light' || value === 'standard' || value === 'extended' || value === 'heavy') return value;
-  throw new Error(`invalid thinking level: ${String(value)}`);
-}
-
 function parseBrowserProvider(value: unknown): BrowserProviderName | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   if (value === 'oracle' || value === 'native') return value;
@@ -833,6 +900,12 @@ function parseNativeBrowserChannel(value: unknown): NativeBrowserChannel | undef
 }
 
 export function buildMcpToolDefinitions(policy: McpPolicy, opts: { enableChatgptBrowser?: boolean } = {}): McpToolDefinition[] {
+  // C7 appends the collaboration block to the same closed engineer inventory
+  // rather than opening a second profile: the collaboration surface is bounded by
+  // exactly the authenticated Engineer principal this profile already carries.
+  if (policy.profile === 'engineer') {
+    return [...buildEngineerToolDefinitions(), ...buildCollaborationToolDefinitions()];
+  }
   const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
   const write = { readOnlyHint: false, openWorldHint: false, destructiveHint: false };
   const optionalRepoSchema = {
@@ -865,7 +938,7 @@ export function buildMcpToolDefinitions(policy: McpPolicy, opts: { enableChatgpt
       title: { type: 'string' },
       slug: { type: 'string' },
       body: { type: 'string' },
-      overwrite: { type: 'boolean' },
+      expected_sha256: { type: 'string' },
     },
     required: ['title', 'slug', 'body'],
     additionalProperties: false,
@@ -883,7 +956,7 @@ export function buildMcpToolDefinitions(policy: McpPolicy, opts: { enableChatgpt
       non_goals: { type: 'array', items: { type: 'string' } },
       success_criteria: { type: 'array', items: { type: 'string' } },
       notes: { type: 'string' },
-      overwrite: { type: 'boolean' },
+      expected_sha256: { type: 'string' },
     },
     required: ['title', 'slug', 'idea'],
     additionalProperties: false,
@@ -910,7 +983,7 @@ export function buildMcpToolDefinitions(policy: McpPolicy, opts: { enableChatgpt
           additionalProperties: false,
         },
       },
-      overwrite: { type: 'boolean' },
+      expected_sha256: { type: 'string' },
     },
     required: ['title', 'slug', 'prd_path', 'tasks'],
     additionalProperties: false,
@@ -925,7 +998,7 @@ export function buildMcpToolDefinitions(policy: McpPolicy, opts: { enableChatgpt
       goal_sprint_path: { type: 'string' },
       reference_repo: { type: 'string' },
       extra_instructions: { type: 'string' },
-      overwrite: { type: 'boolean' },
+      expected_sha256: { type: 'string' },
     },
     required: ['prd_path', 'sprint_path'],
     additionalProperties: false,
@@ -937,7 +1010,10 @@ export function buildMcpToolDefinitions(policy: McpPolicy, opts: { enableChatgpt
       title: { type: 'string' },
       files: { type: 'array', items: { type: 'string' } },
       model: { type: 'string' },
-      thinking: { type: 'string', enum: ['light', 'standard', 'extended', 'heavy'] },
+      thinking: {
+        type: 'string',
+        description: 'Thinking level passed to Oracle (validated by Oracle; e.g. light|standard|extended|extra-high|pro|heavy or UI alias instant|medium|high|xhigh)',
+      },
       provider: { type: 'string', enum: ['oracle', 'native'] },
       browserChannel: { type: 'string', enum: ['chrome', 'chrome-beta', 'chrome-dev', 'chrome-canary'] },
       followups: { type: 'array', items: { type: 'string' } },
@@ -977,6 +1053,7 @@ export function buildMcpToolDefinitions(policy: McpPolicy, opts: { enableChatgpt
     { name: 'list_prds', description: 'List PRD artifacts under plans/prds.', inputSchema: optionalRepoSchema, annotations: readOnly },
     { name: 'list_sprints', description: 'List sprint artifacts under plans/sprints.', inputSchema: optionalRepoSchema, annotations: readOnly },
     ...buildStateToolDefinitions(),
+    ...buildFleetToolDefinitions(),
     { name: 'write_prd', description: 'Write a PRD under plans/prds/*.prd.md.', inputSchema: markdownWriterSchema, annotations: write },
     { name: 'write_prd_from_idea', description: 'Turn a product idea into a strict-compatible draft PRD under plans/prds/*.prd.md.', inputSchema: ideaPrdSchema, annotations: write },
     { name: 'write_sprint', description: 'Write a sprint under plans/sprints/*.sprint.md.', inputSchema: markdownWriterSchema, annotations: write },
@@ -988,7 +1065,7 @@ export function buildMcpToolDefinitions(policy: McpPolicy, opts: { enableChatgpt
       description: 'Write .ai/harness/handoff/codex-goal.md after required section validation.',
       inputSchema: {
         type: 'object',
-        properties: { repo_path: { type: 'string' }, body: { type: 'string' }, overwrite: { type: 'boolean' } },
+        properties: { repo_path: { type: 'string' }, body: { type: 'string' }, expected_sha256: { type: 'string' } },
         required: ['body'],
         additionalProperties: false,
       },
@@ -1076,6 +1153,13 @@ export function buildMcpToolDefinitions(policy: McpPolicy, opts: { enableChatgpt
 
 export async function callMcpTool(ctx: McpToolContext, name: string, args: Record<string, unknown> = {}): Promise<CallToolResult> {
   try {
+    if (ctx.policy.profile === 'engineer') {
+      if (isCollaborationTool(name)) {
+        return callCollaborationTool({ repoRoot: ctx.repoRoot, authorizationId: ctx.engineerAuthorizationId }, name, args);
+      }
+      if (!isEngineerTool(name)) return errorResult('TOOL_NOT_AVAILABLE', `tool is not available in the engineer profile: ${name}`);
+      return callEngineerTool({ repoRoot: ctx.repoRoot, authorizationId: ctx.engineerAuthorizationId }, name, args);
+    }
     if (isCodingTool(name) && ctx.policy.capabilities.workspaceCoder) {
       return callCodingTool(codingContext(ctx), name, args);
     }
@@ -1094,6 +1178,18 @@ export async function callMcpTool(ctx: McpToolContext, name: string, args: Recor
       }, name);
       audit(ctx, name, 'ok', args);
       return textResult(result);
+    }
+    if (isFleetTool(name)) {
+      const argumentError = fleetToolArgumentError(name, args);
+      if (argumentError !== undefined) return errorResult('INVALID_ARGUMENT', argumentError);
+      return callFleetTool({ repoRoot: ctx.repoRoot, policy: ctx.policy }, name, args);
+    }
+    if (GUARDED_WRITE_TOOLS.includes(name)) {
+      // The low-level SDK dispatch does not enforce per-tool inputSchema, so an
+      // undeclared or retired key must be rejected here, before any repo is
+      // targeted or any path is resolved.
+      const rejected = checkWriteToolParameters(ctx, name, args);
+      if (rejected) return rejected;
     }
     switch (name) {
       case 'harness_status': {
@@ -1220,7 +1316,7 @@ export async function callMcpTool(ctx: McpToolContext, name: string, args: Recor
         if (!target.ok) return target.result;
         const title = String(args.title ?? '').trim();
         const slug = slugify(String(args.slug ?? title));
-        return writeMarkdownArtifact(ctx, target.repoRoot, name, prdArtifactPath(slug), title, 'prd', String(args.body ?? ''), args.overwrite === true, args);
+        return writeMarkdownArtifact(ctx, target.repoRoot, name, prdArtifactPath(slug), title, 'prd', String(args.body ?? ''), expectedSha256Arg(args), args);
       }
       case 'write_prd_from_idea': {
         const target = targetRepoRoot(ctx, args);
@@ -1228,14 +1324,14 @@ export async function callMcpTool(ctx: McpToolContext, name: string, args: Recor
         const title = String(args.title ?? '').trim();
         const slug = slugify(String(args.slug ?? title));
         const body = renderPrdFromIdeaBody(args);
-        return writeMarkdownArtifact(ctx, target.repoRoot, name, prdArtifactPath(slug), title, 'prd', body, args.overwrite === true, args);
+        return writeMarkdownArtifact(ctx, target.repoRoot, name, prdArtifactPath(slug), title, 'prd', body, expectedSha256Arg(args), args);
       }
       case 'write_sprint': {
         const target = targetRepoRoot(ctx, args);
         if (!target.ok) return target.result;
         const title = String(args.title ?? '').trim();
         const slug = slugify(String(args.slug ?? title));
-        return writeMarkdownArtifact(ctx, target.repoRoot, name, sprintArtifactPath(slug), title, 'sprint', String(args.body ?? ''), args.overwrite === true, args);
+        return writeMarkdownArtifact(ctx, target.repoRoot, name, sprintArtifactPath(slug), title, 'sprint', String(args.body ?? ''), expectedSha256Arg(args), args);
       }
       case 'write_checklist_sprint': {
         const target = targetRepoRoot(ctx, args);
@@ -1249,14 +1345,14 @@ export async function callMcpTool(ctx: McpToolContext, name: string, args: Recor
           return errorResult('PRD_NOT_READABLE', 'PRD path does not exist or is not policy-readable.', { path: prdPath });
         }
         const body = renderChecklistSprintBody(args);
-        return writeMarkdownArtifact(ctx, target.repoRoot, name, sprintArtifactPath(slug), title, 'sprint', body, args.overwrite === true, args);
+        return writeMarkdownArtifact(ctx, target.repoRoot, name, sprintArtifactPath(slug), title, 'sprint', body, expectedSha256Arg(args), args);
       }
       case 'write_plan': {
         const target = targetRepoRoot(ctx, args);
         if (!target.ok) return target.result;
         const title = String(args.title ?? '').trim();
         const slug = slugify(String(args.slug ?? title));
-        return writeMarkdownArtifact(ctx, target.repoRoot, name, `plans/plan-${slug}.md`, title, 'plan', String(args.body ?? ''), args.overwrite === true, args);
+        return writeMarkdownArtifact(ctx, target.repoRoot, name, `plans/plan-${slug}.md`, title, 'plan', String(args.body ?? ''), expectedSha256Arg(args), args);
       }
       case 'prepare_codex_goal_from_sprint': {
         const target = targetRepoRoot(ctx, args);
@@ -1280,7 +1376,7 @@ export async function callMcpTool(ctx: McpToolContext, name: string, args: Recor
           audit(ctx, name, 'blocked', args, '.ai/harness/handoff/codex-goal.md', `missing required goal sections: ${missing.join(', ')}`);
           return errorResult('INVALID_GOAL', 'Generated Codex goal is missing required sections.', { missing });
         }
-        return writeMarkdownArtifact(ctx, target.repoRoot, name, '.ai/harness/handoff/codex-goal.md', 'Codex Goal', 'codex-goal', goal.body, args.overwrite === true, args, {
+        return writeMarkdownArtifact(ctx, target.repoRoot, name, '.ai/harness/handoff/codex-goal.md', 'Codex Goal', 'codex-goal', goal.body, expectedSha256Arg(args), args, {
           prompt: goal.prompt,
         });
       }
@@ -1293,7 +1389,7 @@ export async function callMcpTool(ctx: McpToolContext, name: string, args: Recor
           audit(ctx, name, 'blocked', args, '.ai/harness/handoff/codex-goal.md', `missing required goal sections: ${missing.join(', ')}`);
           return errorResult('INVALID_GOAL', 'Codex goal is missing required sections or is too small.', { missing });
         }
-        return writeMarkdownArtifact(ctx, target.repoRoot, name, '.ai/harness/handoff/codex-goal.md', 'Codex Goal', 'codex-goal', body, args.overwrite === true, args);
+        return writeMarkdownArtifact(ctx, target.repoRoot, name, '.ai/harness/handoff/codex-goal.md', 'Codex Goal', 'codex-goal', body, expectedSha256Arg(args), args);
       }
       case 'append_handoff_note': {
         const target = targetRepoRoot(ctx, args);
@@ -1341,7 +1437,7 @@ export async function callMcpTool(ctx: McpToolContext, name: string, args: Recor
           files: stringList(args.files).map((path) => ({ path })),
           followups: stringList(args.followups),
           model: typeof args.model === 'string' ? args.model : undefined,
-          thinking: parseThinking(args.thinking),
+          thinking: typeof args.thinking === 'string' ? args.thinking : undefined,
           provider: parseBrowserProvider(args.provider),
           browserChannel: parseNativeBrowserChannel(args.browserChannel),
           writeOutput: typeof args.writeOutput === 'string' ? args.writeOutput : undefined,

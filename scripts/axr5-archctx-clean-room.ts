@@ -1,24 +1,20 @@
 #!/usr/bin/env bun
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { PROJECTION_REQUEST_VERSION, type ProjectionRequestV1 } from '../src/core/architecture/projection';
 import { archctxCapabilities, captureArchitectureProjectionSnapshot, runArchitectureProjection } from '../src/effects/architecture/archctx-provider';
 
-const VERSION = '0.4.2';
+const VERSION = '0.5.10';
 const repoRoot = resolve(import.meta.dir, '..');
 const archContextRoot = resolve(flag('--arch-context-root') ?? join(repoRoot, '..', 'arch-context'));
 const revision = flag('--revision') ?? git(archContextRoot, ['rev-parse', 'HEAD']);
 const outputPath = resolve(repoRoot, flag('--out') ?? 'docs/verification/axr5-archctx-clean-room-readback.json');
+const stagedOutputPath = `${outputPath}.tmp-${process.pid}`;
 const keep = process.argv.includes('--keep-temp');
 mkdirSync(dirname(outputPath), { recursive: true });
-writeFileSync(outputPath, `${JSON.stringify({
-  schemaVersion: 'repo-harness.axr5-clean-room/v1',
-  status: 'running',
-  source: { repository: 'Ancienttwo/arch-context', revision, archiveMode: 'git-archive', dirtySourceUsed: false },
-}, null, 2)}\n`);
 const workspace = mkdtempSync(join(tmpdir(), 'repo-harness-axr5-clean-room-'));
 let installedBinary: string | null = null;
 let daemonRoot: string | null = null;
@@ -45,6 +41,7 @@ try {
   const archctxTarball = join(artifacts, String(release.artifact.tarball));
   const codeGraphPlatform = installedPlatformPackage('@colbymchenry', 'codegraph');
   const jiebaPlatform = installedPlatformPackage('@node-rs', 'jieba');
+  const koffiPlatform = installedPlatformPackage('@koromix', 'koffi');
 
   mkdirSync(consumer, { recursive: true });
   writeFileSync(join(consumer, 'package.json'), `${JSON.stringify({
@@ -56,6 +53,8 @@ try {
       [codeGraphPlatform.name]: `file:${codeGraphPlatform.path}`,
       '@node-rs/jieba': `file:${installedPackagePath('@node-rs', 'jieba')}`,
       [jiebaPlatform.name]: `file:${jiebaPlatform.path}`,
+      koffi: `file:${join(repoRoot, 'node_modules', 'koffi')}`,
+      [koffiPlatform.name]: `file:${koffiPlatform.path}`,
     },
   }, null, 2)}\n`);
   const offlineEnv = {
@@ -143,8 +142,8 @@ extensions:
     status: 'verified',
     source: { repository: 'Ancienttwo/arch-context', revision, archiveMode: 'git-archive', dirtySourceUsed: false },
     packages: {
-      contracts: { name: 'archctx-contracts', version: VERSION, file: basename(contracts.tarball), integrity: contracts.integrity, sha512: sha512(contracts.tarball) },
-      archctx: { name: 'archctx', version: VERSION, file: basename(archctxTarball), integrity: release.artifact.integrity, sha512: sha512(archctxTarball) },
+      contracts: { name: 'archctx-contracts', version: VERSION, file: basename(contracts.tarball) },
+      archctx: { name: 'archctx', version: VERSION, file: basename(archctxTarball) },
     },
     consumer: {
       registry: 'disabled-loopback',
@@ -162,13 +161,14 @@ extensions:
         rendererVersion: projection.outputSnapshot.rendererVersion,
         layoutVersion: projection.outputSnapshot.layoutVersion,
         codeGraph: projection.outputSnapshot.generatedFrom,
-        receiptDigest: projection.receiptDigest,
       },
     },
   };
-  writeFileSync(outputPath, `${JSON.stringify(readback, null, 2)}\n`);
+  writeFileSync(stagedOutputPath, `${JSON.stringify(readback, null, 2)}\n`);
+  renameSync(stagedOutputPath, outputPath);
   process.stdout.write(`${JSON.stringify(readback, null, 2)}\n`);
 } finally {
+  rmSync(stagedOutputPath, { force: true });
   if (installedBinary && daemonRoot) spawnSync(installedBinary, ['daemon', 'stop'], { cwd: daemonRoot, encoding: 'utf8', stdio: 'ignore' });
   if (!keep) rmSync(workspace, { recursive: true, force: true });
 }
@@ -188,6 +188,12 @@ function linkBuildDependencies(checkout: string): void {
     if (name === '@archcontext') continue;
     symlinkSync(join(sourceModules, name), join(targetModules, name), 'dir');
   }
+  // 0.5.2 added koffi to the published runtime manifest. The source checkout used as the
+  // archive authority may not have refreshed its untracked node_modules after that release;
+  // bind the exact dependency installed by this consumer instead of letting the build borrow
+  // an undeclared global package.
+  const koffiTarget = join(targetModules, 'koffi');
+  if (!existsSync(koffiTarget)) symlinkSync(join(repoRoot, 'node_modules', 'koffi'), koffiTarget, 'dir');
   const targetScope = join(targetModules, '@archcontext');
   mkdirSync(targetScope, { recursive: true });
   const workspaces = (JSON.parse(readFileSync(join(checkout, 'package.json'), 'utf8')) as { workspaces?: unknown }).workspaces;
@@ -243,6 +249,8 @@ function installedPackagePath(scope: string, name: string): string {
   const roots = [
     join(archContextRoot, 'node_modules', scope),
     join(archContextRoot, 'node_modules', '.bun', 'node_modules', scope),
+    join(repoRoot, 'node_modules', scope),
+    join(repoRoot, 'node_modules', '.bun', 'node_modules', scope),
   ];
   for (const root of roots) {
     const candidate = join(root, name);
@@ -256,6 +264,8 @@ function installedPlatformPackage(scope: string, baseName: string): { name: stri
   const roots = [
     join(archContextRoot, 'node_modules', scope),
     join(archContextRoot, 'node_modules', '.bun', 'node_modules', scope),
+    join(repoRoot, 'node_modules', scope),
+    join(repoRoot, 'node_modules', '.bun', 'node_modules', scope),
   ];
   for (const root of roots) {
     if (!existsSync(root)) continue;
@@ -271,5 +281,4 @@ function run(command: string, args: string[], cwd: string, env: NodeJS.ProcessEn
   return { stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 function git(cwd: string, args: string[]): string { return run('git', args, cwd).stdout.trim(); }
-function sha512(path: string): string { return createHash('sha512').update(readFileSync(path)).digest('hex'); }
 function flag(name: string): string | undefined { const index = process.argv.indexOf(name); return index >= 0 ? process.argv[index + 1] : undefined; }

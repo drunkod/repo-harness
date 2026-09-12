@@ -8,17 +8,20 @@
  */
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'fs';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { execFileSync } from 'child_process';
 import type { EffectiveState } from '../../core/state/types';
@@ -27,10 +30,20 @@ import {
   advanceArchitectureDriftCursor,
   architectureDriftSourceEvent,
   computeArchitectureDriftChangedSet,
+  drainArchitectureDriftCascade,
 } from './architecture-drift';
+import { isImplementationSurfacePath } from '../../effects/review/diff-fingerprint';
 import { drainArchitectureProjectionJobs, type ArchitectureProjectionDrainResultV1 } from '../../effects/architecture/projection-orchestrator';
 import { loadArchitectureProjectionPolicy } from '../../effects/architecture/archctx-provider';
+import { publishArchitectureProjectionRestampForDrain } from '../../effects/architecture/restamp-publication';
 import { runMinimalChangeCli } from './minimal-change-cli';
+import {
+  MINIMAL_CHANGE_AUDIT_RECEIPT_PATH,
+  loadMinimalChangePolicy,
+  type MinimalChangePolicy,
+} from './minimal-change-policy';
+import { recordCircuitAttempt } from './circuit-breaker';
+import type { WorkflowProfile } from '../../core/workflow/profile';
 import { publishCheckpointFromLedger } from '../../effects/evidence/checkpoint-store';
 import {
   buildRecoveryContext,
@@ -38,6 +51,29 @@ import {
   renderRecoveryResume,
   resolveRecoveryEvidence,
 } from '../../effects/evidence/recovery-materializer';
+import { HookEffectReconciliationRequired } from './handler-contract';
+
+// Ignored runtime evidence, same tree as hook-events.jsonl. Deliberately not a
+// telemetry metric and not a typed journal: this exists to measure a hit rate
+// before deciding whether the advisory should ever block, and adding a metric
+// would repeat the `child_processes` completeness problem already on the ledger.
+const UNPLANNED_IMPLEMENTATION_EVIDENCE = '.ai/harness/runs/unplanned-implementation.jsonl';
+const STOP_DEFERRED_WORK_BUDGET_MS = 20_000;
+
+function recordUnplannedImplementation(repoRoot: string, now: Date, paths: readonly string[]): void {
+  try {
+    const target = join(repoRoot, UNPLANNED_IMPLEMENTATION_EVIDENCE);
+    mkdirSync(dirname(target), { recursive: true });
+    appendFileSync(target, `${JSON.stringify({
+      observed_at: now.toISOString(),
+      path_count: paths.length,
+      paths,
+    })}\n`, 'utf-8');
+  } catch {
+    // Evidence collection must never change the Stop result; the sibling side
+    // effects above are wrapped the same way.
+  }
+}
 
 export interface StopCollector {
   getRepoRoot(): string;
@@ -53,9 +89,13 @@ export interface StopProjectionTarget {
 
 export interface StopHandlerDependencies {
   readonly now?: () => Date;
+  /** Wall clock shared by architecture and journal deferred work. */
+  readonly wallClockMs?: () => number;
   readonly observeProjectionWrite?: (target: StopProjectionTarget) => void;
   /** Invoked once after the complete Stop projection batch commits. */
   readonly observeProjectionTransaction?: () => void;
+  /** Narrow post-commit fault/observation seam; never driven by an env flag. */
+  readonly afterProjectionWrite?: (target: StopProjectionTarget) => void;
   readonly drainArchitectureProjection?: (repoRoot: string, env: NodeJS.ProcessEnv) => ArchitectureProjectionDrainResultV1;
 }
 
@@ -84,6 +124,11 @@ interface StopPayload {
 interface MinimalChangeReview {
   readonly suffix: string;
   readonly summary: string;
+  /** Verdict of the latest report; '' when the review could not be read. */
+  readonly verdict: string;
+  readonly fingerprint: string;
+  readonly reportPath: string;
+  readonly findingLines: readonly string[];
 }
 
 interface ProjectionPaths {
@@ -251,6 +296,83 @@ function withEventsLock(repoRoot: string, eventsPath: string, fn: () => void): v
   }
 }
 
+/**
+ * Stop's event append is the only non-overwriting projection target. A host
+ * retry reuses the existing run identity, so suppress the same semantic event
+ * while still reporting the phase as committed to the invocation-local
+ * observer. This is intentionally local to Stop; it is not a generic journal.
+ */
+function eventAlreadyRecorded(eventsPath: string, content: string): boolean {
+  const semanticKey = stopEventSemanticKey(content);
+  if (!semanticKey) return false;
+  try {
+    const size = statSync(eventsPath).size;
+    const start = Math.max(0, size - STOP_EVENT_RECONCILE_WINDOW_BYTES);
+    const length = size - start;
+    const buffer = Buffer.alloc(length);
+    const fd = openSync(eventsPath, 'r');
+    try {
+      let offset = 0;
+      while (offset < length) {
+        const bytesRead = readSync(fd, buffer, offset, length - offset, start + offset);
+        if (bytesRead === 0) throw new Error('stop-handler: event reconciliation read made no progress');
+        offset += bytesRead;
+      }
+    } finally {
+      closeSync(fd);
+    }
+    const tail = buffer.toString('utf8');
+    const lines = tail.split('\n');
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index]!;
+      const prior = stopEventRecord(line);
+      if (!prior) continue;
+      return prior.projectionKey === semanticKey;
+    }
+    if (start > 0) {
+      throw new HookEffectReconciliationRequired(
+        `stop-handler: latest Stop event is outside the ${STOP_EVENT_RECONCILE_WINDOW_BYTES}-byte reconciliation window`,
+      );
+    }
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+const STOP_EVENT_RECONCILE_WINDOW_BYTES = 1024 * 1024;
+
+/**
+ * Stable Stop operation identity: the semantic event payload, excluding its
+ * timestamp. This lets a retry at a later host time converge while a later
+ * Stop in the same run with a changed source plan remains a new event.
+ */
+function stopEventSemanticKey(content: string): string | null {
+  return stopEventRecord(content)?.projectionKey ?? null;
+}
+
+function stopEventRecord(content: string): { readonly projectionKey: string } | null {
+  let candidate: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(content.trim());
+    if (!parsed || typeof parsed !== 'object') return null;
+    candidate = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const extra = candidate.extra && typeof candidate.extra === 'object' && !Array.isArray(candidate.extra)
+    ? candidate.extra as Record<string, unknown>
+    : null;
+  return candidate.event_type === 'handoff_refresh'
+    && candidate.reason === 'session-stop'
+    && extra
+    && typeof extra.projection_key === 'string'
+    && /^[0-9a-f]{64}$/.test(extra.projection_key)
+    ? { projectionKey: extra.projection_key }
+    : null;
+}
+
 class StopProjectionBatch {
   private readonly targets: readonly StopProjectionTarget[];
 
@@ -259,6 +381,7 @@ class StopProjectionBatch {
     private readonly paths: ProjectionPaths,
     private readonly content: { handoff: string; resume: string; event: string; runSummary: string },
     private readonly observer?: (target: StopProjectionTarget) => void,
+    private readonly afterProjectionWrite?: (target: StopProjectionTarget) => void,
   ) {
     this.targets = [
       { kind: 'handoff', path: paths.handoff },
@@ -272,18 +395,24 @@ class StopProjectionBatch {
     const [handoff, resume, event, runSummary] = this.targets;
     atomicWrite(this.repoRoot, join(this.repoRoot, handoff.path), this.content.handoff);
     this.observer?.(handoff);
+    this.afterProjectionWrite?.(handoff);
     atomicWrite(this.repoRoot, join(this.repoRoot, resume.path), this.content.resume);
     this.observer?.(resume);
+    this.afterProjectionWrite?.(resume);
     const eventPath = join(this.repoRoot, event.path);
     assertSafeRepoWritePath(this.repoRoot, eventPath);
     mkdirSync(dirname(eventPath), { recursive: true });
     withEventsLock(this.repoRoot, eventPath, () => {
       assertSafeRepoWritePath(this.repoRoot, eventPath);
-      appendFileSync(eventPath, this.content.event, { mode: 0o600 });
+      if (!eventAlreadyRecorded(eventPath, this.content.event)) {
+        appendFileSync(eventPath, this.content.event, { mode: 0o600 });
+      }
     });
     this.observer?.(event);
+    this.afterProjectionWrite?.(event);
     atomicWrite(this.repoRoot, join(this.repoRoot, runSummary.path), this.content.runSummary);
     this.observer?.(runSummary);
+    this.afterProjectionWrite?.(runSummary);
   }
 }
 
@@ -305,12 +434,35 @@ function projection(repoRoot: string, activePlan: string | null, env: NodeJS.Pro
   const handoffContent = renderRecoveryHandoff(context, evidence, contractPath);
   const resumeContent = renderRecoveryResume(context, evidence, contractPath);
   const runSummary = `${context.paths.runsDir}/${context.runId}.json`;
+  const projectionKey = createHash('sha256').update(JSON.stringify({
+    // This is the renderer's stable input projection. Deliberately omit the
+    // generated timestamps and workingDirectory: a later same-route host
+    // event gets a fresh timestamp, while the event log itself is already
+    // scoped to the fixed repo root. Neither may split an otherwise identical
+    // Stop retry.
+    context: {
+      reason: context.reason,
+      run_id: context.runId,
+      artifacts: context.artifacts,
+      source_plan: context.sourcePlan,
+      active_sprint_row: context.activeSprintRowText,
+      action: context.action,
+      next_task: context.nextTask,
+      goal: context.goal,
+      changed: context.changed,
+      recent_commands: context.recentCommandsText,
+      supersedes: context.supersedes,
+      paths: context.paths,
+      global_handoff_path: context.globalHandoffPath,
+    },
+    evidence,
+  })).digest('hex');
   const eventContent = `${JSON.stringify({
     ts: formatOffset(now),
     event_type: 'handoff_refresh',
     reason: 'session-stop',
     run_id: context.runId,
-    extra: { source_plan: context.sourcePlan, parent_run_id: context.runId },
+    extra: { source_plan: context.sourcePlan, parent_run_id: context.runId, projection_key: projectionKey },
   })}\n`;
   const runSummaryContent = `${JSON.stringify({
     generated_at: formatOffset(now),
@@ -331,16 +483,27 @@ function projection(repoRoot: string, activePlan: string | null, env: NodeJS.Pro
   };
 }
 
-function minimalChangeReview(repoRoot: string): MinimalChangeReview {
+const EMPTY_MINIMAL_CHANGE_REVIEW: MinimalChangeReview = {
+  suffix: '',
+  summary: '',
+  verdict: '',
+  fingerprint: '',
+  reportPath: '',
+  findingLines: [],
+};
+
+function minimalChangeReview(repoRoot: string, policy: MinimalChangePolicy): MinimalChangeReview {
   try {
     const result = runMinimalChangeCli(['review', '--phase', 'stop'], { cwd: repoRoot });
     const report = JSON.parse(result.stdout) as {
       verdict?: unknown;
       report_path?: unknown;
       findings?: unknown;
+      fingerprint?: unknown;
     };
     const findings = Array.isArray(report.findings) ? report.findings : [];
-    if (report.verdict === 'disabled' || findings.length === 0) return { suffix: '', summary: '' };
+    const verdict = typeof report.verdict === 'string' ? report.verdict : '';
+    if (verdict === 'disabled' || findings.length === 0) return EMPTY_MINIMAL_CHANGE_REVIEW;
     const reportPath = typeof report.report_path === 'string'
       ? report.report_path
       : '.ai/harness/checks/minimal-change.latest.json';
@@ -353,11 +516,101 @@ function minimalChangeReview(repoRoot: string): MinimalChangeReview {
         : typeof value.evidence === 'string' ? value.evidence : 'review required';
       return `- [${tag}] ${path}: ${question}`;
     });
-    const summary = `[MinimalChange] Non-blocking review (${reportPath}):\n${lines.join('\n')}`;
-    return { suffix: `\n\n${summary}`, summary };
+    const label = policy.blocking ? 'Enforced review' : 'Non-blocking review';
+    const summary = `[MinimalChange] ${label} (${reportPath}):\n${lines.join('\n')}`;
+    return {
+      suffix: `\n\n${summary}`,
+      summary,
+      verdict,
+      fingerprint: typeof report.fingerprint === 'string' ? report.fingerprint : '',
+      reportPath,
+      findingLines: lines,
+    };
   } catch {
-    return { suffix: '', summary: '' };
+    return EMPTY_MINIMAL_CHANGE_REVIEW;
   }
+}
+
+/**
+ * Audit receipt contract for the enforce gate:
+ * `.ai/harness/checks/minimal-change-audit.latest.json` must be a JSON object
+ * with `version: 1`, a `fingerprint` equal to the audited report fingerprint,
+ * a non-empty `decisions` array of non-empty strings, and a parseable
+ * `generated_at` timestamp. Missing, malformed, or mismatched receipts release
+ * nothing: the gate stays closed.
+ */
+function minimalChangeReceiptReleases(repoRoot: string, fingerprint: string): boolean {
+  if (!fingerprint) return false;
+  const receipt = readJson(join(repoRoot, MINIMAL_CHANGE_AUDIT_RECEIPT_PATH));
+  if (!receipt) return false;
+  if (receipt.version !== 1) return false;
+  if (typeof receipt.fingerprint !== 'string' || receipt.fingerprint !== fingerprint) return false;
+  if (!Array.isArray(receipt.decisions) || receipt.decisions.length === 0) return false;
+  if (!receipt.decisions.every((entry) => typeof entry === 'string' && entry.trim() !== '')) return false;
+  if (typeof receipt.generated_at !== 'string' || Number.isNaN(Date.parse(receipt.generated_at))) return false;
+  return true;
+}
+
+function minimalChangeBlockReason(review: MinimalChangeReview): string {
+  return [
+    `[MinimalChange] Enforce gate blocked Stop: the latest report verdict is \`review\` and no matching audit receipt exists (${review.reportPath}).`,
+    'Findings:',
+    ...review.findingLines,
+    'Resolve each finding by removing the growth it names, or record an explicit audit receipt at',
+    `  ${MINIMAL_CHANGE_AUDIT_RECEIPT_PATH}`,
+    `  {"version":1,"fingerprint":"${review.fingerprint}","decisions":["<one non-empty decision per finding>"],"generated_at":"<ISO-8601 timestamp>"}`,
+    '`fingerprint` must equal the audited report fingerprint exactly; a missing, malformed, or mismatched receipt keeps this gate closed.',
+    'Methodology: the reclaim-code-entropy skill covers this review when it is installed; this gate reads only the receipt file.',
+  ].join('\n');
+}
+
+/**
+ * Stop's minimal_change enforce gate. Blocks a `review` verdict that carries no
+ * matching audit receipt, and releases with a warning once the shared circuit
+ * breaker trips for the same report fingerprint.
+ */
+function minimalChangeEnforceBlock(
+  repoRoot: string,
+  policy: MinimalChangePolicy,
+  review: MinimalChangeReview,
+  profile: WorkflowProfile,
+  stderr: string[],
+): StopHandlerResult | null {
+  if (!policy.blocking || review.verdict !== 'review') return null;
+  // A report without a usable fingerprint has no releasable state: no receipt
+  // can name it and the breaker cannot key on it, so blocking here would be
+  // terminal. The sole writer always emits a fingerprint, which makes this a
+  // corrupt report -- the same lazy treatment a truncated report already gets
+  // through its parse failure.
+  if (!review.fingerprint) {
+    stderr.push(`[MinimalChange] Enforce gate skipped: ${review.reportPath} carries no fingerprint and cannot be audited or bounded; treat the report as corrupt and regenerate it.\n`);
+    return null;
+  }
+  if (minimalChangeReceiptReleases(repoRoot, review.fingerprint)) {
+    stderr.push(`[MinimalChange] Audit receipt accepted for ${review.fingerprint}; Stop released.\n`);
+    return null;
+  }
+  try {
+    const decision = recordCircuitAttempt(repoRoot, {
+      kind: 'minimal-change',
+      guard: 'MinimalChangeEnforce',
+      reason: 'minimal-change review verdict without a matching audit receipt',
+      pathOrAction: review.reportPath,
+      // Keyed per report fingerprint: a new report is real progress and resets
+      // the counter, a repeated one advances toward the limit.
+      progressToken: review.fingerprint,
+      fingerprint: review.fingerprint,
+      profile,
+    });
+    if (decision.tripped) {
+      stderr.push(`[MinimalChange] Circuit breaker tripped after ${decision.limit} enforce blocks for ${review.fingerprint}; releasing Stop with the review unresolved.\n`);
+      return null;
+    }
+  } catch (error) {
+    // The breaker can only release; a recording failure keeps the gate closed.
+    stderr.push(`[MinimalChange] Circuit breaker unavailable: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
+  return block(minimalChangeBlockReason(review));
 }
 
 function block(reason: string): StopHandlerResult {
@@ -432,6 +685,8 @@ export function runStopHandler(opts: StopHandlerInput): StopHandlerResult {
   const repoRoot = opts.collector.getRepoRoot();
   const env = opts.env ?? process.env;
   const dependencies = opts.dependencies ?? {};
+  const wallClockMs = dependencies.wallClockMs ?? Date.now;
+  const deferredDeadlineMs = wallClockMs() + STOP_DEFERRED_WORK_BUDGET_MS;
   const now = dependencies.now?.() ?? new Date();
   const payload = parsePayload(opts.input);
   if (payload.stop_hook_active === true || payload.stop_hook_active === 'true') {
@@ -445,29 +700,52 @@ export function runStopHandler(opts: StopHandlerInput): StopHandlerResult {
   let architectureDrainError = '';
   let journalSideEffectError = '';
   let driftWarnings: readonly string[] = [];
+  let unplannedImplementationPaths: readonly string[] = [];
   try {
     const changedSet = computeArchitectureDriftChangedSet(repoRoot);
     driftWarnings = changedSet.warnings;
+    // PlanStatusGuard only sees `Edit|Write` tool calls, so a shell write to an
+    // implementation path never reaches it. This changed set is git-derived
+    // (`git status --porcelain -z`), so it is indifferent to how the bytes were
+    // written -- which is exactly the blind spot to cover. Advisory only: no
+    // data exists yet on how often this fires on real work.
+    if (!activePlan) {
+      unplannedImplementationPaths = changedSet.paths.filter(isImplementationSurfacePath);
+    }
     const driftEvent = architectureDriftSourceEvent(changedSet);
     architectureDrain = dependencies.drainArchitectureProjection?.(repoRoot, env)
-      ?? drainArchitectureProjectionJobs(repoRoot, { env, sourceEvents: driftEvent ? [driftEvent] : [] });
+      ?? drainArchitectureProjectionJobs(repoRoot, { env, sourceEvents: driftEvent ? [driftEvent] : [], deadlineMs: deferredDeadlineMs, nowMs: wallClockMs });
     if (architectureDrain.status === 'disabled') {
-      for (const changedPath of changedSet.paths) {
-        const cascade = processArchitectureCascade(repoRoot, env, changedPath);
+      drainArchitectureDriftCascade(repoRoot, changedSet, (changedPath) => {
+        const cascade = processArchitectureCascade(repoRoot, env, changedPath, { deadlineMs: deferredDeadlineMs, nowMs: wallClockMs });
         if (!cascade.ok) throw new Error(cascade.error);
-      }
+      }, { deadlineMs: deferredDeadlineMs, nowMs: wallClockMs }, now);
     }
     // The cursor is the retry boundary: it only moves past a range the
     // consumer acknowledged, so a retry-pending, dead-lettered, or throwing
     // drain replays the same range on the next Stop.
-    if (architectureDrain.acknowledgeSourceEvents && changedSet.headSha !== null) {
-      advanceArchitectureDriftCursor(repoRoot, changedSet.headSha, now);
+    if (architectureDrain.status !== 'disabled' && architectureDrain.acknowledgeSourceEvents && changedSet.headSha !== null) {
+      advanceArchitectureDriftCursor(repoRoot, changedSet.headSha, changedSet.cursorSha, now);
     }
   } catch (error) {
     architectureDrainError = error instanceof Error ? error.message : String(error);
   }
+  // Auto-publication of a digest-only manifest restamp, deliberately outside
+  // the drain's try/catch above: a publication fault must never reach
+  // `architectureDrainError` and therefore can never arm the strict projection
+  // gate below. Every path -- published, skipped, faulted -- exits 0 with at
+  // most one advisory line, and the effect's only durable mutation is a single
+  // `update-ref` CAS on the current branch.
+  let restampAdvisory = '';
+  if (architectureDrain) {
+    try {
+      restampAdvisory = publishArchitectureProjectionRestampForDrain(repoRoot, architectureDrain).advisory ?? '';
+    } catch (error) {
+      restampAdvisory = `[ArchitectureProjection] restamp publication failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
   try {
-    consumePendingPostEditEvents(repoRoot, env);
+    consumePendingPostEditEvents(repoRoot, env, { deadlineMs: deferredDeadlineMs, nowMs: wallClockMs });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     journalSideEffectError = message;
@@ -499,6 +777,7 @@ export function runStopHandler(opts: StopHandlerInput): StopHandlerResult {
     projected.paths,
     projected.content,
     dependencies.observeProjectionWrite,
+    dependencies.afterProjectionWrite,
   ).commit();
   dependencies.observeProjectionTransaction?.();
 
@@ -509,6 +788,7 @@ export function runStopHandler(opts: StopHandlerInput): StopHandlerResult {
   } else if (architectureDrainError) {
     stderr.push(`[ArchitectureProjection] orchestration failed: ${architectureDrainError}\n`);
   }
+  if (restampAdvisory) stderr.push(`${restampAdvisory}\n`);
   if (journalSideEffectError) stderr.push(`[PostEditJournal] side effects failed: ${journalSideEffectError}\n`);
   let architectureGate: 'advisory' | 'strict' = 'advisory';
   try {
@@ -551,15 +831,45 @@ export function runStopHandler(opts: StopHandlerInput): StopHandlerResult {
       stderr: stderr.join(''),
     };
   }
+  // The minimal_change enforce gate runs BEFORE the lite early return because
+  // it is orthogonal to ceremony: its `review` verdict is a property of the
+  // change (a new dependency or a new abstraction), not of the workflow
+  // profile, and lite is precisely where such a change hides. The deterministic
+  // risk floor stays lite for a single-manifest or single-source edit with one
+  // capability and no strict path token (src/core/workflow/profile.ts:256-273),
+  // while the Stop report itself is the per-path artifact the PostEdit observer
+  // last wrote (src/cli/hook/minimal-change-cli.ts:56-85) -- the two file sets
+  // are independent, so a `review` verdict under a lite profile is reachable
+  // and was previously swallowed here. The gate carries its own lazy
+  // conditions (non-enforce mode, non-`review` verdict, missing report or
+  // fingerprint all return null), so a lite session with nothing to audit
+  // keeps its zero-ceremony silence.
+  const minimalPolicy = loadMinimalChangePolicy(repoRoot);
+  const minimal = minimalChangeReview(repoRoot, minimalPolicy);
+  if (minimal.summary) stderr.push(`${minimal.summary}\n`);
+  const profile = state?.workflow_profile === 'lite'
+    || state?.workflow_profile === 'standard'
+    || state?.workflow_profile === 'strict'
+    ? state.workflow_profile
+    : 'strict';
+  const minimalGate = minimalChangeEnforceBlock(repoRoot, minimalPolicy, minimal, profile, stderr);
+  if (minimalGate) return { ...minimalGate, stderr: stderr.join('') };
+
   if (state?.workflow_profile === 'lite') {
     return { exitCode: 0, stdout: '', stderr: stderr.join('') };
   }
+  if (unplannedImplementationPaths.length > 0) {
+    const shown = unplannedImplementationPaths.slice(0, 3).join(', ');
+    const more = unplannedImplementationPaths.length > 3 ? `, +${unplannedImplementationPaths.length - 3} more` : '';
+    stderr.push(`[PlanStatusGuard] ${unplannedImplementationPaths.length} implementation path(s) changed with no active plan: ${shown}${more}\n`);
+    stderr.push('[PlanStatusGuard] Advisory: capture the approved plan with repo-harness run capture-plan --slug <slug> --title <title> --artifact-level work-package --promotion-reason human_decision_boundary --status Approved --execute\n');
+    recordUnplannedImplementation(repoRoot, now, unplannedImplementationPaths);
+  }
+
   if (readiness?.readyToShip.decision === 'block') {
     stderr.push(`[ReadinessGate] readyToShip=false (missing: ${readiness.readyToShip.reasons.join(',') || 'unspecified'}); Stop is not blocked -- resolve before shipping.\n`);
   }
 
-  const minimal = minimalChangeReview(repoRoot);
-  if (minimal.summary) stderr.push(`${minimal.summary}\n`);
   if (state?.review.path && ['stale', 'missing', 'unavailable'].includes(state.review.freshness)) {
     stderr.push(`[ReviewFreshness] ${state.review.detail || 'Review is stale for current review subject'}\n`);
   }

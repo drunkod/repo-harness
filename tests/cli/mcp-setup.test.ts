@@ -14,6 +14,7 @@ import {
   runMcpSetupCodex,
 } from '../../src/cli/mcp/setup';
 import { createMcpToolContext } from '../../src/cli/mcp/server';
+import { startMcpStdio } from '../../src/cli/mcp/transports/stdio';
 import { callMcpTool } from '../../src/cli/mcp/tools';
 import { repoHarnessPackageVersion } from '../../src/cli/mcp/version';
 import { assertChatGptMcpContract } from '../helpers/chatgpt-mcp-contract';
@@ -536,6 +537,57 @@ describe('mcp setup', () => {
     });
   });
 
+  test('engineer setup is OAuth-only, no-shell, explicitly granted, and revision fenced', () => {
+    withTmpRepo((repoRoot, userHome) => {
+      expect(() => runMcpSetupChatgpt({ repo: repoRoot, profile: 'engineer' }))
+        .toThrow('requires at least one explicit --grant-read-write');
+      runMcpSetupChatgpt({
+        repo: repoRoot,
+        profile: 'engineer',
+        grantReadWrite: [repoRoot],
+        endpoint: 'https://engineer.example.com/mcp',
+      });
+      const config = JSON.parse(readFileSync(join(userHome, 'mcp.local.json'), 'utf-8'));
+      expect(config).toMatchObject({
+        version: 3,
+        profile: 'engineer',
+        capabilities: { workspaceReader: false, workspaceCoder: false, workflowExecutor: false, agentRunner: false },
+        coding: { enabled: false },
+        engineer: { enabled: true },
+        authorizationRevision: 1,
+      });
+      const ctx = createMcpToolContext({ repo: repoRoot, profile: 'engineer', engineerAuthorizationId: '22222222-2222-4222-8222-222222222222' });
+      expect(ctx.policy).toMatchObject({
+        profile: 'engineer',
+        capabilities: { workspaceReader: false, workspaceCoder: false, workflowExecutor: false, agentRunner: false },
+        execution: { codingShell: false, agentRunner: false },
+      });
+      expect(ctx.codingWorkspaceManager).toBeUndefined();
+      expect(ctx.engineerAuthorizationId).toBe('22222222-2222-4222-8222-222222222222');
+
+      expect(setRepoHarnessAccessMode(repoRoot, 'read_only').authorizationRevision).toBe(2);
+      expect(() => createMcpToolContext({ repo: repoRoot, profile: 'engineer' })).toThrow('explicit read_write grant');
+      expect(setRepoHarnessAccessMode(repoRoot, 'read_write').authorizationRevision).toBe(3);
+      expect(() => createMcpToolContext({ repo: repoRoot, profile: 'engineer' })).toThrow('authorization revision is stale');
+      runMcpSetupChatgpt({ repo: repoRoot, profile: 'planner' });
+      const disabled = JSON.parse(readFileSync(join(userHome, 'mcp.local.json'), 'utf-8'));
+      expect(disabled).toMatchObject({ profile: 'planner', engineer: { enabled: false }, authorizationRevision: 4 });
+    });
+  });
+
+  test('engineer profile refuses the unauthenticated stdio transport', async () => {
+    await expect(startMcpStdio({ profile: 'engineer' })).rejects.toThrow('OAuth-authenticated HTTP transport');
+    await withTmpRepoAsync(async (repoRoot) => {
+      runMcpSetupChatgpt({
+        repo: repoRoot,
+        profile: 'engineer',
+        grantReadWrite: [repoRoot],
+        endpoint: 'https://engineer.example.com/mcp',
+      });
+      await expect(startMcpStdio({ repo: repoRoot })).rejects.toThrow('OAuth-authenticated HTTP transport');
+    });
+  });
+
   test('coding setup validation failure leaves repo authorization unchanged', () => {
     withTmpRepo((repoRoot) => {
       expect(readRegisteredRepoHarnessRepos()).toEqual([]);
@@ -896,7 +948,8 @@ describe('mcp setup', () => {
 
       const result = runMcpSetupCodex({ repo: repoRoot, scope: 'project' });
       expect(result.changed.some((path) => path.endsWith('.codex/config.toml'))).toBe(true);
-      expect(existsSync(join(repoRoot, '.codex/config.toml.bak'))).toBe(true);
+      expect(existsSync(join(repoRoot, '.repo-harness/configuration-restore.json'))).toBe(true);
+      expect(existsSync(join(repoRoot, '.codex/config.toml.bak'))).toBe(false);
       const config = readFileSync(join(repoRoot, '.codex/config.toml'), 'utf-8');
       expect(config).toContain('[profiles.default]');
       expect(config).toContain('[mcp_servers.repo_harness]');

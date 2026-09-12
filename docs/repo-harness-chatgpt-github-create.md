@@ -64,12 +64,13 @@ repo-harness chatgpt browser-doctor \
   --json
 ```
 
-Create and read-back do not require an Oracle app-selection flag. Published
-Oracle versions do not expose `--browser-app`; these modes intentionally use
-the same browser options as Plan and Review. The fixed prompt names the
-workspace-dependent app (`GitHub` is only an example) and instructs ChatGPT to
-stop without writing when that app or its tools are unavailable. App selection
-therefore remains unverified prompt-level evidence.
+Create, recovery, and read-back use the pinned Oracle 0.20.0 transport but
+intentionally omit `--browser-app`. Ordinary consult and campaign callers may
+use Oracle app preselection; Create retains its explicit prompt-only contract.
+The fixed prompt names the workspace-dependent app (`GitHub` is only an
+example) and instructs ChatGPT to stop without writing when that app or its
+tools are unavailable. Create app selection therefore remains unverified
+prompt-level evidence (`prompt_contract_only`, `verified: false`).
 
 ## Dry run
 
@@ -379,7 +380,7 @@ Reuse existing repository patterns rather than creating another harness:
 |---|---|
 | `tests/cli/chatgpt-browser.test.ts` | fake Oracle argv capture without app preselection, prompt/file/output policy, session/list/follow-up/cleanup behavior |
 | `tests/cli/chatgpt-browser-create.test.ts` | strict target validation, prompt-contract app selection, result parsing, draft-PR contract, separate read-back, mismatch classification |
-| `tests/skill-surface/chatgpt-package.test.ts` | canonical reference closed set, router reachability, 2048-byte router budget |
+| `tests/skill-surface/chatgpt-package.test.ts` | canonical reference closed set, router reachability, 2560-byte router budget |
 | `tests/skill-surface/chatgpt-create-mode.test.ts` | Create-specific documentation/runtime/packaging consistency |
 | `tests/skill-surface/retired-names-scan.test.ts` | repository-wide retired package-name guard |
 | `tests/live/chatgpt-browser-create.live.test.ts` | opt-in visible-browser and GitHub-app smoke chain |

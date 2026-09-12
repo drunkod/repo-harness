@@ -3,93 +3,8 @@
 
 PI_RUNTIME_BLOCK_BEGIN="# BEGIN: claude-runtime-temp (managed by repo-harness)"
 PI_RUNTIME_BLOCK_END="# END: claude-runtime-temp"
-PI_DEFAULT_GITIGNORE_CONTENT=$(cat <<'EOF_GITIGNORE'
-# Dependencies
-node_modules/
-
-# Build artifacts
-artifacts/
-coverage/
-*.tar.gz
-*.tgz
-
-# External references
-_ref/
-.archcontext/*
-!.archcontext/manifest.yaml
-!.archcontext/product.yaml
-!.archcontext/model/
-.archcontext/model/*
-!.archcontext/model/nodes/
-!.archcontext/model/relations/
-!.archcontext/model/flows/
-!.archcontext/decisions/
-!.archcontext/policies/
-!.archcontext/practices/
-!.archcontext/projections/
-.codegraph/
-
-# Local operations state
-_ops/
-
-# Environment
-.env
-.env.*
-!.env.example
-
-# OS metadata
-.DS_Store
-EOF_GITIGNORE
-)
-PI_DEFAULT_RUNTIME_ENTRIES=$(cat <<'EOF_RUNTIME'
-.claude/settings.local.json
-.claude/.atomic_pending
-.claude/.session-id
-.claude/.trace.jsonl
-.claude/.session-handoff.md
-.claude/.task-state.json
-.claude/.task-handoff.md
-.claude/.codegraph-state/
-.claude/*.tmp
-.claude/*.bak
-.claude/*.bak.*
-.claude/*.backup-*
-tasks/.current.md.tmp.*
-.ai/harness/checks/latest.json
-.ai/harness/checks/*.latest.json
-.ai/harness/checks/*.latest.md
-.ai/harness/checks/post-bash-latest.json
-.ai/harness/events.jsonl
-.ai/harness/archive/
-.ai/harness/failures/latest.jsonl
-.ai/harness/handoff/current.md
-.ai/harness/handoff/resume.md
-.ai/harness/capability-context/
-.ai/harness/journal/
-.ai/harness/architecture-projection/
-.ai/harness/security/*
-!.ai/harness/security/.gitkeep
-.ai/harness/planning/*
-!.ai/harness/planning/.gitkeep
-.ai/harness/delegation/*
-.ai/harness/architecture/events.jsonl
-.ai/harness/active-plan
-.ai/harness/active-worktree
-.ai/harness/sprint/
-.ai/harness/worktrees/
-.ai/harness/evidence/
-.ai/harness/runs/
-.ai/harness/state/
-.ai/harness/chatgpt/browser-lock.json
-.ai/harness/chatgpt/tmp/
-.ai/harness/chatgpt/sessions/
-.ai/harness/triage/*
-!.ai/harness/triage/.gitkeep
-.repo-harness/
-.codex/*
-.claude/.plan-state/
-EOF_RUNTIME
-)
+# The packaged asset is shared with the TS adoption planner; neither reader owns a list.
+PI_DEFAULT_GITIGNORE_CONTENT=""
 PI_EXTERNAL_TOOLING_HOSTS_DEFAULT=$(cat <<'EOF_EXTERNAL_TOOLING_HOSTS'
 [
   "claude-code",
@@ -248,155 +163,6 @@ Complete this inventory before implementation. If any line is unknown, keep the 
 - [ ] ...
 EOF_TEMPLATE_PLAN
 )
-PI_TEMPLATE_CONTRACT_TMP="$(mktemp)"
-cat > "$PI_TEMPLATE_CONTRACT_TMP" <<'EOF_TEMPLATE_CONTRACT'
-# Task Contract: {{TASK_SLUG}}
-
-> **Status**: Active
-> **Plan**: {{PLAN_FILE}}
-> **Task Profile**: {{TASK_PROFILE}}
-> <!-- legal values: code-change | docs-only | ledger-closeout | migration | eval-only | delegated-run | bugfix (omit for legacy passthrough); see docs/reference-configs/sprint-contracts.md -->
-> **Owner**: {{OWNER}}
-> **Capability ID**: {{CAPABILITY_ID}}
-> **Last Updated**: {{TIMESTAMP}}
-> **Review File**: `{{REVIEW_FILE}}`
-> **Notes File**: `{{NOTES_FILE}}`
-> **Exemplar**: `docs/reference-configs/contract-brief-example.md`
-
-## Why
-
-Why this task matters and what breaks downstream if it ships wrong or is skipped.
-
-## Goal
-
-Describe the exact outcome this task must deliver.
-
-## Scope
-
-- In scope:
-- Out of scope:
-- Taste constraints: <!-- advisory only, no run gate; default style/taste lives in AGENTS.md and the minimal-change policy, use this to record a per-task override -->
-
-## Stop Conditions
-
-- Stop and hand back to the parent if the change would require editing a path outside Allowed Paths.
-- Stop if an Exit Criteria command cannot be run in this environment.
-- Stop if Goal, Scope, or Exit Criteria are internally contradictory.
-
-## Falsifier
-
-What observable evidence would prove this task's direction wrong, and the cheapest proof point to check first. Leave as-is if not applicable.
-
-## Root Cause Evidence
-
-Required when Task Profile is `bugfix`; leave as-is otherwise.
-
-- root_cause: one sentence naming file:line/condition (testable, not "a state issue").
-- repro: the command or UI path that reproduces the symptom.
-- regression_guard: path to a test that fails on the unfixed code and passes after the fix (must also appear under exit_criteria.tests_pass).
-- pre_fix_failure_artifact: path to a captured run of regression_guard on the UNFIXED code. Capture with `bun test <regression_guard> > <artifact> 2>&1; echo "PRE_FIX_EXIT=$?" >> <artifact>` (no pipes — pipes swallow the exit status). The gate requires a non-zero `PRE_FIX_EXIT=` line plus the regression_guard path string in the artifact (see the Root Cause Evidence Gate section in docs/reference-configs/sprint-contracts.md).
-
-## Workflow Inventory
-
-- Source plan: `{{PLAN_FILE}}`
-- Deferred-goal ledger: `tasks/todos.md`
-- Review file: `{{REVIEW_FILE}}`
-- Notes file: `{{NOTES_FILE}}`
-- Checks file: `.ai/harness/checks/latest.json`
-- Run snapshots: `.ai/harness/runs/`
-- Scope gate: edit only paths listed under `allowed_paths`; update this contract before widening scope.
-- Completion gate: run `verify-sprint --prepare-acceptance`, record one typed AcceptanceReceipt under the frozen policy below, then run `verify-sprint`; review Markdown is projection only.
-
-## Acceptance Policy
-
-```json
-{"protocol":1,"reviewer":"Claude","user_waiver":"allowed"}
-```
-
-## Allowed Paths
-
-```yaml
-allowed_paths:
-  - docs/spec.md
-  - plans/
-  - tasks/todos.md
-  - {{CONTRACT_FILE}}
-  - {{REVIEW_FILE}}
-  - {{NOTES_FILE}}
-  - .ai/context/capabilities.json
-  - .claude/templates/
-  - src/
-  - tests/
-```
-
-## Evidence Requirements
-
-```yaml
-evidence_requirements:
-  # Set benchmark to required when this contract consumes the harness profile benchmark matrix.
-  benchmark: not_applicable
-```
-
-## Delegation Contract
-
-```yaml
-delegation:
-  budget:
-    tokens: null
-    runner_invocations: null
-    wall_time_minutes: null
-  permission_scope:
-    mode: inherit_allowed_paths
-    writable_paths: []
-    network: inherited
-  roles:
-    parent:
-      mode: narrate_and_gatekeep
-      purpose: approval_checkpoint_owner
-    explorer:
-      mode: read_only
-      purpose: codebase_research
-    worker:
-      mode: edit_within_allowed_paths
-      purpose: implementation
-    verifier:
-      mode: read_only
-      purpose: exit_criteria_review
-  runner:
-    preferred:
-      - subagent
-    fallback: null
-    brief_is_authoritative: true
-```
-
-## Exit Criteria (Machine Verifiable)
-
-```yaml
-exit_criteria:
-  files_exist:
-    - docs/spec.md
-  artifacts_exist:
-    - .ai/harness/checks/latest.json
-    - {{NOTES_FILE}}
-  tests_pass:
-    - path: tests/unit/{{TASK_SLUG}}.test.ts
-  commands_succeed:
-    - bun run check:type
-```
-
-## Acceptance Notes (Human Review)
-
-- Functional behavior:
-- Edge cases:
-- Regression risks:
-
-## Rollback Point
-
-- Commit / checkpoint:
-- Revert strategy:
-EOF_TEMPLATE_CONTRACT
-PI_TEMPLATE_CONTRACT="$(cat "$PI_TEMPLATE_CONTRACT_TMP")"
-rm -f "$PI_TEMPLATE_CONTRACT_TMP"
 PI_TEMPLATE_REVIEW=$(cat <<'EOF_TEMPLATE_REVIEW'
 # Task Review: {{TASK_SLUG}}
 
@@ -665,7 +431,8 @@ pi_ensure_executable_if_apply() {
 
 pi_default_runtime_block() {
   local extra_entries="${1:-}"
-  local runtime_entries="$PI_DEFAULT_RUNTIME_ENTRIES"
+  local runtime_entries
+  runtime_entries="$(cat "${BASH_SOURCE[0]%/*}/../../assets/templates/runtime.gitignore")" || return 1
 
   if [[ -n "$extra_entries" ]]; then
     runtime_entries="${runtime_entries}"$'\n'"${extra_entries}"
@@ -702,7 +469,7 @@ pi_ensure_gitignore_block() {
   local mode="${4:-apply}"
   local block
 
-  block="$(pi_default_runtime_block "$extra_entries")"
+  block="$(pi_default_runtime_block "$extra_entries")" || return 1
 
   if [[ "$mode" != "apply" ]]; then
     echo "[dry-run] ensure managed runtime block in $file_path"
@@ -973,7 +740,8 @@ pi_install_templates() {
   if [[ -f "$templates_dir/contract.template.md" ]]; then
     cp "$templates_dir/contract.template.md" "$output_dir/contract.template.md"
   else
-    printf '%s\n' "$PI_TEMPLATE_CONTRACT" > "$output_dir/contract.template.md"
+    echo "canonical contract template is required: $templates_dir/contract.template.md" >&2
+    return 1
   fi
 
   if [[ -f "$templates_dir/review.template.md" ]]; then
@@ -1739,6 +1507,10 @@ pi_write_harness_policy() {
     "statuses": ["Draft", "Approved", "Executing", "Done", "Archived"],
     "rule": "PRDs live in plans/prds as the upper planning layer. Sprints live in plans/sprints as long-task execution backlogs; each sprint row is expanded with Waza \$think into a detailed plans/plan-*.md before the plan -> contract -> worktree flow; tasks/todos.md stays the deferred-goal ledger"
   },
+  "development_campaign": {
+    "version": 1,
+    "mode": "off"
+  },
   "reference_material": {
     "dir": "_ref",
     "mode": "external-ignored",
@@ -1792,7 +1564,7 @@ pi_write_harness_policy() {
     "projection_provider": "disabled",
     "projection_apply": "disabled",
     "projection_failure_gate": "advisory",
-    "projection_version": "0.4.2",
+    "projection_version": "0.5.10",
     "projection_timeout_ms": 120000,
     "freshness_gate": "advisory",
     "gate_min_severity": "medium",
@@ -1803,6 +1575,16 @@ pi_write_harness_policy() {
     "contract_block_begin": "<!-- BEGIN ARCHITECTURE CONTRACT -->",
     "contract_block_end": "<!-- END ARCHITECTURE CONTRACT -->",
     "rule": "hooks record architecture queue cards and sync controlled local context blocks; agents author semantic snapshots and diagrams"
+  },
+  "refactor": {
+    "mode": "off",
+    "provider": "archctx",
+    "stages": {
+      "scan": { "provider_version": "0.5.10", "required_features": ["module-statistics-v1", "refactor-assessment-v1", "recommendation-v3"] },
+      "verify": { "provider_version": "0.5.10", "required_features": ["refactor-resolution-v1"] }
+    },
+    "require_cutover_closure": true,
+    "require_post_merge_measurement": false
   },
   "workstreams": {
     "dir": "tasks/workstreams",
@@ -1863,6 +1645,7 @@ pi_write_harness_policy() {
   "circuit_breakers": {
     "guard_repeat": 2,
     "review": { "lite": 1, "standard": 1, "strict": 2 },
+    "semantic_reviews_per_work_package": 1,
     "subagents": { "default": 2, "strict_explicit_contract": 3 },
     "repair_loops": 2,
     "cross_model_consults_default": 0
@@ -2038,6 +1821,15 @@ pi_write_harness_policy() {
       "model_dir": ".archcontext/model",
       "nodes_dir": ".archcontext/model/nodes",
       "capability_source_key": ".ai/harness/policy.json#context.capability_source"
+    },
+    "herdr": {
+      "min_version": "0.9.0",
+      "release_assets": {
+        "linux-x86_64": {
+          "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-linux-x86_64",
+          "sha256": "4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f"
+        }
+      }
     }
   },
   "agentic_development": {
@@ -2226,7 +2018,11 @@ Generality: These are general working rules. Do not tailor behavior to any speci
 
 - Prefer platform or standard-library features, then existing dependencies and repo patterns, before adding dependencies, files, or abstractions.
 - Preserve user-authored files; do not overwrite existing `CLAUDE.md` or `AGENTS.md` except when explicitly applying an approved scaffold or syncing the controlled architecture block.
-- After substantive changes, run focused checks for the touched area plus `bash scripts/check-task-sync.sh` and `bash scripts/check-task-workflow.sh --strict` when those scripts exist.
+- Do not run the full suite for every small change. Select checks from the complete diff, repo commands, active contract, and CI; report the selected scope, reason, exact commands, and results.
+- For docs-only or ledger-closeout changes with no executable impact, check diff hygiene, affected links/paths, and task-sync/workflow consistency when workflow artifacts changed. No full suite or typecheck is required solely for closeout.
+- For isolated code changes, run the regression and affected suites, plus relevant type/lint/build checks. For generator or template changes, generate a fixture and check the affected mirrors.
+- High-risk, cross-module, or release changes require the full repo verification set; this includes shared contracts, auth, publication, migrations, and hooks/runtime. Use full verification when the impact boundary is uncertain, and never weaken explicit contract or CI criteria.
+- Run `bash scripts/check-task-sync.sh` and `bash scripts/check-task-workflow.sh --strict` when workflow artifacts changed and those scripts exist. A passed suite need not be repeated for a subsequent docs/ledger-only closeout against unchanged executable source.
 - Report what changed, why it was the smallest coherent change, verification evidence, and any concrete residual risk.
 EOF_ROOT_CONTEXT
 }

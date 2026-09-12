@@ -6,7 +6,7 @@
   "esa_goldens": [
     {
       "scenario": "idle-inspect",
-      "source_sha256": "42755fedaae1d6421e5f013f2236e943d3807a63b24f90abd717bc5c7f6056d4",
+      "source_sha256": "e2be47fec22cd86da0f76d0a37d2b301da341970e2c484d13cde0f420d3ea8b3",
       "baseline": "82550779cdccf0575d674ae53bbc95ba63e44743",
       "cli_exit": 0,
       "workflow_profile": "lite",
@@ -14,7 +14,7 @@
     },
     {
       "scenario": "missing-contract",
-      "source_sha256": "eb632f07283d0577e184520ff237670a8295eff9c592718753cd9b811ceacab8",
+      "source_sha256": "0e296f649a6c11e9b2658483abe3718321bc53e699342a224d9ab82afa880328",
       "baseline": "82550779cdccf0575d674ae53bbc95ba63e44743",
       "cli_exit": 0,
       "workflow_profile": "standard",
@@ -22,7 +22,7 @@
     },
     {
       "scenario": "executing-fresh-evidence",
-      "source_sha256": "878fabb76d6f9d994654d7449cbf7ca83d7ebd884dbc1c33a4b64b1adac689a7",
+      "source_sha256": "eac4c4e988e2c05eb3d6bf8bec8675c6f7b2be800ffdb16f1d4e66f550c14bae",
       "baseline": "82550779cdccf0575d674ae53bbc95ba63e44743",
       "cli_exit": 0,
       "workflow_profile": "standard",
@@ -30,7 +30,7 @@
     },
     {
       "scenario": "explicit-strict-without-path-signals",
-      "source_sha256": "a4079d7fdcf96ac970909b5bd47cb752ae4ed418a24c03f3735e171458a86ca0",
+      "source_sha256": "e6a68aa425e4f945311e37d91da967d9a63a7cd8ee87e1acc1f285b4543911bf",
       "baseline": "82550779cdccf0575d674ae53bbc95ba63e44743",
       "cli_exit": 0,
       "workflow_profile": "strict",
@@ -220,8 +220,8 @@
         "minimal_change_review_appended": false,
         "ordering": [
           "refresh_handoff",
-          "lite_early_exit",
           "minimal_change_review",
+          "lite_early_exit",
           "review_freshness_warning",
           "plan_completeness_gate"
         ],
@@ -231,6 +231,7 @@
           ".ai/harness/handoff/resume.md",
           ".ai/harness/runs/hook-events.jsonl",
           ".ai/harness/runs/loop-semantics-lite-stop.json",
+          ".ai/harness/state/architecture-drift-cascade.json",
           ".ai/harness/state/effective.json"
         ],
         "missing_semantic_fields": []
@@ -267,8 +268,8 @@
         "minimal_change_review_appended": false,
         "ordering": [
           "refresh_handoff",
-          "lite_early_exit",
           "minimal_change_review",
+          "lite_early_exit",
           "review_freshness_warning",
           "plan_completeness_gate"
         ],
@@ -278,6 +279,7 @@
           ".ai/harness/handoff/resume.md",
           ".ai/harness/runs/hook-events.jsonl",
           ".ai/harness/runs/loop-semantics-standard-stop.json",
+          ".ai/harness/state/architecture-drift-cascade.json",
           ".ai/harness/state/effective.json"
         ],
         "missing_semantic_fields": []
@@ -316,8 +318,8 @@
         "minimal_change_review_appended": false,
         "ordering": [
           "refresh_handoff",
-          "lite_early_exit",
           "minimal_change_review",
+          "lite_early_exit",
           "review_freshness_warning",
           "plan_completeness_gate"
         ],
@@ -327,6 +329,7 @@
           ".ai/harness/handoff/resume.md",
           ".ai/harness/runs/hook-events.jsonl",
           ".ai/harness/runs/loop-semantics-strict-stop.json",
+          ".ai/harness/state/architecture-drift-cascade.json",
           ".ai/harness/state/effective.json"
         ],
         "missing_semantic_fields": []

@@ -1,3 +1,4 @@
+import { configurationPaths, withConfigurationMutation } from '../installer/configuration-ownership';
 import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -10,6 +11,7 @@ const CODEGRAPH_SCOPED_MCP_TOML_ARGS = `[${CODEGRAPH_SCOPED_MCP_ARGS.map((arg) =
 
 export type CodegraphSource = "local" | "global" | "missing";
 export type CodegraphStatus = "present" | "warning" | "partial" | "missing";
+export type CodegraphProjectIndexStatus = "not-initialized" | "up-to-date" | "stale" | "unknown" | "unavailable";
 export type CodegraphActionStatus = "changed" | "unchanged" | "failed" | "skipped";
 export type CodegraphHostTarget = "codex" | "claude" | "both";
 export type CodegraphConfigureLocation = "global" | "local";
@@ -44,7 +46,14 @@ export interface CodegraphResolution {
 
 export interface CodegraphCheckResult {
   status: CodegraphStatus;
+  projectIndexStatus: CodegraphProjectIndexStatus;
   reason: string;
+  remediation: {
+    installCommand: string;
+    projectIndexCommand: string;
+    initCommand: string;
+    syncCommand: string;
+  };
   resolution: CodegraphResolution;
   raw: Record<string, unknown>;
 }
@@ -140,10 +149,38 @@ function appendAction(
   return result.ok;
 }
 
+function projectIndexStatus(raw: Record<string, any>): CodegraphProjectIndexStatus {
+  const value = raw.project_index?.status;
+  if (
+    value !== "not-initialized" &&
+    value !== "up-to-date" &&
+    value !== "stale" &&
+    value !== "unknown" &&
+    value !== "unavailable"
+  ) {
+    throw new Error(`Unsupported CodeGraph project index status: ${String(value)}`);
+  }
+  return value;
+}
+
+function requiredCommand(path: string, value: unknown): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`Missing CodeGraph remediation command: ${path}`);
+  }
+  return value;
+}
+
 function normalize(raw: Record<string, any>): CodegraphCheckResult {
   return {
     status: raw.status,
+    projectIndexStatus: projectIndexStatus(raw),
     reason: raw.reason,
+    remediation: {
+      installCommand: requiredCommand("install_command", raw.install_command),
+      projectIndexCommand: requiredCommand("project_index.command", raw.project_index?.command),
+      initCommand: requiredCommand("init_command", raw.init_command),
+      syncCommand: requiredCommand("sync_command", raw.sync_command),
+    },
     resolution: {
       source: raw.source,
       binPath: raw.bin_path,
@@ -602,7 +639,7 @@ function configureClaudeAllowedTools(actions: CodegraphAction[], env?: NodeJS.Pr
   });
 }
 
-export function configureCodegraph(opts: CodegraphConfigureOptions): CodegraphConfigureResult {
+function configureCodegraphRuntime(opts: CodegraphConfigureOptions): CodegraphConfigureResult {
   const actions: CodegraphAction[] = [];
   const initial = checkCodegraph({ repoRoot: opts.repoRoot, env: opts.env, host: opts.target });
   const binPath = initial.resolution.binPath;
@@ -673,4 +710,12 @@ export function configureCodegraph(opts: CodegraphConfigureOptions): CodegraphCo
     readOnly: false,
     actions,
   };
+}
+
+/** Keep restoration provenance for both standalone tools setup and runtime bootstrap. */
+export function configureCodegraph(opts: CodegraphConfigureOptions): CodegraphConfigureResult {
+  if (opts.location !== 'global') return configureCodegraphRuntime(opts);
+  const env = { ...process.env, ...opts.env };
+  const paths = configurationPaths(env).filter((path) => opts.target === 'both' || (opts.target === 'codex' ? path.endsWith('.toml') : !path.endsWith('.toml')));
+  return withConfigurationMutation(paths, env, () => configureCodegraphRuntime(opts));
 }

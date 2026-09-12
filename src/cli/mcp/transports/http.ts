@@ -197,7 +197,7 @@ function escapeHtmlAttribute(value: string): string {
     .replace(/>/g, '&gt;');
 }
 
-function renderPassphrasePage(params: URLSearchParams, opts: { coding?: boolean; repoNames?: string[] } = {}): string {
+function renderPassphrasePage(params: URLSearchParams, opts: { coding?: boolean; engineer?: boolean; repoNames?: string[] } = {}): string {
   const hiddenFields = Array.from(params.entries())
     .filter(([key]) => key !== 'passphrase')
     .map(([key, value]) => `<input type="hidden" name="${escapeHtmlAttribute(key)}" value="${escapeHtmlAttribute(value)}">`)
@@ -218,7 +218,9 @@ button{width:100%;margin-top:14px;border:0;border-radius:8px;padding:12px;backgr
 <h1>Authorize repo-harness</h1>
 <p>${opts.coding
     ? `This Connector can open and edit these explicitly granted repositories: ${escapeHtmlAttribute((opts.repoNames ?? []).join(', ') || '(none)')}. It can also run arbitrary shell commands that can access anything your local OS user can access on this machine, including outside these repositories. Repository grants and allowed roots select workspaces; they do not sandbox shell access. Access tokens expire after 1 hour; refresh authorization lasts up to 30 days and rotates.`
-    : 'Enter the local MCP passphrase to let ChatGPT use this workflow-scoped connector.'}</p>
+    : opts.engineer
+      ? `This Connector can acquire execution work only as an operator-enrolled Module Engineer for these explicitly granted repositories: ${escapeHtmlAttribute((opts.repoNames ?? []).join(', ') || '(none)')}. It has no shell, generic file write, Binding mutation, Publication, or Acceptance tools. Access tokens expire after 1 hour; refresh authorization lasts up to 30 days and rotates.`
+      : 'Enter the local MCP passphrase to let ChatGPT use this workflow-scoped connector.'}</p>
 <form method="POST" action="/authorize">
 ${hiddenFields}
 <input type="password" name="passphrase" placeholder="Passphrase" autofocus>
@@ -229,7 +231,7 @@ ${hiddenFields}
 
 function requirePassphrase(
   passphrase: string,
-  opts: { coding?: boolean; repoNames?: string[] } = {},
+  opts: { coding?: boolean; engineer?: boolean; repoNames?: string[] } = {},
 ): (req: Request, res: Response, next: NextFunction) => void {
   return (req, res, next) => {
     const provided = typeof req.body?.passphrase === 'string' ? req.body.passphrase : undefined;
@@ -397,8 +399,8 @@ function authorizationIdFromRequest(req: Request): string | undefined {
   return typeof authorizationId === 'string' && authorizationId.trim() ? authorizationId : undefined;
 }
 
-function authorizationOwnsTransport(req: Request, transport: McpHttpTransport, coding: boolean): boolean {
-  return !coding || transport.authorizationId === authorizationIdFromRequest(req);
+function authorizationOwnsTransport(req: Request, transport: McpHttpTransport, authorizationScoped: boolean): boolean {
+  return !authorizationScoped || transport.authorizationId === authorizationIdFromRequest(req);
 }
 
 function isValidSessionId(value: string): boolean {
@@ -427,13 +429,19 @@ function acquireSession(sessions: McpSessionStore<McpHttpTransport>, sessionId: 
   return sessions.acquire(sessionId);
 }
 
+export function resolveMcpHttpProfile(opts: McpServerOptions, config: ReturnType<typeof loadMcpLocalConfig>): string {
+  return opts.profile ?? config?.profile ?? 'planner';
+}
+
 async function handleMcpPost(
   req: Request,
   res: Response,
   opts: McpHttpOptions,
   sessions: McpSessionStore<McpHttpTransport>,
   codingRuntimes: CodingAuthorizationRuntimeStore | null,
+  startupProfile: string,
 ): Promise<void> {
+  const authorizationScoped = startupProfile === 'coding' || startupProfile === 'engineer';
   let body: unknown;
   try {
     body = rawBodyToJson(req.body as Buffer);
@@ -443,9 +451,25 @@ async function handleMcpPost(
   }
   const sessionId = sessionIdFromRequest(req);
   if (!sessionId && isInitializeRequest(body)) {
-    const authorizationId = codingRuntimes ? authorizationIdFromRequest(req) : undefined;
-    if (codingRuntimes && !authorizationId) {
-      sendOAuthUnauthorized(req, res, 'Coding authorization identity is missing');
+    // The whole HTTP enforcement layer (coding-grant middleware, OAuth
+    // requirement, host/origin pinning, per-authorization coding runtimes) is
+    // decided once from the startup profile. A local config flip after startup
+    // would otherwise let a new session resolve a different tool context behind
+    // that stale enforcement, so sessions are bound to the startup profile and
+    // a flip fails closed until the operator restarts the server.
+    const currentProfile = resolveMcpHttpProfile(opts, loadMcpLocalConfig());
+    if (currentProfile !== startupProfile) {
+      res.status(503).json({
+        error: {
+          code: 'PROFILE_CHANGED',
+          message: `The local MCP profile changed from "${startupProfile}" to "${currentProfile}" after startup; restart the MCP server to serve the new profile.`,
+        },
+      });
+      return;
+    }
+    const authorizationId = authorizationScoped ? authorizationIdFromRequest(req) : undefined;
+    if (authorizationScoped && !authorizationId) {
+      sendOAuthUnauthorized(req, res, `${startupProfile} authorization identity is missing`);
       return;
     }
     let codingRuntime: McpCodingRuntime | undefined;
@@ -469,30 +493,39 @@ async function handleMcpPost(
       return;
     }
     let sessionInitialized = false;
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (newSessionId) => {
-        reservation.commit(newSessionId, transport);
-        sessionInitialized = true;
-      },
-    }) as McpHttpTransport;
-    transport.authorizationId = authorizationId;
-    transport.onclose = () => {
-      if (transport.sessionId) sessions.delete(transport.sessionId);
-    };
-    const server = createRepoHarnessMcpServer({ ...opts, codingRuntime });
+    // Transport and server construction stay inside the try: a throw from either
+    // must still release the reservation, otherwise the slot leaks for the whole
+    // process lifetime and the store fails closed at capacity forever.
+    let transport: McpHttpTransport | undefined;
     try {
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (newSessionId) => {
+          reservation.commit(newSessionId, transport as McpHttpTransport);
+          sessionInitialized = true;
+        },
+      }) as McpHttpTransport;
+      transport.authorizationId = authorizationId;
+      transport.onclose = () => {
+        if (transport?.sessionId) sessions.delete(transport.sessionId);
+      };
+      const server = createRepoHarnessMcpServer({
+        ...opts,
+        profile: startupProfile,
+        codingRuntime,
+        engineerAuthorizationId: startupProfile === 'engineer' ? authorizationId : undefined,
+      });
       await server.connect(transport);
       await transport.handleRequest(req, res, body);
     } finally {
       reservation.release();
-      if (!sessionInitialized) await transport.close().catch(() => undefined);
+      if (!sessionInitialized) await transport?.close().catch(() => undefined);
     }
     return;
   }
   if (sessionId) {
     const lease = acquireSession(sessions, sessionId);
-    if (lease && authorizationOwnsTransport(req, lease.record.transport, codingRuntimes !== null)) {
+    if (lease && authorizationOwnsTransport(req, lease.record.transport, authorizationScoped)) {
       const authorizationId = authorizationIdFromRequest(req);
       if (authorizationId) codingRuntimes?.touch(authorizationId);
       try {
@@ -512,9 +545,10 @@ async function handleMcpGet(
   res: Response,
   sessions: McpSessionStore<McpHttpTransport>,
   codingRuntimes: CodingAuthorizationRuntimeStore | null,
+  authorizationScoped: boolean,
 ): Promise<void> {
   const lease = acquireSession(sessions, sessionIdFromRequest(req));
-  if (!lease || !authorizationOwnsTransport(req, lease.record.transport, codingRuntimes !== null)) {
+  if (!lease || !authorizationOwnsTransport(req, lease.record.transport, authorizationScoped)) {
     lease?.release();
     sendSessionNotFound(res);
     return;
@@ -533,10 +567,11 @@ async function handleMcpDelete(
   res: Response,
   sessions: McpSessionStore<McpHttpTransport>,
   codingRuntimes: CodingAuthorizationRuntimeStore | null,
+  authorizationScoped: boolean,
 ): Promise<void> {
   const sessionId = sessionIdFromRequest(req);
   const lease = acquireSession(sessions, sessionId);
-  if (!sessionId || !lease || !authorizationOwnsTransport(req, lease.record.transport, codingRuntimes !== null)) {
+  if (!sessionId || !lease || !authorizationOwnsTransport(req, lease.record.transport, authorizationScoped)) {
     lease?.release();
     sendSessionNotFound(res);
     return;
@@ -557,7 +592,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   const repoRoot = resolveMcpRepoRoot(opts.repo ?? '.');
   assertNoLegacyRepoScopeMcpConfig(repoRoot);
   const localConfig = loadMcpLocalConfig();
-  const profile = opts.profile ?? localConfig?.profile ?? 'planner';
+  const profile = resolveMcpHttpProfile(opts, localConfig);
   const storedEndpoint = localConfig?.chatgpt?.endpoint;
   const storedPublicOrigin = storedEndpoint ? new URL(storedEndpoint).origin : undefined;
   const configuredPublicOrigin = process.env.REPO_HARNESS_MCP_PUBLIC_ORIGIN?.trim()
@@ -567,24 +602,26 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     throw new Error('REPO_HARNESS_MCP_PUBLIC_ORIGIN is required when binding MCP HTTP to a non-loopback host');
   }
   const coding = profile === 'coding';
+  const engineer = profile === 'engineer';
+  const authorizationScoped = coding || engineer;
   if (
-    coding
+    authorizationScoped
     && (
       localConfig?.version !== 3
-      || localConfig.profile !== 'coding'
-      || localConfig.coding?.enabled !== true
+      || localConfig.profile !== profile
+      || (coding ? localConfig.coding?.enabled !== true : localConfig.engineer?.enabled !== true)
       || localConfig.authorizationRevision !== repoHarnessAuthorizationRevision()
     )
   ) {
-    throw new Error('coding profile requires enabled v3 setup');
+    throw new Error(`${profile} profile requires enabled v3 setup`);
   }
   const readWriteRepos = readRegisteredRepoHarnessRepos({ adoptedOnly: true }).filter((repo) => repo.accessMode === 'read_write');
-  if (coding && readWriteRepos.length === 0) {
-    throw new Error('coding profile requires at least one explicitly registered read_write repo');
+  if (authorizationScoped && readWriteRepos.length === 0) {
+    throw new Error(`${profile} profile requires at least one explicitly registered read_write repo`);
   }
   const authMode = parseMcpHttpAuthMode(opts.auth);
-  if (coding && authMode !== 'oauth') {
-    throw new Error('coding profile requires OAuth authentication');
+  if (authorizationScoped && authMode !== 'oauth') {
+    throw new Error(`${profile} profile requires OAuth authentication`);
   }
   const authToken = authMode === 'bearer' || authMode === 'url-token' ? opts.authToken ?? readMcpBearerToken() : null;
   const oauthPassphrase = authMode === 'oauth' ? readMcpOAuthPassphrase() : null;
@@ -598,7 +635,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   const oauthProvider = tokenStore ? createMcpOAuthProvider(tokenStore, {
     profile,
     authorizationRevision: () => repoHarnessAuthorizationRevision(),
-    accessTokenTtlSeconds: coding ? 60 * 60 : 30 * 24 * 60 * 60,
+    accessTokenTtlSeconds: authorizationScoped ? 60 * 60 : 30 * 24 * 60 * 60,
     refreshTokenTtlSeconds: 30 * 24 * 60 * 60,
     onAuthorizationRevoked: (authorizationId) => codingRuntimes?.close(authorizationId),
   }) : null;
@@ -611,8 +648,8 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     ...(publicHost ? [publicHost] : []),
   ]);
   let authorizationCleanupRunning = false;
-  const closeStaleCodingState = (): void => {
-    if (!coding || authorizationCleanupRunning) return;
+  const closeStaleAuthorizationState = (): void => {
+    if (!authorizationScoped || authorizationCleanupRunning) return;
     authorizationCleanupRunning = true;
     void Promise.all([
       sessions.closeAll(),
@@ -621,14 +658,15 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       .catch(reportCodingRuntimeCleanupError)
       .finally(() => { authorizationCleanupRunning = false; });
   };
-  const authorizationTimer = coding ? setInterval(() => {
+  const authorizationTimer = authorizationScoped ? setInterval(() => {
     const currentRevision = repoHarnessAuthorizationRevision();
     const liveConfig = loadMcpLocalConfig();
     if (currentRevision !== observedAuthorizationRevision) {
       observedAuthorizationRevision = currentRevision;
-      closeStaleCodingState();
+      closeStaleAuthorizationState();
     }
-    if (liveConfig?.profile !== 'coding' || liveConfig.coding?.enabled !== true) closeStaleCodingState();
+    const enabled = coding ? liveConfig?.coding?.enabled === true : liveConfig?.engineer?.enabled === true;
+    if (liveConfig?.profile !== profile || !enabled) closeStaleAuthorizationState();
   }, 1_000) : undefined;
   authorizationTimer?.unref?.();
   const cleanupTimer = setInterval(() => {
@@ -636,35 +674,46 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     codingRuntimes?.cleanupExpired();
   }, Math.min(sessionTtlMs, 60_000));
   cleanupTimer.unref?.();
+  // The server description reported by /health is fixed for the process: this
+  // context is built once here instead of per request, where rebuilding it
+  // re-ran `git rev-parse --show-toplevel` synchronously and blocked the event
+  // loop for seconds on a cold disk. Live state stays live: the coding grant is
+  // still re-checked per request by the middleware above, and session counters
+  // are read from the store on each response.
+  const healthContext = createMcpToolContext({ ...opts, repo: repoRoot, codingRuntime: null });
+  const healthSchemaHash = createHash('sha256')
+    .update(JSON.stringify(buildMcpToolDefinitions(healthContext.policy, { enableChatgptBrowser: opts.enableChatgptBrowser === true })))
+    .digest('hex');
   const app = express();
 
   app.use((req, res, next) => {
-    if (coding) {
+    if (authorizationScoped) {
       const liveConfig = loadMcpLocalConfig();
       const hasGrant = readRegisteredRepoHarnessRepos({ adoptedOnly: true }).some((repo) => repo.accessMode === 'read_write');
+      const enabled = coding ? liveConfig?.coding?.enabled === true : liveConfig?.engineer?.enabled === true;
       if (
-        liveConfig?.profile !== 'coding'
-        || liveConfig.coding?.enabled !== true
+        liveConfig?.profile !== profile
+        || !enabled
         || liveConfig.authorizationRevision !== repoHarnessAuthorizationRevision()
         || !hasGrant
       ) {
-        closeStaleCodingState();
-        res.status(503).json({ error: 'coding_disabled' });
+        closeStaleAuthorizationState();
+        res.status(503).json({ error: `${profile}_disabled` });
         return;
       }
     }
     const forwardedHost = typeof req.headers['x-forwarded-host'] === 'string' ? req.headers['x-forwarded-host'].split(',')[0].trim().toLowerCase() : undefined;
     const requestHost = forwardedHost ?? req.headers.host?.toLowerCase();
-    if (coding && (!requestHost || !allowedRequestHosts.has(requestHost))) {
+    if (authorizationScoped && (!requestHost || !allowedRequestHosts.has(requestHost))) {
       res.status(421).json({ error: 'host_not_allowed' });
       return;
     }
     const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
-    if (coding && origin && origin !== 'https://chatgpt.com') {
+    if (authorizationScoped && origin && origin !== 'https://chatgpt.com') {
       res.status(403).json({ error: 'origin_not_allowed' });
       return;
     }
-    res.setHeader('Access-Control-Allow-Origin', coding ? (origin ?? 'https://chatgpt.com') : (origin ?? '*'));
+    res.setHeader('Access-Control-Allow-Origin', authorizationScoped ? (origin ?? 'https://chatgpt.com') : (origin ?? '*'));
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', MCP_ALLOWED_HEADERS);
     res.setHeader('Access-Control-Expose-Headers', 'Mcp-Session-Id');
@@ -678,16 +727,14 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
   app.get('/health', (req, res) => {
     sessions.cleanupExpired();
     codingRuntimes?.cleanupExpired();
-    const ctx = createMcpToolContext({ ...opts, repo: repoRoot, codingRuntime: null });
-    const tools = buildMcpToolDefinitions(ctx.policy, { enableChatgptBrowser: opts.enableChatgptBrowser === true });
     res.json({
       status: 'ok',
       server: 'repo-harness-mcp',
       package_version: repoHarnessPackageVersion(),
       mcp_protocol: 'streamable-http',
-      profile: ctx.policy.profile,
-      capabilities: ctx.policy.capabilities,
-      allowed_root_count: ctx.policy.allowedRoots?.length ?? 0,
+      profile: healthContext.policy.profile,
+      capabilities: healthContext.policy.capabilities,
+      allowed_root_count: healthContext.policy.allowedRoots?.length ?? 0,
       auth: authMode === 'oauth' ? (oauthPassphrase ? 'oauth' : 'missing') : (authToken ? authMode : 'missing'),
       auth_mode: authMode,
       public_origin: getPublicOrigin(req, configuredPublicOrigin),
@@ -698,7 +745,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       sessions_closed: sessions.metrics.closed,
       sessions_expired: sessions.metrics.expired,
       sessions_evicted: sessions.metrics.evicted,
-      schema_hash: createHash('sha256').update(JSON.stringify(tools)).digest('hex'),
+      schema_hash: healthSchemaHash,
     });
   });
 
@@ -706,7 +753,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
     const oauthRateLimit = createOAuthRateLimitMiddleware({ windowMs: 60_000, maxRequests: 120 });
     app.use(['/authorize', '/token', '/revoke', '/register'], oauthRateLimit);
     app.use('/authorize', express.urlencoded({ extended: false, limit: '10kb' }));
-    app.use('/authorize', requirePassphrase(oauthPassphrase ?? '', { coding, repoNames: readWriteRepos.map((repo) => basename(repo.path)) }));
+    app.use('/authorize', requirePassphrase(oauthPassphrase ?? '', { coding, engineer, repoNames: readWriteRepos.map((repo) => basename(repo.path)) }));
     app.use('/authorize', oauthAuthorizationHandler(oauthProvider, allowedRedirectHosts));
     app.use('/token', tokenHandler({ provider: oauthProvider }));
     app.use('/revoke', revocationHandler({ provider: oauthProvider }));
@@ -723,7 +770,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
         grant_types_supported: ['authorization_code', 'refresh_token'],
         code_challenge_methods_supported: ['S256'],
         token_endpoint_auth_methods_supported: ['client_secret_post', 'none'],
-        scopes_supported: ['repo-harness', ...(coding ? ['repo-harness.coding'] : []), 'offline_access'],
+        scopes_supported: ['repo-harness', ...(coding ? ['repo-harness.coding'] : []), ...(engineer ? ['repo-harness.engineer'] : []), 'offline_access'],
       });
     });
     app.get('/.well-known/openid-configuration', (req, res) => {
@@ -737,7 +784,7 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
         grant_types_supported: ['authorization_code', 'refresh_token'],
         code_challenge_methods_supported: ['S256'],
         token_endpoint_auth_methods_supported: ['client_secret_post', 'none'],
-        scopes_supported: ['repo-harness', ...(coding ? ['repo-harness.coding'] : []), 'offline_access'],
+        scopes_supported: ['repo-harness', ...(coding ? ['repo-harness.coding'] : []), ...(engineer ? ['repo-harness.engineer'] : []), 'offline_access'],
       });
     });
     app.get('/.well-known/oauth-protected-resource/mcp', (req, res) => {
@@ -745,24 +792,24 @@ export async function startMcpHttp(opts: McpHttpOptions): Promise<void> {
       res.json({
         resource: `${origin}/mcp`,
         authorization_servers: [origin],
-        scopes_supported: ['repo-harness', ...(coding ? ['repo-harness.coding'] : []), 'offline_access'],
+        scopes_supported: ['repo-harness', ...(coding ? ['repo-harness.coding'] : []), ...(engineer ? ['repo-harness.engineer'] : []), 'offline_access'],
         bearer_methods_supported: ['header'],
       });
     });
   }
 
   app.post('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), express.raw({ type: '*/*', limit: '1mb' }), (req, res) => {
-    handleMcpPost(req, res, { ...opts, repo: repoRoot }, sessions, codingRuntimes).catch((error: unknown) => {
+    handleMcpPost(req, res, { ...opts, repo: repoRoot }, sessions, codingRuntimes, profile).catch((error: unknown) => {
       if (!res.headersSent) res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
     });
   });
   app.get('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), (req, res) => {
-    handleMcpGet(req, res, sessions, codingRuntimes).catch((error: unknown) => {
+    handleMcpGet(req, res, sessions, codingRuntimes, authorizationScoped).catch((error: unknown) => {
       if (!res.headersSent) res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
     });
   });
   app.delete('/mcp', requireMcpHttpAuth(authMode, authToken, oauthProvider, configuredPublicOrigin), (req, res) => {
-    handleMcpDelete(req, res, sessions, codingRuntimes).catch((error: unknown) => {
+    handleMcpDelete(req, res, sessions, codingRuntimes, authorizationScoped).catch((error: unknown) => {
       if (!res.headersSent) res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
     });
   });
