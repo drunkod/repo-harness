@@ -179,6 +179,51 @@ describe("run command", () => {
     }
   }, 30_000);
 
+  test("protected contract-worktree receives the package CLI for sprint lease checks", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "repo-harness-run-protected-cli-"));
+    const repo = join(tmp, "repo");
+    const worktree = join(tmp, "worktree");
+    const taskId = "a".repeat(64);
+    const git = (args: string[], cwd: string) => {
+      const result = spawnSync("git", args, { cwd, encoding: "utf-8" });
+      expect(result.status, result.stderr).toBe(0);
+    };
+
+    try {
+      mkdirSync(repo);
+      git(["init", "-q", "-b", "main"], repo);
+      git(["config", "user.name", "Repo Harness Test"], repo);
+      git(["config", "user.email", "repo-harness@example.invalid"], repo);
+      writeFileSync(join(repo, "README.md"), "base\n");
+      git(["add", "README.md"], repo);
+      git(["commit", "-qm", "base"], repo);
+      git(["worktree", "add", "-qb", "codex/nested-cli-authority", worktree], repo);
+
+      mkdirSync(join(worktree, "tasks/contracts"), { recursive: true });
+      mkdirSync(join(worktree, "tasks/reviews"), { recursive: true });
+      mkdirSync(join(worktree, ".ai/harness/sprint/claims"), { recursive: true });
+      writeFileSync(join(worktree, "tasks/contracts/nested-cli-authority.contract.md"), "# Task Contract: nested CLI authority\n");
+      writeFileSync(join(worktree, "tasks/reviews/nested-cli-authority.review.md"), "# Task Review: nested CLI authority\n");
+      writeFileSync(
+        join(worktree, ".ai/harness/sprint/claims/test.claim"),
+        `claim_id=claim-does-not-exist\ntask_id=${taskId}\n`,
+      );
+
+      const result = spawnSync(process.execPath, [CLI, "run", "contract-worktree", "finish", "--no-merge"], {
+        cwd: worktree,
+        encoding: "utf-8",
+        env: packageRuntimeEnv(),
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("no lease holds claim id claim-does-not-exist");
+      expect(result.stderr).toContain("this worktree no longer owns the sprint lease it claimed");
+      expect(result.stderr).not.toContain("the repo-harness CLI is unavailable");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test("protected helpers never probe caller PATH for a Node runtime", () => {
     const tmp = mkdtempSync(join(tmpdir(), "repo-harness-run-protected-node-"));
     try {
