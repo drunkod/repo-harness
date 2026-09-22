@@ -1,20 +1,11 @@
 {
   "protocol": 1,
   "kind": "repo-harness-substantive-change-waiver",
-  "substantive_change_sha256": "sha256:4c89ffd7851980783969e5bc79424cf764562870055b3e3a73f7e2575dc3a625",
-  "reason": "Ship the canonical new-repository Fast Luna runbook, unify task-contract delegation-budget parsing across contract-run, automation budgets, and the helper dispatcher, and ensure contract-run outer timeout containment cannot undercut an accepted contract wall-time budget.",
+  "substantive_change_sha256": "sha256:7daaab87ddff9f69d165c7d55bc27f3a9cb652949ca7dfbc4e228896ec1535f8",
+  "reason": "Correct the published new-repository Fast Luna runbook so Sprint approval is committed before claiming, prepared acceptance evidence is reused only when its full normalized subject and Change Assessment bindings remain current, semantic review is pinned to the prepared target revision, and publication/runtime compatibility wording names the immutable fixed revision.",
   "owner": "drunkod",
   "scope": [
-    "assets/templates/helpers/contract-run.ts",
-    "deploy/README.md",
-    "deploy/runbooks/new-repository-fast-luna.md",
-    "scripts/contract-run.ts",
-    "src/core/automation/budget.ts",
-    "src/core/task-contract-delegation-budget.ts",
-    "src/effects/runtime/helper-runner.ts",
-    "tests/contract-run.test.ts",
-    "tests/unit/closeout-runner-guardrails.test.ts",
-    "tests/unit/issue-282-automation-budget-store.test.ts"
+    "deploy/runbooks/new-repository-fast-luna.md"
   ],
-  "revisit_trigger": "The task-contract delegation budget schema, contract-run wall-time semantics, helper dispatcher timeout policy, Sprint claim/worktree binding protocol, AcceptanceReceipt, contract-worktree closeout, or deploy/runbook ownership contract changes"
+  "revisit_trigger": "Sprint approval/claim authority, normalized review-subject semantics, Change Assessment binding, semantic-review base selection, AcceptanceReceipt, or the minimum fixed runtime revision changes"
 }

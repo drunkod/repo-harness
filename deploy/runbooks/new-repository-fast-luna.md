@@ -1,8 +1,10 @@
 # Runbook: New Repository -> Planner -> Luna-Low
 
-Status: Active operations runbook  
-Applies to: repo-harness 0.19.x  
+Status: Active operations runbook
+Runtime requirement: repo-harness 0.19.0 at fixed revision `823f1f8fce000142ba7b69438ac67f7344bc9b95` or a descendant containing that fix for multi-minute `contract-run run`
 Purpose: adopt a new Git repository, freeze a small work package, execute it with GPT-5.6 Luna at low effort, and close it with Repo Harness evidence.
+
+The fixed revision is published on `origin/docs/new-project-fast-luna-019` but is not yet the active Nix runtime. The current Nix pin `3d0ada93d2d370627b12907a84b2b567ba3c8751` predates the fix, so a `0.19.0` version string alone is not sufficient.
 
 This is the short human procedure. For rationale and examples, read docs/repo-harness-new-project-fast-luna-tutorial.md.
 
@@ -91,10 +93,32 @@ repo-harness run new-sprint --slug first-slice --title "First implementation sli
 
 Keep the first Sprint to one to three ordered tasks. Each row needs an observable acceptance condition.
 
-Claim one contract row without executing it and keep the exact returned artifact identity:
+`new-sprint` creates a Draft. Before claiming anything, complete the PRD/source section and backlog rows, obtain explicit human approval, change the Sprint status to `Approved`, and commit that approved planning authority on the configured canonical target branch. `start-task` refuses Draft sprints and resolves the claim from the canonical target commit, not from an uncommitted working copy.
 
 ~~~bash
 SPRINT_FILE="$(cat .ai/harness/sprint/active-sprint)"
+TARGET_REF="$(jq -r '.worktree_strategy.merge_back.target // "main"' .ai/harness/policy.json)"
+
+test "$(git branch --show-current)" = "$TARGET_REF"
+# Edit "$SPRINT_FILE" and every referenced PRD/source artifact.
+# After explicit human approval, set the Sprint status to Approved.
+
+repo-harness run check-task-workflow --strict
+git status --short
+test -z "$(git diff --cached --name-only)"  # fail closed on pre-existing staged work
+git add "$SPRINT_FILE"
+# If the Sprint references separate PRD/source files, stage those exact reviewed files too.
+# Example: git add plans/prd/<reviewed-prd>.md
+test -n "$(git diff --cached --name-only)"
+git diff --cached --check
+git commit -m "plan: approve first implementation sprint"
+
+test "$(git rev-parse HEAD)" = "$(git rev-parse "$TARGET_REF")"
+~~~
+
+Only after that committed approval checkpoint, claim one contract row without executing it and keep the exact returned artifact identity:
+
+~~~bash
 CLAIM_OUTPUT="$(repo-harness run sprint-backlog start-task --task 1)"
 printf '%s\n' "$CLAIM_OUTPUT"
 
@@ -243,40 +267,113 @@ Do not treat the worker's self-report as acceptance. The generated contract-run 
 
 After contract-run returns, inspect its run manifest, worker output, and `.ai/harness/checks/latest.json`.
 
-- If the worker's canonical preparation succeeded and no tracked file changed afterward, reuse that evidence. Do not rerun expensive criteria merely because the operator reached this step.
-- If preparation is missing or failed, or any tracked file changed after it, record that reason and run the canonical preparation once:
+Reuse is allowed only when the prepared evidence is still bound to the **current normalized subject and the same acceptance authority**. Do not use "no tracked file changed" as the freshness test: the normalized subject also covers non-ignored untracked file contents, and acceptance binds the contract and Change Assessment.
+
+A cheap freshness check does not rerun deterministic criteria:
+
+~~~bash
+CHECKS=.ai/harness/checks/latest.json
+ASSESSMENT=.ai/harness/checks/change-assessment.latest.json
+test -s "$CHECKS"
+test -s "$ASSESSMENT"
+
+PREPARED_SUBJECT="$(jq -r '.review_subject_sha256 // empty' "$CHECKS")"
+PREPARED_TARGET_REF="$(jq -r '.change_assessment.selection_packet.target_ref // empty' "$CHECKS")"
+PREPARED_TARGET_REV="$(jq -r '.change_assessment.selection_packet.target_revision // empty' "$CHECKS")"
+PREPARED_PATHS="$(jq -c '.change_assessment.selection_packet.subject_paths // [] | sort' "$CHECKS")"
+
+jq -e --arg contract "$CONTRACT" '
+  .source == "verify-sprint" and
+  .status == "pass" and
+  .exit_code == 0 and
+  .contract.file == $contract and
+  .change_assessment.status == "pass" and
+  .change_assessment.selection_packet.status == "ready"
+' "$CHECKS" >/dev/null
+
+jq -e --slurpfile assessment "$ASSESSMENT" \
+  '.change_assessment == $assessment[0]' "$CHECKS" >/dev/null
+
+CURRENT_SUBJECT="$(repo-harness review-subject --target "$PREPARED_TARGET_REF" --format json)"
+jq -e \
+  --arg subject "$PREPARED_SUBJECT" \
+  --arg target_ref "$PREPARED_TARGET_REF" \
+  --arg target_rev "$PREPARED_TARGET_REV" \
+  --argjson paths "$PREPARED_PATHS" '
+    .status == "ok" and
+    .review_subject_sha256 == $subject and
+    .target_ref == $target_ref and
+    .target_rev == $target_rev and
+    (.paths | sort) == $paths
+  ' <<<"$CURRENT_SUBJECT" >/dev/null
+
+repo-harness run change-assessment validate \
+  --contract "$CONTRACT" \
+  --packet "$ASSESSMENT"
+~~~
+
+If any check fails, or if the goal/plan or frozen review policy changed after preparation, record the stale reason and run one replacement preparation:
 
 ~~~bash
 repo-harness run verify-sprint --prepare-acceptance
 ~~~
 
-That preparation freezes the exact final subject, verification evidence, reviewed paths, target revision, and Change Assessment. Any later tracked edit makes it stale and requires a new preparation round.
+That preparation freezes the exact final subject, including non-ignored untracked content, plus verification evidence, subject paths, target revision, and Change Assessment. Preserve those bindings until semantic review and receipt recording finish.
 
 ## 9. Run the contract-frozen semantic reviewer
 
-Inspect the policy:
+Inspect and capture the frozen policy:
 
 ~~~bash
-repo-harness run acceptance-receipt policy --contract "$CONTRACT"
+POLICY_JSON="$(repo-harness run acceptance-receipt policy --contract "$CONTRACT")"
+printf '%s\n' "$POLICY_JSON"
+REVIEWER="$(jq -r '.reviewer // empty' <<<"$POLICY_JSON")"
+REVIEW_SOURCE="$(jq -r '.source // empty' <<<"$POLICY_JSON")"
+case "$REVIEW_SOURCE" in
+  codex-review) REVIEW_PROVIDER=codex ;;
+  codex-plugin) REVIEW_PROVIDER=codex-plugin ;;
+  *) echo "unsupported frozen review source: $REVIEW_SOURCE" >&2; exit 1 ;;
+esac
+test -n "$REVIEWER"
 ~~~
 
-Run exactly the reviewer/source named there.
-
-- source=codex-review: use the direct read-only Codex review path.
-- source=codex-plugin: use the official Codex plugin path documented by repo-harness-cross-review.
-- Do not substitute a different provider or write external_pass without an actual passing review.
-
-Record the real disposition:
+Run exactly that reviewer/source and pin the review to the target revision frozen by preparation. Do not substitute a different provider.
 
 ~~~bash
+REVIEW_JSON="$(repo-harness cross-review \
+  --provider "$REVIEW_PROVIDER" \
+  --base "$PREPARED_TARGET_REV" \
+  --json)"
+printf '%s\n' "$REVIEW_JSON"
+
+jq -e \
+  --arg provider "$REVIEW_PROVIDER" \
+  --arg base "$PREPARED_TARGET_REV" \
+  --arg subject "$PREPARED_SUBJECT" \
+  --argjson paths "$PREPARED_PATHS" '
+    .status == "ok" and
+    .provider == $provider and
+    .scope.baseRev == $base and
+    .scope.reviewSubjectSha256 == $subject and
+    (.scope.paths | sort) == $paths and
+    ([.findings[]? | select(.severity == "P1")] | length) == 0
+  ' <<<"$REVIEW_JSON" >/dev/null
+~~~
+
+Do not record `external_pass` unless that binding check succeeds and the actual reviewer result is a pass. Preserve the review's real findings rather than replacing them with an empty array:
+
+~~~bash
+REVIEW_SUMMARY="$(jq -r '.recommendation' <<<"$REVIEW_JSON")"
+REVIEW_FINDINGS="$(jq -c '.findings' <<<"$REVIEW_JSON")"
+
 repo-harness run acceptance-receipt record \
   --contract "$CONTRACT" \
   --verification .ai/harness/checks/latest.json \
   --disposition external_pass \
-  --reviewer Codex \
-  --source <source-from-policy> \
-  --summary "<actual reviewer summary>" \
-  --findings-json '[]'
+  --reviewer "$REVIEWER" \
+  --source "$REVIEW_SOURCE" \
+  --summary "$REVIEW_SUMMARY" \
+  --findings-json "$REVIEW_FINDINGS"
 ~~~
 
 For a reject, record reject plus the actual findings instead. Never convert a rejection into a pass by prose.

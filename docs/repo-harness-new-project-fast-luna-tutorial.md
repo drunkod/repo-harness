@@ -1,12 +1,13 @@
 # New Project Fast Path: Repo Harness -> Planner -> Luna-Low
 
 > **Start now:** read [the setup/resume guide and copy-paste prompts](new-repository-start-here.md).
-> This source tutorial includes fixes not deployed by Nix pin `3d0ada93`.
-> Verify the exact installed revision before multi-minute execution. A `0.19.x`
-> label is not a compatibility guarantee; publication/repinning and hands-off
-> automation remain deferred in `tasks/todos.md`.
+> This source tutorial requires the runtime fix first published at
+> `823f1f8fce000142ba7b69438ac67f7344bc9b95`. The current Nix pin `3d0ada93d2d370627b12907a84b2b567ba3c8751` does not contain it.
+> Verify the exact installed revision before multi-minute execution. A `0.19.0`
+> version string alone is not a compatibility guarantee; repinning, activation,
+> and hands-off automation remain deferred in `tasks/todos.md`.
 
-This tutorial is the detailed companion to deploy/runbooks/new-repository-fast-luna.md. It targets repo-harness 0.19.x and a host where Git, Codex, and Repo Harness are already installed.
+This tutorial is the detailed companion to deploy/runbooks/new-repository-fast-luna.md. It targets repo-harness 0.19.0 at fixed revision `823f1f8fce000142ba7b69438ac67f7344bc9b95` or a descendant containing that fix, on a host where Git, Codex, and Repo Harness are already installed.
 
 The intended split is:
 
@@ -37,7 +38,7 @@ git --version
 codegraph --version
 ~~~
 
-This guide assumes repo-harness 0.19.x.
+This guide assumes repo-harness 0.19.0 at fixed revision `823f1f8fce000142ba7b69438ac67f7344bc9b95` or a descendant containing that fix. The revision is published on the documentation branch but is not yet the active Nix runtime.
 
 If a configuration manager such as Nix/Home Manager owns Repo Harness, Codex hooks, CodeGraph, Waza, or Herdr, keep that authority in the host repository. A new application repository should not reinstall or rewrite host configuration.
 
@@ -212,12 +213,34 @@ Keep the first Sprint to one to three ordered rows.
 
 A PRD should contain only the product decisions needed for that Sprint. Use the repo's PRD template when one exists.
 
+`new-sprint` creates a Draft. Fill the PRD/source section and every intended backlog row first. Then obtain explicit human approval, change the Sprint status to `Approved`, and commit the approved Sprint plus its referenced planning authority on the configured canonical target branch. This is a required authority checkpoint: `start-task` rejects Draft status and resolves the task from the canonical target commit.
+
+~~~bash
+SPRINT_FILE="$(cat .ai/harness/sprint/active-sprint)"
+TARGET_REF="$(jq -r '.worktree_strategy.merge_back.target // "main"' .ai/harness/policy.json)"
+
+test "$(git branch --show-current)" = "$TARGET_REF"
+# Edit "$SPRINT_FILE" and every referenced PRD/source artifact.
+# After explicit human approval, set the Sprint status to Approved.
+
+repo-harness run check-task-workflow --strict
+git status --short
+test -z "$(git diff --cached --name-only)"  # fail closed on pre-existing staged work
+git add "$SPRINT_FILE"
+# If the Sprint references separate PRD/source files, stage those exact reviewed files too.
+# Example: git add plans/prd/<reviewed-prd>.md
+test -n "$(git diff --cached --name-only)"
+git diff --cached --check
+git commit -m "plan: approve first Luna implementation sprint"
+
+test "$(git rev-parse HEAD)" = "$(git rev-parse "$TARGET_REF")"
+~~~
+
 ## 7. Claim one Sprint row without executing it
 
 For a contract row, capture the command output instead of later guessing which plan belongs to the claim:
 
 ~~~bash
-SPRINT_FILE="$(cat .ai/harness/sprint/active-sprint)"
 CLAIM_OUTPUT="$(repo-harness run sprint-backlog start-task --task 1)"
 printf '%s\n' "$CLAIM_OUTPUT"
 
@@ -457,53 +480,121 @@ Never repeat the source mutation just to obtain a fresh index.
 
 The generated contract-run worker prompt already requires the worker to call `repo-harness run verify-sprint --prepare-acceptance` once after implementation and final criteria are frozen. Therefore this operator step is a reconciliation step, not an unconditional second execution.
 
-Inspect the contract-run manifest, worker stdout, and the canonical checks artifact:
+Inspect the contract-run manifest, worker stdout, and the canonical checks artifact.
+
+Do not use "no tracked file changed" as the reuse condition. The normalized review subject includes non-ignored untracked file contents, while acceptance also binds the contract and Change Assessment authority.
+
+Use the prepared packet to prove that the current subject is still exactly the prepared subject without rerunning expensive criteria:
 
 ~~~bash
-test -f .ai/harness/checks/latest.json
+CHECKS=.ai/harness/checks/latest.json
+ASSESSMENT=.ai/harness/checks/change-assessment.latest.json
+test -s "$CHECKS"
+test -s "$ASSESSMENT"
+
+PREPARED_SUBJECT="$(jq -r '.review_subject_sha256 // empty' "$CHECKS")"
+PREPARED_TARGET_REF="$(jq -r '.change_assessment.selection_packet.target_ref // empty' "$CHECKS")"
+PREPARED_TARGET_REV="$(jq -r '.change_assessment.selection_packet.target_revision // empty' "$CHECKS")"
+PREPARED_PATHS="$(jq -c '.change_assessment.selection_packet.subject_paths // [] | sort' "$CHECKS")"
+
+jq -e --arg contract "$CONTRACT" '
+  .source == "verify-sprint" and
+  .status == "pass" and
+  .exit_code == 0 and
+  .contract.file == $contract and
+  .change_assessment.status == "pass" and
+  .change_assessment.selection_packet.status == "ready"
+' "$CHECKS" >/dev/null
+
+jq -e --slurpfile assessment "$ASSESSMENT" \
+  '.change_assessment == $assessment[0]' "$CHECKS" >/dev/null
+
+CURRENT_SUBJECT="$(repo-harness review-subject --target "$PREPARED_TARGET_REF" --format json)"
+jq -e \
+  --arg subject "$PREPARED_SUBJECT" \
+  --arg target_ref "$PREPARED_TARGET_REF" \
+  --arg target_rev "$PREPARED_TARGET_REV" \
+  --argjson paths "$PREPARED_PATHS" '
+    .status == "ok" and
+    .review_subject_sha256 == $subject and
+    .target_ref == $target_ref and
+    .target_rev == $target_rev and
+    (.paths | sort) == $paths
+  ' <<<"$CURRENT_SUBJECT" >/dev/null
+
+repo-harness run change-assessment validate \
+  --contract "$CONTRACT" \
+  --packet "$ASSESSMENT"
 ~~~
 
-If the worker's canonical preparation succeeded and no tracked file changed after it, reuse that evidence and continue to semantic review. Do not rerun expensive checks simply because control returned to the operator.
-
-Run preparation here only when it is missing, failed, or stale—for example because a tracked file changed after the worker prepared evidence. Record that reason, then run exactly one replacement preparation:
+Reuse the evidence only when these checks pass and the goal/plan and frozen review policy have not changed since preparation. Otherwise record the stale reason and run exactly one replacement preparation:
 
 ~~~bash
 repo-harness run verify-sprint --prepare-acceptance
 ~~~
 
-The resulting evidence binds the exact normalized final subject, target revision, reviewed paths, verification evidence, benchmark evidence when required, and Change Assessment. Any later tracked edit invalidates that subject and requires another preparation round.
+The resulting evidence binds the normalized final subject (including non-ignored untracked content), target revision, subject paths, verification evidence, benchmark evidence when required, and Change Assessment. Preserve those bindings until semantic review and receipt recording finish.
 
 ## 14. Run the frozen semantic reviewer
 
-Read the contract's exact acceptance policy:
+Read and capture the contract's exact acceptance policy. For protocol 2, the reviewer and source are part of the frozen authority:
 
 ~~~bash
-repo-harness run acceptance-receipt policy --contract "$CONTRACT"
+POLICY_JSON="$(repo-harness run acceptance-receipt policy --contract "$CONTRACT")"
+printf '%s\n' "$POLICY_JSON"
+REVIEWER="$(jq -r '.reviewer // empty' <<<"$POLICY_JSON")"
+REVIEW_SOURCE="$(jq -r '.source // empty' <<<"$POLICY_JSON")"
+case "$REVIEW_SOURCE" in
+  codex-review) REVIEW_PROVIDER=codex ;;
+  codex-plugin) REVIEW_PROVIDER=codex-plugin ;;
+  *) echo "unsupported frozen review source: $REVIEW_SOURCE" >&2; exit 1 ;;
+esac
+test -n "$REVIEWER"
 ~~~
 
-For protocol 2, the source is part of the frozen policy.
-
-If source is codex-review, use the direct read-only Codex review route documented by repo-harness-cross-review:
+Run exactly that reviewer/source, pin the review to the exact target revision frozen by preparation, and request structured output:
 
 ~~~bash
-repo-harness cross-review --provider codex
+REVIEW_JSON="$(repo-harness cross-review \
+  --provider "$REVIEW_PROVIDER" \
+  --base "$PREPARED_TARGET_REV" \
+  --json)"
+printf '%s\n' "$REVIEW_JSON"
 ~~~
 
-If source is codex-plugin, use the official Codex plugin route documented by that same skill/reference. Do not replace it with a different provider and preserve the same source label.
-
-The semantic reviewer returns pass/reject findings. Only after an actual pass should the orchestrator record external_pass.
-
-Example recording shape:
+Before consuming the verdict, prove that the reviewer observed the same prepared semantic subject:
 
 ~~~bash
+jq -e \
+  --arg provider "$REVIEW_PROVIDER" \
+  --arg base "$PREPARED_TARGET_REV" \
+  --arg subject "$PREPARED_SUBJECT" \
+  --argjson paths "$PREPARED_PATHS" '
+    .status == "ok" and
+    .provider == $provider and
+    .scope.baseRev == $base and
+    .scope.reviewSubjectSha256 == $subject and
+    (.scope.paths | sort) == $paths and
+    ([.findings[]? | select(.severity == "P1")] | length) == 0
+  ' <<<"$REVIEW_JSON" >/dev/null
+~~~
+
+A provider result against another base, subject, or path set is not acceptance evidence. Do not relabel it.
+
+Only after an actual passing, correctly bound review should the orchestrator record `external_pass`, preserving the real summary and findings:
+
+~~~bash
+REVIEW_SUMMARY="$(jq -r '.recommendation' <<<"$REVIEW_JSON")"
+REVIEW_FINDINGS="$(jq -c '.findings' <<<"$REVIEW_JSON")"
+
 repo-harness run acceptance-receipt record \
   --contract "$CONTRACT" \
   --verification .ai/harness/checks/latest.json \
   --disposition external_pass \
-  --reviewer Codex \
-  --source <source-from-policy> \
-  --summary "<actual reviewer summary>" \
-  --findings-json '[]'
+  --reviewer "$REVIEWER" \
+  --source "$REVIEW_SOURCE" \
+  --summary "$REVIEW_SUMMARY" \
+  --findings-json "$REVIEW_FINDINGS"
 ~~~
 
 For a rejection, record reject and the actual findings.

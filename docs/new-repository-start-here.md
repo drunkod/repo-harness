@@ -1,7 +1,7 @@
 # Start here: a new repository with Planner and Luna-low
 
 Status: usable onboarding/planning entrypoint; unattended execution is deployment-gated.
-Last reviewed: 2026-09-21.
+Last reviewed: 2026-09-22.
 
 ## What you can do now
 
@@ -9,13 +9,14 @@ Start with **repository inspection, adoption only if needed, and one approved ta
 Do not wait for host automation work to begin product planning. Do not promise an
 unattended Sprint merely because the CLI exposes controller primitives.
 
-The source worktree contains runtime fixes that the current Nix pin
-`3d0ada93d2d370627b12907a84b2b567ba3c8751` does not contain. A `0.19.0`
-version string alone does not prove those fixes are installed. Until a corrected
-revision is published, pinned, validated and activated, treat the multi-minute
-`repo-harness run contract-run run` path in the detailed tutorial as unavailable
-on that pin: its outer helper timeout is 120 seconds. Do not work around this by
-silently disabling the deadline or changing the user's global installation.
+The corrected runtime revision `823f1f8fce000142ba7b69438ac67f7344bc9b95` is published on
+`origin/docs/new-project-fast-luna-019`, but the current Nix pin
+`3d0ada93d2d370627b12907a84b2b567ba3c8751` does not contain it. A `0.19.0` version string alone does not
+prove the fix is installed. Until the published revision (or a descendant
+containing it) is pinned, validated and activated, treat the multi-minute
+`repo-harness run contract-run run` path as unavailable on the current Nix pin:
+its outer helper timeout is 120 seconds. Do not work around this by silently
+disabling the deadline or changing the user's global installation.
 
 If the installed runtime cannot support the selected task safely, finish planning,
 report the precise execution blocker, and let the human choose an explicitly

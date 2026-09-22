@@ -5,12 +5,12 @@
   "sourceDigest": "sha256:b859983f97115344cb2d922ace1e8499d648eeca197ec66cf58b3775378e135d",
   "provenance": {
     "schemaVersion": "archcontext.architecture-docs-projection-provenance/v1",
-    "baseHeadSha": "3d0ada93d2d370627b12907a84b2b567ba3c8751",
-    "worktreeDigest": "sha256:ba47962ca587961da8352061ef2f63665d1cd276903f95298b0b39057e934f36",
-    "sourceTreeDigest": "sha256:a554fd5ed506ecf987a3050920e4f11982214c8240e0c95374fc92ec3fb5d2a6",
+    "baseHeadSha": "823f1f8fce000142ba7b69438ac67f7344bc9b95",
+    "worktreeDigest": "sha256:d2b28307aefa1979f3ae108249feef3d5b9f70668379b3f6b85b5219a8280db5",
+    "sourceTreeDigest": "sha256:21e5d12244327b460a20e9fde2a41ea35f96d22fc92592f4d0b5874253015df0",
     "modelDigest": "sha256:a11afbf16edf9e822bf02222d331beb8c050ef0b659ae605c23183193b10bbd5",
-    "codeGraphDigest": "sha256:3ed6ff8f398d39edf762e1489867050f1cae125ba6c83f9094e194b0efdb7108",
-    "indexedWorktreeDigest": "sha256:fae5c200e6043690ec7960dd252bfff93c9f5a2503e2073926f356b997bea23c",
+    "codeGraphDigest": "sha256:98f4a0588ce6881602562dab44541e48b9d97ac97805a0b95087cb77edecd9b8",
+    "indexedWorktreeDigest": "sha256:fe65506e74b1fc2f596f012bc9ec6525f14d8f1ed153a81ac1de5b9fa9b4fef0",
     "rendererVersion": "archcontext.docs-renderer/v4",
     "layoutVersion": "archcontext.docs-layout/v1",
     "generatedFrom": {
@@ -19,9 +19,9 @@
       "codeGraphBinaryDigest": "sha256:e4be48573fdf16196ca0d2867be2790aa161534e9973dcb89bc70465100ea537",
       "codeGraphStatus": "ready"
     },
-    "projectionInputDigest": "sha256:f15f3638669b4b0f2062f60d011a345b2c3bf5e916a298b1dc0c7d54df6f9036"
+    "projectionInputDigest": "sha256:b442894ca409ab626dbaa606b331ca1ce0a28c0b7c920aae349cb9d68f8a22df"
   },
-  "projectionDigest": "sha256:acc9efb8ca3d9481c612b24d74b06602e01a09ce2bdcd03f91e86dc030e3e916",
+  "projectionDigest": "sha256:8b50446f8a4c5196d3957284ea6b7c04a7e726a06a56745c343f5d85f5d3ebd9",
   "semanticBaseline": {
     "semanticState": {
       "schemaVersion": "archcontext.architecture-semantic-state/v1",
@@ -709,12 +709,12 @@
     },
     "digests": {
       "modelDigest": "sha256:a11afbf16edf9e822bf02222d331beb8c050ef0b659ae605c23183193b10bbd5",
-      "sourceTreeDigest": "sha256:a554fd5ed506ecf987a3050920e4f11982214c8240e0c95374fc92ec3fb5d2a6",
+      "sourceTreeDigest": "sha256:21e5d12244327b460a20e9fde2a41ea35f96d22fc92592f4d0b5874253015df0",
       "flowProofDigest": "sha256:938dadfc988b732b6a67413ece104c062bb257ffd9f67caaf7db04dbc957b983",
-      "projectionDigest": "sha256:acc9efb8ca3d9481c612b24d74b06602e01a09ce2bdcd03f91e86dc030e3e916"
+      "projectionDigest": "sha256:8b50446f8a4c5196d3957284ea6b7c04a7e726a06a56745c343f5d85f5d3ebd9"
     }
   },
-  "receiptDigest": "sha256:8e69014ab8808295ed5893bdb948a61634114ac7c047decd118936181d58f2dc",
+  "receiptDigest": "sha256:1cf3f10619aefbb4bcd6a2dd70585a3f2b4f16f5e736bf9f131cb3b28e432fda",
   "refreshSignalIds": [],
   "targetCount": 33,
   "fileCount": 33,
@@ -787,9 +787,9 @@
       "sourceDigest": "sha256:5c192000c887502bac2e9787d6ffb992e49a57f955b4e7b4655b7c01d18c6dd0",
       "outputDigest": "sha256:c831589b4ccffcbd58d0502102abfbecc01025326f7fa0f0e9ba60fc3dbd0cb4",
       "verifiedAgainst": {
-        "branch": "codex/campaign-worker-record-scope",
-        "commit": "e2737265b6a50a79201aa37ac558bf18808c1a1a",
-        "committedAt": "2026-09-10T03:05:04+08:00"
+        "branch": "docs/new-project-fast-luna-019",
+        "commit": "823f1f8fce000142ba7b69438ac67f7344bc9b95",
+        "committedAt": "2026-09-22T13:08:01+05:00"
       }
     },
     {
@@ -828,8 +828,8 @@
       "outputDigest": "sha256:4e22f748955143711e4ba6b02638a978e6a785040dd1cd5efc1747cdc79d1193",
       "verifiedAgainst": {
         "branch": "docs/new-project-fast-luna-019",
-        "commit": "3d0ada93d2d370627b12907a84b2b567ba3c8751",
-        "committedAt": "2026-09-20T10:16:13+05:00"
+        "commit": "823f1f8fce000142ba7b69438ac67f7344bc9b95",
+        "committedAt": "2026-09-22T13:08:01+05:00"
       }
     },
     {
@@ -1228,8 +1228,8 @@
       "outputDigest": "sha256:966f7438cd7b385cb411a2ef8c2de18c0b1e71eb067941c97375a4b284a873b9",
       "verifiedAgainst": {
         "branch": "docs/new-project-fast-luna-019",
-        "commit": "3d0ada93d2d370627b12907a84b2b567ba3c8751",
-        "committedAt": "2026-09-20T10:16:13+05:00"
+        "commit": "823f1f8fce000142ba7b69438ac67f7344bc9b95",
+        "committedAt": "2026-09-22T13:08:01+05:00"
       }
     },
     {
@@ -1248,8 +1248,8 @@
       "outputDigest": "sha256:beaaa466d51cbd8f929fd6acd6645c6f5136cccf539f09b63a273e5ab38519fa",
       "verifiedAgainst": {
         "branch": "docs/new-project-fast-luna-019",
-        "commit": "3d0ada93d2d370627b12907a84b2b567ba3c8751",
-        "committedAt": "2026-09-20T10:16:13+05:00"
+        "commit": "823f1f8fce000142ba7b69438ac67f7344bc9b95",
+        "committedAt": "2026-09-22T13:08:01+05:00"
       }
     },
     {
