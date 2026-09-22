@@ -1,0 +1,20 @@
+{
+  "protocol": 1,
+  "kind": "repo-harness-substantive-change-waiver",
+  "substantive_change_sha256": "sha256:4c89ffd7851980783969e5bc79424cf764562870055b3e3a73f7e2575dc3a625",
+  "reason": "Ship the canonical new-repository Fast Luna runbook, unify task-contract delegation-budget parsing across contract-run, automation budgets, and the helper dispatcher, and ensure contract-run outer timeout containment cannot undercut an accepted contract wall-time budget.",
+  "owner": "drunkod",
+  "scope": [
+    "assets/templates/helpers/contract-run.ts",
+    "deploy/README.md",
+    "deploy/runbooks/new-repository-fast-luna.md",
+    "scripts/contract-run.ts",
+    "src/core/automation/budget.ts",
+    "src/core/task-contract-delegation-budget.ts",
+    "src/effects/runtime/helper-runner.ts",
+    "tests/contract-run.test.ts",
+    "tests/unit/closeout-runner-guardrails.test.ts",
+    "tests/unit/issue-282-automation-budget-store.test.ts"
+  ],
+  "revisit_trigger": "The task-contract delegation budget schema, contract-run wall-time semantics, helper dispatcher timeout policy, Sprint claim/worktree binding protocol, AcceptanceReceipt, contract-worktree closeout, or deploy/runbook ownership contract changes"
+}

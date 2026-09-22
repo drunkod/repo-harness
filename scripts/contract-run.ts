@@ -9,6 +9,12 @@ import { createHash } from "crypto";
 // mirrored to assets/templates/helpers/run-bounded-verifier-command.ts): both live next to
 // whichever copy of this file is executing, canonical or projected.
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const PACKAGE_ROOT = basename(SCRIPT_DIR) === "helpers" && basename(dirname(SCRIPT_DIR)) === "templates" && basename(dirname(dirname(SCRIPT_DIR))) === "assets"
+  ? resolve(SCRIPT_DIR, "../../..")
+  : resolve(SCRIPT_DIR, "..");
+const { delegationBudgetNumber, parseTaskContractDelegationBudget } = await import(
+  pathToFileURL(join(PACKAGE_ROOT, "src/core/task-contract-delegation-budget.ts")).href,
+);
 
 type Mode = "dry-run" | "run" | "preflight" | "recover";
 
@@ -317,13 +323,6 @@ function parseScalar(block: string, key: string): string | null {
   return value === "null" ? null : value.replace(/^["']|["']$/g, "");
 }
 
-function parseNullableNumber(block: string, key: string): number | null {
-  const value = parseScalar(block, key);
-  if (value === null || value === "null") return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function parseList(block: string, key: string): string[] {
   const lines = block.split("\n");
   const values: string[] = [];
@@ -378,11 +377,12 @@ function parseRoles(block: string): Record<string, DelegationRole> {
 
 function parseDelegation(markdown: string): DelegationContract {
   const block = fencedYamlBlock(markdown, "delegation");
+  const parsedBudget = parseTaskContractDelegationBudget(markdown);
   return {
     budget: {
-      tokens: parseNullableNumber(block, "tokens"),
-      runner_invocations: parseNullableNumber(block, "runner_invocations"),
-      wall_time_minutes: parseNullableNumber(block, "wall_time_minutes"),
+      tokens: delegationBudgetNumber(parsedBudget.tokens),
+      runner_invocations: delegationBudgetNumber(parsedBudget.runner_invocations),
+      wall_time_minutes: delegationBudgetNumber(parsedBudget.wall_time_minutes),
     },
     permission_scope: {
       mode: parseScalar(block, "mode") ?? "inherit_allowed_paths",
@@ -406,8 +406,7 @@ function parseDelegation(markdown: string): DelegationContract {
 // tool_calls must fail closed instead of silently parsing as an unset runner_invocations
 // budget, which would drop the author's intended limit without any signal.
 function hasLegacyToolCallsField(markdown: string): boolean {
-  const block = fencedYamlBlock(markdown, "delegation");
-  return /^\s*tool_calls\s*:/m.test(block);
+  return parseTaskContractDelegationBudget(markdown).hasLegacyToolCalls;
 }
 
 // Enforce-or-reject for every delegation constraint contract-run cannot yet make true:

@@ -110,6 +110,15 @@ helper runtime, hook adapter target, and verification files that would be create
 or refreshed. It never creates an application stack; new projects and modules use
 `repo-harness-setup`'s scaffold mode instead.
 
+Start with the [setup/resume guide and reusable prompts](docs/new-repository-start-here.md)
+for the current deployment boundary and a supervised first task.
+
+For a human-operated new-project path that keeps ChatGPT/parent planning above a
+bounded GPT-5.6 Luna worker, use
+[`deploy/runbooks/new-repository-fast-luna.md`](deploy/runbooks/new-repository-fast-luna.md).
+The longer rationale and command examples are in
+[`docs/repo-harness-new-project-fast-luna-tutorial.md`](docs/repo-harness-new-project-fast-luna-tutorial.md).
+
 ### 4. Apply and verify
 
 ```bash

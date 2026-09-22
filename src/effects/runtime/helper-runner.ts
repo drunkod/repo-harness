@@ -2,6 +2,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from 'fs';
 import { dirname, extname, isAbsolute, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { ARCHCONTEXT_NODE_RANGE } from 'archctx-contracts';
+import { delegationBudgetNumber, parseTaskContractDelegationBudget } from '../../core/task-contract-delegation-budget';
 import { runProcess as runBoundedProcess } from '../process-runner';
 import { trustedNodeCandidates } from './node-candidates';
 import {
@@ -19,6 +20,8 @@ const PROTECTED_HELPERS = new Set(['acceptance-receipt', 'contract-worktree', 's
 const VERIFIER_HELPER_TIMEOUT_MS = 3_660_000;
 const CLOSEOUT_HELPER_TIMEOUT_MS = 900_000;
 const ORDINARY_HELPER_TIMEOUT_MS = 120_000;
+const CONTRACT_RUN_OUTER_OVERHEAD_MS = 120_000;
+const CONTRACT_RUN_DEFAULT_OUTER_TIMEOUT_MS = VERIFIER_HELPER_TIMEOUT_MS;
 
 function optionalHostExecutable(candidates: readonly string[]): string | undefined {
   for (const candidate of candidates) {
@@ -132,8 +135,44 @@ function helperId(fileName: string): string {
   return ext ? fileName.slice(0, -ext.length) : fileName;
 }
 
-export function helperTimeoutMs(helper: string): number {
+function optionValue(args: readonly string[], name: string): string | null {
+  const index = args.indexOf(name);
+  return index >= 0 && index + 1 < args.length ? args[index + 1] ?? null : null;
+}
+
+function contractRunOuterTimeoutMs(args: readonly string[], cwd: string): number {
+  if (args[0] !== 'run') return ORDINARY_HELPER_TIMEOUT_MS;
+
+  const repoRoot = resolve(cwd, optionValue(args, '--repo') ?? '.');
+  const contract = optionValue(args, '--contract');
+  if (!contract) return CONTRACT_RUN_DEFAULT_OUTER_TIMEOUT_MS;
+
+  let markdown: string;
+  try {
+    markdown = readFileSync(resolve(repoRoot, contract), 'utf8');
+  } catch {
+    return CONTRACT_RUN_DEFAULT_OUTER_TIMEOUT_MS;
+  }
+
+  const minutes = delegationBudgetNumber(parseTaskContractDelegationBudget(markdown).wall_time_minutes);
+  if (minutes === null || minutes <= 0) return CONTRACT_RUN_DEFAULT_OUTER_TIMEOUT_MS;
+  const budgetMs = Math.ceil(minutes * 60_000);
+  if (!Number.isSafeInteger(budgetMs)) return CONTRACT_RUN_DEFAULT_OUTER_TIMEOUT_MS;
+
+  // contract-run owns the real shared worker+verifier deadline. The CLI helper
+  // dispatcher is only a crash-containment envelope and must leave enough room
+  // for that declared budget plus setup/finalization overhead.
+  return Math.max(ORDINARY_HELPER_TIMEOUT_MS, budgetMs + CONTRACT_RUN_OUTER_OVERHEAD_MS);
+}
+
+export function helperTimeoutMs(
+  helper: string,
+  args: readonly string[] = [],
+  cwd = process.cwd(),
+): number {
   switch (helperId(helper)) {
+    case 'contract-run':
+      return contractRunOuterTimeoutMs(args, cwd);
     case 'verify-contract':
     case 'verify-sprint':
       return VERIFIER_HELPER_TIMEOUT_MS;
@@ -443,7 +482,7 @@ export function runHelper(opts: RunHelperOptions): RunHelperResult {
     env: childEnv,
     inheritEnv: !protectedHelper,
     stdio: opts.stdio ?? 'inherit',
-    timeoutMs: opts.timeoutMs ?? helperTimeoutMs(resolved.id),
+    timeoutMs: opts.timeoutMs ?? helperTimeoutMs(resolved.id, args, resolved.repoRoot),
     maxOutputBytes: opts.maxOutputBytes,
     processGroup: true,
     taskkillBin: context.runtime?.taskkillBin,

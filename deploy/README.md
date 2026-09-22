@@ -7,6 +7,7 @@
 - `deploy/scripts/` for operational scripts.
 - `deploy/submissions/` for submission or review materials.
 - `deploy/runbooks/` and `deploy/release-checklists/` for operational documentation.
+- Start a new adopted repository with `deploy/runbooks/new-repository-fast-luna.md`; keep the detailed tutorial under `docs/` rather than duplicating the operational sequence.
 - `deploy/sql/` as the default SQL root for ordered files named like `0001_create_tables.sql`.
 - `deploy/*.md` for runbooks and operating notes.
 - `deploy/env/.env.example` for documented variable shapes only.

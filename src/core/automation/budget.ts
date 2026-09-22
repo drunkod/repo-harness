@@ -14,6 +14,7 @@
  */
 import { createHash } from 'crypto';
 import { validateLeaseLivenessPolicy, type LeaseLivenessPolicyV1 } from '../state/lease-liveness';
+import { parseTaskContractDelegationBudget, type DelegationBudgetField } from '../task-contract-delegation-budget';
 
 export const AUTOMATION_BUDGET_PROTOCOL = 1 as const;
 
@@ -548,40 +549,27 @@ export function parseContractDelegationBudget(
   contractText: string,
   contractPath: string,
 ): AutomationContractLimitsV1 {
-  const block = fencedYamlBlock(contractText, 'delegation');
-  if (block === null) {
+  const parsed = parseTaskContractDelegationBudget(contractText);
+  if (parsed.block === null) {
     invalid(`task contract ${contractPath} has no delegation YAML block`);
   }
-  if (/^\s*tool_calls\s*:/mu.test(block)) {
+  if (parsed.hasLegacyToolCalls) {
     invalid(`task contract ${contractPath} uses the retired delegation budget field tool_calls`);
   }
+  const strictNumber = (field: DelegationBudgetField, name: string): number | null => {
+    if (field.state === 'missing') invalid(`task contract ${contractPath} delegation budget is missing ${name}`);
+    if (field.state === 'null') return null;
+    if (field.state !== 'number' || field.value <= 0) {
+      invalid(`task contract ${contractPath} delegation budget ${name} must be null or a positive number`);
+    }
+    return field.value;
+  };
   return Object.freeze({
     contract_path: contractPath,
-    tokens: nullableNumberField(block, 'tokens', contractPath),
-    runner_invocations: nullableNumberField(block, 'runner_invocations', contractPath),
-    wall_time_minutes: nullableNumberField(block, 'wall_time_minutes', contractPath),
+    tokens: strictNumber(parsed.tokens, 'tokens'),
+    runner_invocations: strictNumber(parsed.runner_invocations, 'runner_invocations'),
+    wall_time_minutes: strictNumber(parsed.wall_time_minutes, 'wall_time_minutes'),
   });
-}
-
-function fencedYamlBlock(markdown: string, key: string): string | null {
-  const fences = markdown.match(/```yaml\n[\s\S]*?```/gu) ?? [];
-  for (const fence of fences) {
-    const body = fence.replace(/^```yaml\n/u, '').replace(/```$/u, '');
-    if (new RegExp(`^${key}\\s*:`, 'mu').test(body)) return body;
-  }
-  return null;
-}
-
-function nullableNumberField(block: string, field: string, contractPath: string): number | null {
-  const match = block.match(new RegExp(`^\\s*${field}\\s*:\\s*(\\S+)\\s*$`, 'mu'));
-  if (!match) invalid(`task contract ${contractPath} delegation budget is missing ${field}`);
-  const raw = match![1]!;
-  if (raw === 'null' || raw === '~') return null;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    invalid(`task contract ${contractPath} delegation budget ${field} must be null or a positive number`);
-  }
-  return parsed;
 }
 
 export type AutomationLimitSource = 'authorization' | 'task_contract' | 'authorization_expiry';
