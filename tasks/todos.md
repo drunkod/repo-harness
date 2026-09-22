@@ -72,10 +72,9 @@ active execution plan or authorization to commit, publish, activate or rotate cr
 Reported completed fixes remain pending integration/deployment, not new requests to
 reimplement them. See [the start guide](../docs/new-repository-start-here.md).
 
-Publication checkpoint completed 2026-09-22: runtime/docs revision
-`823f1f8fce000142ba7b69438ac67f7344bc9b95` is pushed to `origin/docs/new-project-fast-luna-019`.
-It is not merged to `main`, repinned in Nix, validated as the deployable host
-candidate, or activated.
+Publication checkpoint completed 2026-09-22: minimum runtime-fix revision
+`823f1f8fce000142ba7b69438ac67f7344bc9b95` is published on `origin/docs/new-project-fast-luna-019`.
+Later documentation-only corrections may advance that branch without changing this minimum runtime revision. The fixed runtime is not merged to `main`, repinned in Nix, validated as the deployable host candidate, or activated.
 
 | Goal | Why Deferred | Tradeoff | Revisit Trigger |
 |------|--------------|----------|-----------------|

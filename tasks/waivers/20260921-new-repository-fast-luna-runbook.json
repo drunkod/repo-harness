@@ -1,8 +1,8 @@
 {
   "protocol": 1,
   "kind": "repo-harness-substantive-change-waiver",
-  "substantive_change_sha256": "sha256:7daaab87ddff9f69d165c7d55bc27f3a9cb652949ca7dfbc4e228896ec1535f8",
-  "reason": "Correct the published new-repository Fast Luna runbook so Sprint approval is committed before claiming, prepared acceptance evidence is reused only when its full normalized subject and Change Assessment bindings remain current, semantic review is pinned to the prepared target revision, and publication/runtime compatibility wording names the immutable fixed revision.",
+  "substantive_change_sha256": "sha256:c3c3cb7ae27a03b1156e31e8ca2baadab4bd222d75938583857165857538bd31",
+  "reason": "Make the published new-repository Fast Luna workflow fail closed when approval or acceptance checks fail, reload prepared bindings after replacement acceptance preparation, and normalize cross-review findings from {severity,text} into AcceptanceReceipt {severity,message} for both pass and reject dispositions.",
   "owner": "drunkod",
   "scope": [
     "deploy/runbooks/new-repository-fast-luna.md"

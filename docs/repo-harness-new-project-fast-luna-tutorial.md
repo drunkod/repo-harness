@@ -216,24 +216,51 @@ A PRD should contain only the product decisions needed for that Sprint. Use the 
 `new-sprint` creates a Draft. Fill the PRD/source section and every intended backlog row first. Then obtain explicit human approval, change the Sprint status to `Approved`, and commit the approved Sprint plus its referenced planning authority on the configured canonical target branch. This is a required authority checkpoint: `start-task` rejects Draft status and resolves the task from the canonical target commit.
 
 ~~~bash
-SPRINT_FILE="$(cat .ai/harness/sprint/active-sprint)"
-TARGET_REF="$(jq -r '.worktree_strategy.merge_back.target // "main"' .ai/harness/policy.json)"
+SPRINT_FILE="$(cat .ai/harness/sprint/active-sprint)" || exit $?
+TARGET_REF="$(jq -er '.worktree_strategy.merge_back.target // "main" | select(type == "string" and length > 0)' .ai/harness/policy.json)" || exit $?
 
-test "$(git branch --show-current)" = "$TARGET_REF"
 # Edit "$SPRINT_FILE" and every referenced PRD/source artifact.
 # After explicit human approval, set the Sprint status to Approved.
+PLANNING_AUTHORITY_FILES=("$SPRINT_FILE")
+# Add each exact reviewed PRD/source path when the Sprint references one:
+# PLANNING_AUTHORITY_FILES+=("plans/prd/<reviewed-prd>.md")
 
-repo-harness run check-task-workflow --strict
-git status --short
-test -z "$(git diff --cached --name-only)"  # fail closed on pre-existing staged work
-git add "$SPRINT_FILE"
-# If the Sprint references separate PRD/source files, stage those exact reviewed files too.
-# Example: git add plans/prd/<reviewed-prd>.md
-test -n "$(git diff --cached --name-only)"
-git diff --cached --check
-git commit -m "plan: approve first Luna implementation sprint"
+approve_sprint_checkpoint() {
+  local current_branch staged_paths
 
-test "$(git rev-parse HEAD)" = "$(git rev-parse "$TARGET_REF")"
+  current_branch="$(git branch --show-current)" || return 1
+  if [ "$current_branch" != "$TARGET_REF" ]; then
+    echo "approval checkpoint requires target branch $TARGET_REF; current branch is $current_branch" >&2
+    return 1
+  fi
+
+  repo-harness run check-task-workflow --strict || return 1
+  git status --short || return 1
+
+  staged_paths="$(git diff --cached --name-only)" || return 1
+  if [ -n "$staged_paths" ]; then
+    echo "refusing approval commit: the index already contains staged work" >&2
+    return 1
+  fi
+
+  git add -- "${PLANNING_AUTHORITY_FILES[@]}" || return 1
+  staged_paths="$(git diff --cached --name-only)" || return 1
+  if [ -z "$staged_paths" ]; then
+    echo "refusing approval commit: no reviewed planning authority is staged" >&2
+    return 1
+  fi
+
+  git diff --cached --check || return 1
+  git commit -m "plan: approve first Luna implementation sprint" || return 1
+
+  if [ "$(git rev-parse HEAD)" != "$(git rev-parse "$TARGET_REF")" ]; then
+    echo "approval commit is not the configured canonical target revision" >&2
+    return 1
+  fi
+}
+
+approve_sprint_checkpoint || exit $?
+unset -f approve_sprint_checkpoint
 ~~~
 
 ## 7. Claim one Sprint row without executing it
@@ -489,121 +516,158 @@ Use the prepared packet to prove that the current subject is still exactly the p
 ~~~bash
 CHECKS=.ai/harness/checks/latest.json
 ASSESSMENT=.ai/harness/checks/change-assessment.latest.json
-test -s "$CHECKS"
-test -s "$ASSESSMENT"
 
-PREPARED_SUBJECT="$(jq -r '.review_subject_sha256 // empty' "$CHECKS")"
-PREPARED_TARGET_REF="$(jq -r '.change_assessment.selection_packet.target_ref // empty' "$CHECKS")"
-PREPARED_TARGET_REV="$(jq -r '.change_assessment.selection_packet.target_revision // empty' "$CHECKS")"
-PREPARED_PATHS="$(jq -c '.change_assessment.selection_packet.subject_paths // [] | sort' "$CHECKS")"
+load_prepared_bindings() {
+  test -s "$CHECKS" || return 1
+  test -s "$ASSESSMENT" || return 1
 
-jq -e --arg contract "$CONTRACT" '
-  .source == "verify-sprint" and
-  .status == "pass" and
-  .exit_code == 0 and
-  .contract.file == $contract and
-  .change_assessment.status == "pass" and
-  .change_assessment.selection_packet.status == "ready"
-' "$CHECKS" >/dev/null
+  PREPARED_SUBJECT="$(jq -er '.review_subject_sha256 | select(type == "string" and length > 0)' "$CHECKS")" || return 1
+  PREPARED_TARGET_REF="$(jq -er '.change_assessment.selection_packet.target_ref | select(type == "string" and length > 0)' "$CHECKS")" || return 1
+  PREPARED_TARGET_REV="$(jq -er '.change_assessment.selection_packet.target_revision | select(type == "string" and length > 0)' "$CHECKS")" || return 1
+  PREPARED_PATHS="$(jq -ec '.change_assessment.selection_packet.subject_paths | if type == "array" then sort else error("subject_paths missing") end' "$CHECKS")" || return 1
+}
 
-jq -e --slurpfile assessment "$ASSESSMENT" \
-  '.change_assessment == $assessment[0]' "$CHECKS" >/dev/null
+assert_prepared_bindings() {
+  local current_subject
 
-CURRENT_SUBJECT="$(repo-harness review-subject --target "$PREPARED_TARGET_REF" --format json)"
-jq -e \
-  --arg subject "$PREPARED_SUBJECT" \
-  --arg target_ref "$PREPARED_TARGET_REF" \
-  --arg target_rev "$PREPARED_TARGET_REV" \
-  --argjson paths "$PREPARED_PATHS" '
-    .status == "ok" and
-    .review_subject_sha256 == $subject and
-    .target_ref == $target_ref and
-    .target_rev == $target_rev and
-    (.paths | sort) == $paths
-  ' <<<"$CURRENT_SUBJECT" >/dev/null
+  load_prepared_bindings || return 1
 
-repo-harness run change-assessment validate \
-  --contract "$CONTRACT" \
-  --packet "$ASSESSMENT"
+  jq -e --arg contract "$CONTRACT" '
+    .source == "verify-sprint" and
+    .status == "pass" and
+    .exit_code == 0 and
+    .contract.file == $contract and
+    .change_assessment.status == "pass" and
+    .change_assessment.selection_packet.status == "ready"
+  ' "$CHECKS" >/dev/null || return 1
+
+  jq -e --slurpfile assessment "$ASSESSMENT" \
+    '.change_assessment == $assessment[0]' "$CHECKS" >/dev/null || return 1
+
+  current_subject="$(repo-harness review-subject --target "$PREPARED_TARGET_REF" --format json)" || return 1
+  jq -e \
+    --arg subject "$PREPARED_SUBJECT" \
+    --arg target_ref "$PREPARED_TARGET_REF" \
+    --arg target_rev "$PREPARED_TARGET_REV" \
+    --argjson paths "$PREPARED_PATHS" '
+      .status == "ok" and
+      .review_subject_sha256 == $subject and
+      .target_ref == $target_ref and
+      .target_rev == $target_rev and
+      (.paths | sort) == $paths
+    ' <<<"$current_subject" >/dev/null || return 1
+
+  repo-harness run change-assessment validate \
+    --contract "$CONTRACT" \
+    --packet "$ASSESSMENT" || return 1
+}
+
+if ! assert_prepared_bindings; then
+  echo "prepared acceptance evidence is stale or incomplete; replacing it" >&2
+  repo-harness run verify-sprint --prepare-acceptance || exit $?
+  assert_prepared_bindings || {
+    echo "replacement acceptance evidence is still stale or incomplete" >&2
+    exit 1
+  }
+fi
+
+# assert_prepared_bindings reloads PREPARED_* on every call, including after
+# replacement preparation, so the semantic reviewer always uses fresh bindings.
+unset -f load_prepared_bindings assert_prepared_bindings
 ~~~
 
-Reuse the evidence only when these checks pass and the goal/plan and frozen review policy have not changed since preparation. Otherwise record the stale reason and run exactly one replacement preparation:
-
-~~~bash
-repo-harness run verify-sprint --prepare-acceptance
-~~~
-
-The resulting evidence binds the normalized final subject (including non-ignored untracked content), target revision, subject paths, verification evidence, benchmark evidence when required, and Change Assessment. Preserve those bindings until semantic review and receipt recording finish.
+The prepared evidence, whether reused or replaced, now has freshly loaded bindings for the normalized final subject (including non-ignored untracked content), target revision, subject paths, verification evidence, benchmark evidence when required, and Change Assessment. Preserve those bindings until semantic review and receipt recording finish.
 
 ## 14. Run the frozen semantic reviewer
 
-Read and capture the contract's exact acceptance policy. For protocol 2, the reviewer and source are part of the frozen authority:
+Run policy capture, semantic review, binding verification, finding conversion, and receipt recording as one checked Bash function. Every command that can invalidate acceptance returns before a pass receipt is written:
 
 ~~~bash
-POLICY_JSON="$(repo-harness run acceptance-receipt policy --contract "$CONTRACT")"
-printf '%s\n' "$POLICY_JSON"
-REVIEWER="$(jq -r '.reviewer // empty' <<<"$POLICY_JSON")"
-REVIEW_SOURCE="$(jq -r '.source // empty' <<<"$POLICY_JSON")"
-case "$REVIEW_SOURCE" in
-  codex-review) REVIEW_PROVIDER=codex ;;
-  codex-plugin) REVIEW_PROVIDER=codex-plugin ;;
-  *) echo "unsupported frozen review source: $REVIEW_SOURCE" >&2; exit 1 ;;
-esac
-test -n "$REVIEWER"
+run_bound_semantic_review() {
+  local policy_json reviewer review_source review_provider
+  local review_json review_exit review_summary review_findings disposition
+
+  policy_json="$(repo-harness run acceptance-receipt policy --contract "$CONTRACT")" || return 1
+  printf '%s\n' "$policy_json"
+
+  reviewer="$(jq -er '.reviewer | select(type == "string" and length > 0)' <<<"$policy_json")" || return 1
+  review_source="$(jq -er '.source | select(type == "string" and length > 0)' <<<"$policy_json")" || return 1
+  case "$review_source" in
+    codex-review) review_provider=codex ;;
+    codex-plugin) review_provider=codex-plugin ;;
+    *) echo "unsupported frozen review source: $review_source" >&2; return 1 ;;
+  esac
+
+  review_json="$(repo-harness cross-review \
+    --provider "$review_provider" \
+    --base "$PREPARED_TARGET_REV" \
+    --json)"
+  review_exit=$?
+  printf '%s\n' "$review_json"
+
+  jq -e \
+    --arg provider "$review_provider" \
+    --arg base "$PREPARED_TARGET_REV" \
+    --arg subject "$PREPARED_SUBJECT" \
+    --argjson paths "$PREPARED_PATHS" '
+      .status == "ok" and
+      .provider == $provider and
+      .scope.baseRev == $base and
+      .scope.reviewSubjectSha256 == $subject and
+      (.scope.paths | sort) == $paths
+    ' <<<"$review_json" >/dev/null || return 1
+
+  review_summary="$(jq -er '.recommendation | select(type == "string" and length > 0)' <<<"$review_json")" || return 1
+  review_findings="$(jq -ec '
+    .findings
+    | if type == "array" then
+        map(
+          if ((.severity == "P1" or .severity == "P2")
+              and (.text | type == "string")
+              and (.text | length > 0))
+          then {severity, message: .text}
+          else error("invalid cross-review finding")
+          end
+        )
+      else error("findings must be an array")
+      end
+  ' <<<"$review_json")" || return 1
+
+  if [ "$review_exit" -eq 0 ]; then
+    jq -e '([.findings[]? | select(.severity == "P1")] | length) == 0' \
+      <<<"$review_json" >/dev/null || return 1
+    disposition=external_pass
+  else
+    jq -e '([.findings[]? | select(.severity == "P1")] | length) > 0' \
+      <<<"$review_json" >/dev/null || {
+        echo "cross-review failed without a bound semantic rejection; no receipt recorded" >&2
+        return 1
+      }
+    disposition=reject
+  fi
+
+  repo-harness run acceptance-receipt record \
+    --contract "$CONTRACT" \
+    --verification "$CHECKS" \
+    --disposition "$disposition" \
+    --reviewer "$reviewer" \
+    --source "$review_source" \
+    --summary "$review_summary" \
+    --findings-json "$review_findings" || return 1
+
+  if [ "$disposition" = "reject" ]; then
+    echo "semantic review rejected the prepared subject; rejection receipt recorded" >&2
+    return 1
+  fi
+
+  repo-harness run verify-sprint || return 1
+}
+
+run_bound_semantic_review || exit $?
+unset -f run_bound_semantic_review
 ~~~
 
-Run exactly that reviewer/source, pin the review to the exact target revision frozen by preparation, and request structured output:
-
-~~~bash
-REVIEW_JSON="$(repo-harness cross-review \
-  --provider "$REVIEW_PROVIDER" \
-  --base "$PREPARED_TARGET_REV" \
-  --json)"
-printf '%s\n' "$REVIEW_JSON"
-~~~
-
-Before consuming the verdict, prove that the reviewer observed the same prepared semantic subject:
-
-~~~bash
-jq -e \
-  --arg provider "$REVIEW_PROVIDER" \
-  --arg base "$PREPARED_TARGET_REV" \
-  --arg subject "$PREPARED_SUBJECT" \
-  --argjson paths "$PREPARED_PATHS" '
-    .status == "ok" and
-    .provider == $provider and
-    .scope.baseRev == $base and
-    .scope.reviewSubjectSha256 == $subject and
-    (.scope.paths | sort) == $paths and
-    ([.findings[]? | select(.severity == "P1")] | length) == 0
-  ' <<<"$REVIEW_JSON" >/dev/null
-~~~
-
-A provider result against another base, subject, or path set is not acceptance evidence. Do not relabel it.
-
-Only after an actual passing, correctly bound review should the orchestrator record `external_pass`, preserving the real summary and findings:
-
-~~~bash
-REVIEW_SUMMARY="$(jq -r '.recommendation' <<<"$REVIEW_JSON")"
-REVIEW_FINDINGS="$(jq -c '.findings' <<<"$REVIEW_JSON")"
-
-repo-harness run acceptance-receipt record \
-  --contract "$CONTRACT" \
-  --verification .ai/harness/checks/latest.json \
-  --disposition external_pass \
-  --reviewer "$REVIEWER" \
-  --source "$REVIEW_SOURCE" \
-  --summary "$REVIEW_SUMMARY" \
-  --findings-json "$REVIEW_FINDINGS"
-~~~
-
-For a rejection, record reject and the actual findings.
-
-Then verify the receipt-bound state:
-
-~~~bash
-repo-harness run verify-sprint
-~~~
+The conversion from cross-review's `{severity, text}` findings to AcceptanceReceipt's `{severity, message}` findings is shared by the pass and reject paths. A bound P1 result is recorded as `reject` and stops; provider/auth/malformed-output failures stop without fabricating a receipt.
 
 Review Markdown is a projection. AcceptanceReceipt is the typed authority.
 
