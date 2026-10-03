@@ -150,6 +150,47 @@ describe('closeout runner guardrails', () => {
     expect(helperTimeoutMs('ship-worktrees')).toBe(900_000);
   });
 
+  test('contract-run outer timeout shares the canonical delegation budget parser and argument resolution', () => {
+    const root = temporaryRoot('repo-harness-contract-run-outer-timeout-');
+    mkdirSync(join(root, 'tasks', 'contracts'), { recursive: true });
+    const canonical = join(root, 'tasks', 'contracts', 'canonical.contract.md');
+    writeFileSync(canonical, [
+      '# Task Contract: canonical',
+      '',
+      '## Delegation Contract',
+      '',
+      '```yaml',
+      'delegation:',
+      '  budget:',
+      '    tokens: null',
+      '    runner_invocations: 2',
+      '    wall_time_minutes: 3',
+      '```',
+      '',
+    ].join('\n'));
+
+    const quoted = join(root, 'tasks', 'contracts', 'quoted.contract.md');
+    writeFileSync(quoted, [
+      '# Task Contract: quoted',
+      '',
+      '## Arbitrary prose heading',
+      '',
+      '```yaml',
+      'delegation:',
+      '  budget:',
+      '    tokens: null',
+      '    runner_invocations: "2"',
+      '    wall_time_minutes: "90"',
+      '```',
+      '',
+    ].join('\n'));
+
+    expect(helperTimeoutMs('contract-run', ['preflight', '--contract', 'tasks/contracts/canonical.contract.md'], root)).toBe(120_000);
+    expect(helperTimeoutMs('contract-run', ['run', '--contract', 'tasks/contracts/canonical.contract.md'], root)).toBe(300_000);
+    expect(helperTimeoutMs('contract-run', ['run', '--repo', root, '--contract', 'tasks/contracts/quoted.contract.md'], '/')).toBe(5_520_000);
+    expect(helperTimeoutMs('contract-run', ['run', '--contract', quoted], '/')).toBe(5_520_000);
+  });
+
   test('outer timeout terminates descendants that ignore TERM before they can publish a sentinel', async () => {
     if (process.platform === 'win32') return;
     const root = temporaryRoot('repo-harness-outer-group-');

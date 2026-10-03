@@ -1010,6 +1010,16 @@ describe('issue #282 — the task contract is read, not summarised', () => {
     };
   }
 
+  test('quoted numeric delegation budget values use the same numeric meaning as contract-run', () => {
+    const body = CONTRACT_BODY
+      .replace('runner_invocations: 2', 'runner_invocations: "2"')
+      .replace('wall_time_minutes: null', 'wall_time_minutes: "90"');
+    expect(parseContractDelegationBudget(body, CONTRACT_PATH)).toMatchObject({
+      runner_invocations: 2,
+      wall_time_minutes: 90,
+    });
+  });
+
   test('a budget bound to a real contract composes from the contract bytes', () => {
     const repo = repoFixture();
     const contract = withContract(repo);

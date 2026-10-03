@@ -1431,7 +1431,7 @@ describe("contract-run helper", () => {
           "  budget:",
           "    tokens: null",
           "    runner_invocations: null",
-          "    wall_time_minutes: 0.03",
+          '    wall_time_minutes: "0.03"',
           "  permission_scope:",
           "    mode: inherit_allowed_paths",
           "    writable_paths: []",
