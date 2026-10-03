@@ -463,15 +463,12 @@ contract を持つ task に対して、不変の source revision を紐付けま
 ### Persistent acceptance review
 
 ```bash
-repo-harness claude-review round --timeout-ms 1800000
-repo-harness claude-review status
-repo-harness claude-review close
+repo-harness review round --contract tasks/contracts/<task>.contract.md --reviewer-repo <linked-checkout> --herdr-endpoint <address.json>
+repo-harness review status --contract tasks/contracts/<task>.contract.md
+repo-harness review close --contract tasks/contracts/<task>.contract.md
 ```
 
-read-only な Claude reviewer が、所有された herdr session 上で hosting され、
-準備済みの `verify-sprint` evidence に対して最大 3 回の repair round を通じて
-生き続けます。round の budget を超えた session の再開は
-`claude_review_session_budget_exhausted` で拒否されます。
+専用 linked checkout の fleet `deep-reasoner` task-agent が、指定した Herdr session で最大 3 回の repair review を行います。既定は owner と反対の harness、`--harness` で明示選択できます。起動前の executable 不在だけが通知付き fallback を許可します。ファイル Result の domain binding と findings を検証し、generic-review Receipt を記録・再検証して close します。history は観察のみです。Claude の保護は結果ファイル allowlist と変更 fingerprint であり、production OS isolation と大きい packet の完全読み取りは未検証です。
 
 ## Hooks
 
@@ -533,9 +530,9 @@ path を露出することもありません。
 
 オプションの sidecar として、`repo-harness mcp` は既定の `planner` profile
 を通じて workflow artifacts を MCP クライアントへ公開します。ChatGPT は実際の
-リポジトリ状態を読み、アイデアを PRD、checklist Sprint、Codex goal handoff の
+リポジトリ状態を読み、アイデアを PRD、checklist Sprint、task goal handoff の
 artifacts へと進めます — 既定では source-code への書き込み権限、任意の shell
-実行、既定の runner はありません。実行者は引き続き Codex です。
+実行、既定の runner はありません。タスク owner が明示的に指定した Herdr agent に task goal の実行を指示します。
 
 ```bash
 repo-harness mcp setup chatgpt --repo .
@@ -548,8 +545,8 @@ human workflow は次のとおりです。
 1. ChatGPT が MCP 経由で repo-harness の workflow ファイルを読みます。
 2. ChatGPT が `write_prd_from_idea` で PRD を書きます。
 3. ChatGPT が `write_checklist_sprint` で checklist Sprint を書きます。
-4. ChatGPT が `prepare_codex_goal_from_sprint` で `.ai/harness/handoff/codex-goal.md` を準備します。
-5. Codex が host-native な `/goal` prompt を実行し、完了した Sprint phase を順に stage します。
+4. ChatGPT が `prepare_task_goal_from_sprint` で `.ai/harness/handoff/task-goal.md` を準備します。
+5. タスク owner が生成された実行 prompt を明示的に指定した Herdr agent に送り、完了した Sprint phase を stage します。
 
 汎用的な repo reader/writer tools、snapshot と index の整合性、server
 profile、opt-in の dev runner については
@@ -611,8 +608,7 @@ Canonical な rule-owner package は `assets/skills/` と
 | `repo-harness-check` | workflow と release の checks、および deploy-readiness reference |
 | `repo-harness-ship` | 完了した worktree を検証し、branch を push し、PR を開きます |
 | `repo-harness-architecture` | harness 全体の refresh を伴わない architecture docs、drift request、diagram |
-| `repo-harness-cross-review` | 独立した外部 review。Claude host は直接 Codex を使い、Codex host は OpenAI 公式の `codex@openai-codex` plugin app-server runtime を使います |
-| `claude-plan` | Codex 側の provider skill：設計上の分岐点や高リスクな意思決定のための、独立した Claude plan mode consult。ユーザーが直接呼び出す entrypoint ではない |
+| `repo-harness-cross-review` | Generic acceptance through persistent fleet deep-reasoner task-agent + Herdr review; direct advisory runtime retired |
 | `repo-harness-chatgpt` | Oracle browser/GPT Pro consult、MCP Connector setup、bridge handoff。explicit setup 限定 |
 | `merge-gate`(external) | exact-candidate な final gate。repo-harness は merge-gate Skill を同梱しません — [external tooling](docs/reference-configs/external-tooling.md) を参照 |
 
@@ -694,8 +690,8 @@ commit script や hooks に組み込まないでください。
 
 ## 現在の Release
 
-- npm package：`repo-harness@0.19.0`
-- Generated workflow stamp：`repo-harness@0.19.0+template@0.19.0`
+- npm package：`repo-harness@0.20.0`
+- Generated workflow stamp：`repo-harness@0.20.0+template@0.20.0`
 - GitHub repository：`Ancienttwo/repo-harness`
 - Release notes and history：[`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 

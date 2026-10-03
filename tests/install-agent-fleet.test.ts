@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { spawnSync } from "child_process";
+
+import { WRITABLE_AGENTS } from '../src/effects/terminal/task-role-profiles';
+import { installProfileHostMutationPaths } from "../src/cli/installer/install-profile";
+
+import { recordInstallOwnership } from "./helpers/install-ownership";
 
 const ROOT = join(import.meta.dir, "..");
 const SCRIPT = join(ROOT, "scripts/install-agent-fleet.sh");
@@ -14,30 +19,30 @@ const CODEX_EXPECTATIONS: Record<
   { model: string; effort: string; descriptionLabel: string; sourceDescription: string; sandboxMode: string }
 > = {
   explorer: {
-    model: "gpt-5.6-luna",
+    model: "gpt-6-luna",
     effort: "high",
-    descriptionLabel: "GPT-5.6 Luna at high reasoning",
-    sourceDescription: "Sonnet at high effort",
+    descriptionLabel: "GPT-6 Luna at high reasoning",
+    sourceDescription: "Sonnet at medium effort",
     sandboxMode: "read-only",
   },
   "deep-reasoner": {
-    model: "gpt-5.6-terra",
-    effort: "xhigh",
-    descriptionLabel: "GPT-5.6 Terra at xhigh reasoning",
+    model: "gpt-6-astra",
+    effort: "high",
+    descriptionLabel: "GPT-6 Astra at high reasoning",
     sourceDescription: "Opus at xhigh effort",
     sandboxMode: "read-only",
   },
   "fast-worker": {
-    model: "gpt-6-astra",
-    effort: "low",
-    descriptionLabel: "GPT-6 Astra at low reasoning",
-    sourceDescription: "Opus at medium effort",
+    model: "gpt-6.1-sol",
+    effort: "medium",
+    descriptionLabel: "GPT-6.1 Sol at medium reasoning",
+    sourceDescription: "Sonnet at high effort",
     sandboxMode: "workspace-write",
   },
   "deep-worker": {
-    model: "gpt-6-astra",
-    effort: "medium",
-    descriptionLabel: "GPT-6 Astra at medium reasoning",
+    model: "gpt-6.1-sol",
+    effort: "high",
+    descriptionLabel: "GPT-6.1 Sol at high reasoning",
     sourceDescription: "Opus at high effort",
     sandboxMode: "workspace-write",
   },
@@ -49,16 +54,16 @@ const CODEX_EXPECTATIONS: Record<
     sandboxMode: "read-only",
   },
   "root-cause-prover": {
-    model: "gpt-5.6-terra",
+    model: "gpt-6-astra",
     effort: "high",
-    descriptionLabel: "GPT-5.6 Terra at high reasoning",
-    sourceDescription: "Opus at high effort",
+    descriptionLabel: "GPT-6 Astra at high reasoning",
+    sourceDescription: "Opus at xhigh effort",
     sandboxMode: "workspace-write",
   },
   "harness-evaluator": {
-    model: "gpt-5.6-terra",
-    effort: "high",
-    descriptionLabel: "GPT-5.6 Terra at high reasoning",
+    model: "gpt-6-astra",
+    effort: "medium",
+    descriptionLabel: "GPT-6 Astra at medium reasoning",
     sourceDescription: "Opus at high effort",
     sandboxMode: "workspace-write",
   },
@@ -95,6 +100,7 @@ function prepareInstallerRuntime(home: string, sourceDir: string) {
   mkdirSync(join(packageRoot, "scripts"), { recursive: true });
   mkdirSync(join(packageRoot, "agents"), { recursive: true });
   cpSync(SCRIPT, runtimeScript);
+  symlinkSync(join(ROOT, "src"), join(packageRoot, "src"), "dir");
   chmodSync(runtimeScript, 0o755);
   cpSync(sourceDir, join(packageRoot, "agents/fleet"), { recursive: true });
   return { packageRoot, runtimeScript };
@@ -119,6 +125,35 @@ function runInstaller(
 }
 
 describe("install-agent-fleet", () => {
+  test("upgrades receipt-owned fleet files and preserves subsequent user edits", () => {
+    const { root, home } = setupFakeHome("fleet-owned-upgrade");
+    const env = { ...process.env, HOME: home };
+    try {
+      expect(runInstaller(home, FLEET_SOURCE_DIR).status).toBe(0);
+      const paths = AGENTS.flatMap(agent => [join(home, ".claude/agents", `${agent}.md`), join(home, ".codex/agents", `${agent}.toml`)]);
+      recordInstallOwnership(paths, env);
+      for (const path of paths) expect(installProfileHostMutationPaths(env)).toContain(path);
+      const next = join(root, "next");
+      cpSync(FLEET_SOURCE_DIR, next, { recursive: true });
+      for (const agent of AGENTS) {
+        const file = join(next, `${agent}.md`);
+        writeFileSync(file, readFileSync(file, "utf8") + "\nUpdated role instruction.\n");
+      }
+      const result = runInstaller(home, next);
+      expect(result.status).toBe(0);
+      recordInstallOwnership(paths, env);
+      for (const host of [".claude", ".codex"]) {
+        const file = join(home, host, "agents", `deep-worker.${host === ".claude" ? "md" : "toml"}`);
+        expect(readFileSync(file, "utf8")).toContain("Updated role instruction.");
+        writeFileSync(file, readFileSync(file, "utf8") + "\n# User edit\n");
+      }
+      const blocked = runInstaller(home, FLEET_SOURCE_DIR);
+      expect(blocked.status).toBe(1);
+      expect(blocked.stdout).toContain("deep-worker.md: drift");
+      expect(blocked.stdout).toContain("deep-worker.toml: drift");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   test("fresh install writes claude .md byte-identical to source and codex .toml byte-identical to golden", () => {
     const { root, home } = setupFakeHome("install-agent-fleet-fresh");
     try {
@@ -228,7 +263,7 @@ describe("install-agent-fleet", () => {
         .replaceAll("Opus at xhigh effort", "Opus at max effort")
         .replace("effort: xhigh", "effort: max");
       const customCodex = readFileSync(codexTarget, "utf-8")
-        .replace('model = "gpt-5.6-luna"', 'model = "gpt-5.6-terra"');
+        .replace('model = "gpt-6-luna"', 'model = "gpt-6.1-sol"');
       writeFileSync(claudeTarget, customClaude);
       writeFileSync(codexTarget, customCodex);
 
@@ -317,7 +352,7 @@ describe("install-agent-fleet", () => {
       for (const agent of AGENTS) {
         cpSync(join(FLEET_SOURCE_DIR, `${agent}.md`), join(badSourceDir, `${agent}.md`));
       }
-      const corrupted = readFileSync(join(badSourceDir, "fast-worker.md"), "utf-8").replace("effort: medium", "effort: min");
+      const corrupted = readFileSync(join(badSourceDir, "fast-worker.md"), "utf-8").replace("effort: high", "effort: min");
       writeFileSync(join(badSourceDir, "fast-worker.md"), corrupted);
 
       const res = runInstaller(home, badSourceDir);
@@ -471,7 +506,7 @@ describe("install-agent-fleet", () => {
         cpSync(join(FLEET_SOURCE_DIR, `${agent}.md`), join(badSourceDir, `${agent}.md`));
       }
       const mismatched = readFileSync(join(badSourceDir, "fast-worker.md"), "utf-8").replace(
-        "Opus at medium effort",
+        "Sonnet at high effort",
         "an unspecified model",
       );
       writeFileSync(join(badSourceDir, "fast-worker.md"), mismatched);
@@ -604,7 +639,8 @@ describe("install-agent-fleet", () => {
     expect(source).toContain('AGENT_FLEET_SOURCE_DIR="$package_root/agents/fleet"');
     expect(source).not.toContain("REPO_HARNESS_FLEET_SOURCE_DIR");
     expect(source).not.toContain('spawnSync("curl"');
-    expect(source).toContain('const WRITABLE_AGENTS = new Set(["fast-worker", "deep-worker", "root-cause-prover", "harness-evaluator"]);');
+    expect(source).toContain('src/effects/terminal/task-role-profiles.ts');
+    expect([...WRITABLE_AGENTS]).toEqual(['fast-worker','deep-worker','root-cause-prover','harness-evaluator']);
     expect(source).toContain("if (WRITABLE_AGENTS.has(agent))");
   }, 30_000);
 
@@ -626,10 +662,30 @@ describe("install-agent-fleet", () => {
           ...process.env,
           HOME: home,
           PATH: `${fakeBin}:/usr/bin:/bin`,
+          REPO_HARNESS_BUN_BIN: "",
         },
       });
       expect(res.status).not.toBe(0);
       expect(res.stderr).toContain("requires Bun >= 1.4.0 (found: 1.3.14)");
+      expect(existsSync(join(home, ".claude"))).toBe(false);
+      expect(existsSync(join(home, ".codex"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("an invalid explicit Bun fails closed despite a supported PATH Bun", () => {
+    const { root, home } = setupFakeHome("fleet-explicit-bun-invalid");
+    try {
+      const supportedBin = join(root, "supported-bin");
+      mkdirSync(supportedBin);
+      symlinkSync(process.execPath, join(supportedBin, "bun"));
+      const result = runInstaller(home, FLEET_SOURCE_DIR, [], {
+        REPO_HARNESS_BUN_BIN: join(root, "missing-runtime"),
+        PATH: `${supportedBin}:${process.env.PATH}`,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("requires bun");
       expect(existsSync(join(home, ".claude"))).toBe(false);
       expect(existsSync(join(home, ".codex"))).toBe(false);
     } finally {
@@ -670,10 +726,63 @@ describe("install-agent-fleet", () => {
           ...process.env,
           HOME: home,
           PATH: `${fakeBin}:/usr/bin:/bin`,
+          REPO_HARNESS_BUN_BIN: "",
         },
       });
       expect(res.status).toBe(0);
       expect(res.stdout).toContain("[fleet] codex/fast-worker.toml: installed");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("a handed-off Bun below the version floor fails closed instead of falling back to PATH discovery", () => {
+    const { root, home } = setupFakeHome("install-agent-fleet-handoff-below-floor");
+    const fakeBin = join(root, "bin");
+    const handoffBun = join(root, "handoff", "bun");
+    const homeBun = join(home, ".bun/bin/bun");
+    try {
+      mkdirSync(fakeBin, { recursive: true });
+      mkdirSync(dirname(handoffBun), { recursive: true });
+      mkdirSync(join(home, ".bun/bin"), { recursive: true });
+      // The handed-off Bun (what a caller like `global-runtime.ts` already
+      // validated) is below the version floor.
+      writeFileSync(
+        handoffBun,
+        ['#!/bin/sh', 'if [ "$1" = "--version" ]; then', "  echo 1.3.14", "  exit 0", "fi", "exit 99", ""].join("\n"),
+      );
+      // A supported Bun sits at the HOME fallback location the pre-fix
+      // discovery loop would have found. The fail-closed handoff must never
+      // reach it: a caller that already validated a Bun gets that Bun
+      // exclusively, not a silent substitute.
+      writeFileSync(
+        homeBun,
+        [
+          "#!/bin/sh",
+          'if [ "$1" = "--version" ]; then',
+          "  echo 1.4.0",
+          "  exit 0",
+          "fi",
+          `exec ${JSON.stringify(process.execPath)} "$@"`,
+          "",
+        ].join("\n"),
+      );
+      chmodSync(handoffBun, 0o755);
+      chmodSync(homeBun, 0o755);
+      const res = spawnSync("bash", [SCRIPT], {
+        cwd: ROOT,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          HOME: home,
+          PATH: `${fakeBin}:/usr/bin:/bin`,
+          REPO_HARNESS_BUN_BIN: handoffBun,
+        },
+      });
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toContain("requires Bun >= 1.4.0 (found: 1.3.14)");
+      expect(existsSync(join(home, ".claude"))).toBe(false);
+      expect(existsSync(join(home, ".codex"))).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

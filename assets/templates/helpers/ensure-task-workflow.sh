@@ -357,10 +357,6 @@ PRD_TEMPLATE_EOF
 ## Agentic Routing
 - Selected route:
 - Routing reason:
-- Due diligence:
-  - P1 map:
-  - P2 trace:
-  - P3 decision rationale:
 
 ## Workflow Inventory
 Complete this inventory before implementation. If any line is unknown, keep the plan in Draft and fill it before projection.
@@ -1001,11 +997,6 @@ ARCHITECTURE_INDEX_EOF
     "diagram_skill": "mermaid",
     "diagram_skill_source": "~/.codex/skills/mermaid",
     "vendoring_policy": "do-not-vendor-diagram-skill-assets",
-    "projection_provider": "disabled",
-    "projection_apply": "disabled",
-    "projection_failure_gate": "advisory",
-    "projection_version": "0.5.10",
-    "projection_timeout_ms": 120000,
     "freshness_gate": "advisory",
     "gate_min_severity": "medium",
     "pending_card_scope": "capability",
@@ -1021,8 +1012,8 @@ ARCHITECTURE_INDEX_EOF
     "provider": "archctx",
     "proposal_author": "local",
     "stages": {
-      "scan": { "provider_version": "0.5.10", "required_features": ["module-statistics-v1", "refactor-assessment-v1", "recommendation-v3"] },
-      "verify": { "provider_version": "0.5.10", "required_features": ["refactor-resolution-v1"] }
+      "scan": { "provider_version": "0.6.1", "required_features": ["module-statistics-v1", "refactor-assessment-v1", "recommendation-v3"] },
+      "verify": { "provider_version": "0.6.1", "required_features": ["refactor-resolution-v1"] }
     },
     "workflow_routing": {
       "module_refactor": "work_package",
@@ -1107,15 +1098,15 @@ ARCHITECTURE_INDEX_EOF
     "max_depth": 1,
     "allow_parallel_writers": false,
     "state_file": ".ai/harness/delegation/latest.json",
-    "preferred_runners": ["subagent"],
+    "preferred_runners": ["task-agent"],
     "brief_source": "tasks/contracts/<stem>.contract.md",
-    "runner_rule": "the active task contract is the authoritative execution brief. Claude uses its native subagent surface. Codex uses native spawn_agent with the exact installed agent_type and fork_turns=none; official SubagentStart agent_type/model fields are the runtime observation. Missing, default, mismatched, invalid, or unverified native routing fails closed without an alternate fleet runner. Reasoning effort remains configured_unverified until Codex exposes an official runtime field.",
+    "runner_rule": "the active task contract is the authoritative execution brief. Use task-agent in an explicitly addressed Herdr session and parent pane for persistent collaborators. Reuse the task binding across owner turns; history and idle are observation, not Result or acceptance. Missing Herdr fails closed without an alternate agent runner. Real harness permission and model capabilities remain unverified until evidenced.",
     "rule": "UserPromptSubmit.delegation injects bounded delegation context only for the typed /delegate or /parallel command. Natural-language inference and SessionStart standing authorization are not delegation authorities."
   },
   "sidecar_research": {
     "default": true,
     "output_dir": "docs/researches",
-    "preferred_runners": ["subagent", "codex exec --json", "main-thread trace"],
+    "preferred_runners": ["task-agent", "main-thread trace"],
     "spawn_decision": "main agent decides from task breadth, context impact, raw-log volume, and callable runner availability; do not ask the user for spawn confirmation",
     "fallback_runner": "main-thread trace",
     "main_thread_policy": "if spawning is not worthwhile or no sidecar runner is callable, perform bounded research in the main thread; consume conclusions and evidence paths, not raw logs"

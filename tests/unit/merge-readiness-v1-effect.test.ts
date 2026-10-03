@@ -14,6 +14,8 @@ import {
   observeProviderReadinessIdentity,
   resolveFleetReadiness,
   resolvePublicationReadiness,
+  productionMergeReadinessCollector,
+  collectPullRequestMergeReadiness,
   type FleetReadinessCollector,
   type MergeReadinessCollector,
   type PublicationReadinessInput,
@@ -69,29 +71,14 @@ const providerFacts = {
   base_sha: BASE,
   review_decision: null,
   unresolved_thread_count: 0,
+  rollback_tags: 'not_active' as const,
   // Keep the fixture literal narrow: production validates provider buckets
   // before passing them into the pure projection.
-  checks: [{ bucket: 'pass' as const }],
+  checks: [{ name: 'Required / CI', bucket: 'pass' as const }],
   mergeable: 'MERGEABLE' as const,
 };
 
-const localSnapshot = {
-  token: 'sha256:' + '7'.repeat(64),
-  // The projection consumes the already-fenced booleans. The full lease
-  // record is intentionally private to the effect's production collector.
-  lease: null,
-  lease_is_reviewing: true,
-  pointer_matches_receipt: true,
-  lease_matches_receipt: true,
-  canonical_task_matches_receipt: true,
-  local_proof_head_matches_receipt: true,
-  review_subject_matches_receipt: true,
-  verification_evidence_matches_receipt: true,
-  local_evidence_fresh: true,
-  acceptance: 'pass' as const,
-};
-
-function fakeGh(hasNextPage = false): NonNullable<PublicationReadinessInput['gh_runner']> {
+function fakeGh(wrongBase = false): NonNullable<PublicationReadinessInput['gh_runner']> {
   const pr = {
     number: receipt.pr_number,
     url: receipt.pr_url,
@@ -109,9 +96,11 @@ function fakeGh(hasNextPage = false): NonNullable<PublicationReadinessInput['gh_
     const command = `${args[0]} ${args[1]}`;
     if (command === 'repo view') return { status: 0, stdout: JSON.stringify({ id: receipt.provider_repo_id, nameWithOwner: 'example/repo-harness' }) };
     if (command === 'pr view') return { status: 0, stdout: JSON.stringify(pr) };
-    if (command === 'pr checks') return { status: 8, stdout: JSON.stringify([{ bucket: 'pending' }]) };
-    if (command === 'api graphql') {
-      return { status: 0, stdout: JSON.stringify({ data: { node: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage }, nodes: [{ isResolved: false }] } } } } }) };
+    if (command === 'pr checks') return { status: 8, stdout: JSON.stringify([{ name: 'Required / CI', bucket: 'pending', link: 'https://github.com/example/repo-harness/actions/runs/123/job/456' }]) };
+    if (args[0] === 'api' && args[1]?.includes('/contents/.github/workflows/ci-report.yml')) return { status: 1, stdout: JSON.stringify({ status: '404', message: 'Not Found' }) };
+    if (command === 'api repos/example/repo-harness/actions/runs/123') {
+      return { status: 0, stdout: JSON.stringify({ path: '.github/workflows/ci.yml', event: 'pull_request', head_sha: HEAD,
+        pull_requests: [{ number: receipt.pr_number, head: { sha: HEAD }, base: { sha: wrongBase ? '9'.repeat(40) : BASE } }] }) };
     }
     return { status: 2, stdout: '', stderr: `unexpected fake gh args: ${args.join(' ')}` };
   };
@@ -125,7 +114,6 @@ const input: PublicationReadinessInput = {
 function collector(overrides: Partial<MergeReadinessCollector> = {}): MergeReadinessCollector {
   return {
     resolve_receipt: () => receipt,
-    collect_local: () => localSnapshot,
     observe_identity: () => providerIdentity,
     observe_facts: () => providerFacts,
     classify_integration: () => 'unmerged',
@@ -181,6 +169,13 @@ describe('MergeReadinessV1 effect', () => {
       'identity', `facts:${HEAD}`, 'identity',
       'identity', `facts:${HEAD}`, 'identity',
     ]);
+  });
+
+  test('review/body observations cannot churn the actual PR/head/base merge fence', () => {
+    let reads = 0;
+    const verdict = resolvePublicationReadiness(input, collector({ observe_identity: () => ({ ...providerIdentity,
+      body: `description observation ${reads++}`, review_decision: reads % 2 ? 'REVIEW_REQUIRED' : 'APPROVED' }) }));
+    expect(verdict.ready).toBe(true); expect(reads).toBe(2);
   });
 
   test('reports changed_during_read after the bounded second torn round and preserves receipt fences', () => {
@@ -258,13 +253,13 @@ describe('MergeReadinessV1 effect', () => {
     expect(writes).toEqual(['marker mismatch observed', 'provider identity']);
   });
 
-  test('production fake-gh adapter accepts pending exit 8 and exhaustively reads review threads', () => {
+  test('production fake-gh adapter accepts pending exit 8 and binds trusted CI to exact head/base', () => {
     const effectInput = { ...input, gh_runner: fakeGh() };
     const identity = observeProviderReadinessIdentity(receipt, effectInput);
     const facts = observeProviderReadinessFacts(identity, receipt, effectInput);
     expect(identity.head_sha).toBe(HEAD);
-    expect(facts.checks).toEqual([{ bucket: 'pending' }]);
-    expect(facts.unresolved_thread_count).toBe(1);
+    expect(facts.checks).toEqual([{ name: 'Required / CI', bucket: 'pending' }]);
+    expect(facts.unresolved_thread_count).toBeNull();
   });
 
   test('abortable provider adapter shares the synchronous parser and fails closed before a provider child starts', async () => {
@@ -276,7 +271,7 @@ describe('MergeReadinessV1 effect', () => {
     const identity = await observeProviderReadinessIdentityAbortable(receipt, asyncInput);
     const facts = await observeProviderReadinessFactsAbortable(identity, receipt, asyncInput);
     expect(identity.head_sha).toBe(HEAD);
-    expect(facts.checks).toEqual([{ bucket: 'pending' }]);
+    expect(facts.checks).toEqual([{ name: 'Required / CI', bucket: 'pending' }]);
 
     const controller = new AbortController();
     controller.abort();
@@ -284,7 +279,7 @@ describe('MergeReadinessV1 effect', () => {
       .rejects.toMatchObject({ code: 'provider_unavailable' });
   });
 
-  test('production fake-gh adapter fails closed when review-thread pagination is not exhausted', () => {
+  test('production fake-gh adapter fails closed for CI from a different base', () => {
     const effectInput = { ...input, gh_runner: fakeGh(true) };
     const identity = observeProviderReadinessIdentity(receipt, effectInput);
     expect(() => observeProviderReadinessFacts(identity, receipt, effectInput)).toThrow(MergeReadinessError);
@@ -315,4 +310,75 @@ describe('MergeReadinessV1 effect', () => {
     });
     expect(aggregate.publications[1]?.verdict?.ready).toBe(true);
   });
+});
+
+test('production read-only collector has no local lease/review/artifact collector', () => {
+  expect(Object.keys(productionMergeReadinessCollector).sort()).toEqual([
+    'classify_integration', 'observe_facts', 'observe_identity', 'resolve_receipt',
+  ]);
+});
+
+test('ordinary PR consumer uses trusted CI head/base once and needs no local artifact or marker', () => {
+  const source = fakeGh(); let ciCalls = 0;
+  const gh_runner: NonNullable<PublicationReadinessInput['gh_runner']> = args => {
+    const observed = source(args);
+    if (args[0] === 'pr' && args[1] === 'view') return { ...observed, stdout: JSON.stringify({ ...JSON.parse(observed.stdout), body: 'Ordinary PR goal/change/verification/risk/rollback' }) };
+    if (args[0] === 'pr' && args[1] === 'checks') { ciCalls++; return { status: 0, stdout: JSON.stringify([{ name: 'Required / CI', bucket: 'pass', link: 'https://github.com/example/repo-harness/actions/runs/123/job/456' }]) }; }
+    if (args[0] === 'api' && args[1]?.includes('/actions/runs/')) return { ...observed, stdout: JSON.stringify({ ...JSON.parse(observed.stdout), status: 'completed', conclusion: 'success' }) };
+    return observed;
+  };
+  const verdict = collectPullRequestMergeReadiness({ repo_root: '/tmp/absent-local-artifacts', pr_number: 42,
+    expected_head_sha: HEAD, expected_base_sha: BASE, gh_runner });
+  expect(verdict.ready).toBe(true); expect(ciCalls).toBe(1);
+  expect('publication_id' in verdict).toBe(false);
+  const moved = collectPullRequestMergeReadiness({ repo_root: '/tmp/absent-local-artifacts', pr_number: 42,
+    expected_head_sha: HEAD, expected_base_sha: '9'.repeat(40), gh_runner });
+  expect(moved.blockers.map(blocker => blocker.code)).toContain('base_moved_since_verification');
+});
+
+// The readback decoder consumes actual annotated Git objects; it never scans or gates older history.
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+test('reporter activation fences only the current merged parent and decodes real before/after annotations', () => {
+  const root = mkdtempSync(join(tmpdir(), 'readiness-tags-'));
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  try {
+    git('init', '-qb', 'main'); git('config', 'user.name', 'Tag readback fixture'); git('config', 'user.email', 'ci@example.invalid'); git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(root, 'feature'), 'before'); git('add', '.'); git('commit', '-qm', 'untagged pre-cutover history'); const before = git('rev-parse', 'HEAD');
+    writeFileSync(join(root, 'feature'), 'after'); git('add', '.'); git('commit', '-qm', 'squashed reporter cutover'); const base = git('rev-parse', 'HEAD');
+    git('tag', '-a', 'gate-cutover-pr-17-before', before, '-m', 'before'); git('tag', '-a', 'gate-cutover-pr-17-after', base, '-m', 'after');
+    const identity = { ...providerIdentity, base_sha: base }; const requests: string[] = []; let active = true; let forbidden = false; let malformedTag = false;
+    const gh_runner: NonNullable<PublicationReadinessInput['gh_runner']> = args => {
+      const path = args[1] ?? ''; requests.push(args.join(' '));
+      const json = (value: unknown, status = 0) => ({ status, stdout: JSON.stringify(value) });
+      if (args[0] === 'pr') return json([{ name: 'Required / CI', bucket: 'pass', link: 'https://github.com/example/repo-harness/actions/runs/123/job/456' }]);
+      if (path.includes('/actions/runs/123')) return json({ path: '.github/workflows/ci.yml', event: 'pull_request', head_sha: HEAD, status: 'completed', conclusion: 'success', pull_requests: [{ number: 42, head: { sha: HEAD }, base: { sha: base } }] });
+      if (path.includes('/contents/')) return forbidden ? json({ status: '403', message: 'Forbidden' }, 1) : active ? json({ type: 'file', path: '.github/workflows/ci-report.yml', sha: '8'.repeat(40) }) : json({ status: '404' }, 1);
+      if (path.includes(`/commits/${base}/pulls`)) return json([{ number: 17, merged_at: '2026-10-03T00:00:00Z', merge_commit_sha: base, base: { ref: 'main' } }]);
+      if (path.includes(`/git/commits/${base}`)) return json({ sha: base, parents: [{ sha: before }] });
+      if (path.includes('/git/ref/tags/')) {
+        if (malformedTag) return json({ object: [] });
+        const name = path.split('/').at(-1)!;
+        if (spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/tags/${name}`], { cwd: root }).status !== 0) return json({ status: '404' }, 1);
+        return json({ object: { type: git('cat-file', '-t', `refs/tags/${name}`), sha: git('rev-parse', `refs/tags/${name}`) } });
+      }
+      if (path.includes('/git/tags/')) {
+        const text = git('cat-file', '-p', path.split('/').at(-1)!);
+        return json({ tag: text.split('\n').find(line => line.startsWith('tag '))!.slice(4), object: { type: 'commit', sha: text.split('\n')[0]!.slice(7) } });
+      }
+      throw Error(`Unexpected provider call: ${args.join(' ')}`);
+    };
+    const read = () => observeProviderReadinessFacts(identity, receipt, { ...input, gh_runner });
+    expect(read().rollback_tags).toBe('ready');
+    malformedTag = true; expect(() => read()).toThrow('rollback tag object must be an object'); malformedTag = false;
+    expect(new Set(requests.filter(path => path.includes('/commits/') && path.includes('/pulls')))).toEqual(new Set([`api repos/example/repo-harness/commits/${base}/pulls?per_page=100`]));
+    expect(requests.some(path => path.includes('state=closed'))).toBe(false);
+    git('tag', '-d', 'gate-cutover-pr-17-after'); expect(read().rollback_tags).toBe('pending');
+    git('tag', '-a', 'gate-cutover-pr-17-after', before, '-m', 'conflict'); expect(read().rollback_tags).toBe('pending');
+    active = false; requests.length = 0; expect(read().rollback_tags).toBe('not_active'); expect(requests.some(path => path.includes('/pulls'))).toBe(false);
+    forbidden = true; expect(() => read()).toThrow('rollback reporter activation unavailable');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

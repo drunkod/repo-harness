@@ -1,24 +1,30 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createProjectionApplyIdentity, projectionApplyLookupKey } from 'archctx-contracts';
 import {
   ARCHCTX_REQUIRED_VERSION,
   PROJECTION_REQUEST_VERSION,
+  digestProjectionJson,
   projectionRequestIssues,
   projectionResultReceiptDigest,
   projectionResultIssues,
   type ArchitectureProjectionPolicy,
   type ArchitectureRefreshSignalV1,
   type ProjectionRequestV1,
+  type ProjectionResultV1,
 } from '../src/core/architecture/projection';
 import {
   archctxCapabilities,
+  verifyArchctxDaemonRuntime,
   inspectArchitectureProjectionReadiness,
   captureArchitectureProjectionSnapshot,
+  architectureProjectionOwnedPaths,
   resolveCompatibleNodeRuntime,
   resolvePackageLocalArchctx,
+  readArchitectureProjectionApply,
   runArchitectureProjection,
   type ArchitectureProjectionProviderDiagnostic,
   type ArchctxProcessResult,
@@ -27,12 +33,51 @@ import {
 import { trustedNodeCandidates } from '../src/effects/runtime/node-candidates';
 import { architectureProjectionExitCode, buildArchitectureProjectionCommand } from '../src/cli/commands/architecture-projection';
 import { consumeArchitectureRefreshSignals } from '../src/effects/architecture/refresh-consumer';
+import { acceptArchitectureProjectionCandidate, inspectArchitectureProjectionAcceptanceState, recordArchitectureProjectionAcceptanceCandidates } from '../src/effects/architecture/projection-acceptance';
 
 const roots: string[] = [];
 const digest = (value: string) => `sha256:${value.repeat(64).slice(0, 64)}` as const;
 const policy: ArchitectureProjectionPolicy = { provider: 'archctx', applyMode: 'manual', failureGate: 'advisory', requiredVersion: ARCHCTX_REQUIRED_VERSION, timeoutMs: 120_000 };
 
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+
+test('projection profile targets do not require ownership-registry metadata or prefix grammar', () => {
+  const { repoRoot } = fixture();
+  const path = join(repoRoot, '.archcontext/model/nodes/capability.test.core.yaml');
+  const node = Bun.YAML.parse(readFileSync(path, 'utf8')) as Record<string, any>;
+  delete node.responsibilities;
+  delete node.extensions.lspProfile;
+  delete node.extensions.verification;
+  node.source = { include: ['packages/**/src/**'], exclude: ['packages/**/test/**'] };
+  writeFileSync(path, Bun.YAML.stringify(node));
+  expect(architectureProjectionOwnedPaths(repoRoot)).toEqual(['AGENTS.md', 'CLAUDE.md', 'docs/architecture']);
+  expect(captureArchitectureProjectionSnapshot(repoRoot).headSha).toMatch(/^[a-f0-9]{40}$/);
+});
+
+test('projection target discovery includes inactive capabilities rendered by the producer', () => {
+  const { repoRoot } = fixture();
+  const path = join(repoRoot, '.archcontext/model/nodes/capability.test.core.yaml');
+  writeFileSync(path, readFileSync(path, 'utf8').replace('status: active', 'status: deprecated'));
+  expect(architectureProjectionOwnedPaths(repoRoot)).toEqual(['AGENTS.md', 'CLAUDE.md', 'docs/architecture']);
+});
+
+test('projection profile rejects invalid identity and unsafe or wrong contract targets', () => {
+  const { repoRoot } = fixture();
+  const path = join(repoRoot, '.archcontext/model/nodes/capability.test.core.yaml');
+  const original = readFileSync(path, 'utf8');
+  for (const invalid of ['../AGENTS.md', '/tmp/AGENTS.md', 'src/../AGENTS.md', 'src\\AGENTS.md', 'src/OTHER.md', 'src//AGENTS.md']) {
+    const node = Bun.YAML.parse(original) as Record<string, any>;
+    node.extensions.contractFiles.agents = invalid;
+    writeFileSync(path, Bun.YAML.stringify(node));
+    expect(() => architectureProjectionOwnedPaths(repoRoot)).toThrow();
+  }
+  writeFileSync(path, original.replace('id: capability.test.core', 'id: capability.core'));
+  expect(() => architectureProjectionOwnedPaths(repoRoot)).toThrow();
+  const node = Bun.YAML.parse(original) as Record<string, any>;
+  delete node.extensions.contractFiles;
+  writeFileSync(path, Bun.YAML.stringify(node));
+  expect(() => architectureProjectionOwnedPaths(repoRoot)).toThrow();
+});
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'repo-harness-archctx-provider-'));
@@ -46,14 +91,14 @@ function fixture() {
   mkdirSync(join(repoRoot, '.ai', 'harness'), { recursive: true });
   mkdirSync(join(repoRoot, '.archcontext', 'model', 'nodes'), { recursive: true });
   mkdirSync(join(repoRoot, 'src', 'core'), { recursive: true });
-  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'archctx', version: '0.5.10', engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
+  writeFileSync(join(packageRoot, 'package.json'), `${JSON.stringify({ name: 'archctx', version: '0.6.1', engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
   const binary = join(packageRoot, 'bin', 'archctx');
   writeFileSync(binary, '#!/bin/sh\nexit 99\n');
   chmodSync(binary, 0o755);
   symlinkSync(join('..', 'archctx', 'bin', 'archctx'), join(binRoot, 'archctx'));
   writeFileSync(join(repoRoot, '.ai', 'harness', 'policy.json'), `${JSON.stringify({
     context: { capability_source: 'archcontext' },
-    architecture: { projection_provider: 'archctx', projection_apply: 'manual', projection_version: '0.5.10', projection_timeout_ms: 120000 },
+    architecture: { projection_provider: 'archctx', projection_apply: 'manual', projection_version: '0.6.1', projection_timeout_ms: 120000 },
   })}\n`);
   writeFileSync(join(repoRoot, '.archcontext', 'model', 'nodes', 'capability.test.core.yaml'), `schemaVersion: archcontext.node/v2
 kind: capability
@@ -94,7 +139,7 @@ function vendorArchctx(root: string, version: string): string {
   return binary;
 }
 
-function capabilities(version = '0.5.10') {
+function capabilities(version = '0.6.1') {
   return {
     schemaVersion: 'archcontext.capabilities/v1',
     package: { name: 'archctx', version },
@@ -104,7 +149,7 @@ function capabilities(version = '0.5.10') {
       architectureRefreshSignal: 'archcontext.architecture-refresh-signal/v1',
     },
     renderers: { architectureDocs: 'archcontext.docs-renderer/v4', agentContext: 'archcontext.agent-context-renderer/v1' },
-    features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'projection-apply-receipt-v1', 'projection-prior-committed-applies-v1', 'projection-protocol-v2'],
+    features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'projection-apply-receipt-v1', 'projection-prior-committed-applies-v1', 'projection-protocol-v2', 'projection-apply-readback-v1'],
   };
 }
 
@@ -132,7 +177,7 @@ function projectionEnvelope(expected: ProjectionRequestV1['expected']) {
     projectionInputDigest: digest('5'),
     rendererVersion: 'archcontext.docs-renderer/v4' as const,
     layoutVersion: 'archcontext.docs-layout/v1' as const,
-    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.5.0' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
+    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.6.1' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
   };
   const withoutReceipt = {
     schemaVersion: 'archcontext.projection-result/v2' as const,
@@ -160,7 +205,7 @@ function applyEnvelope(
     sourceTreeDigest: digest('2'), modelDigest: digest('3'), codeGraphDigest: digest('4'), indexedWorktreeDigest: digest('1'), projectionInputDigest: digest('5'),
     rendererVersion: 'archcontext.docs-renderer/v4' as const,
     layoutVersion: 'archcontext.docs-layout/v1' as const,
-    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.5.0' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
+    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.6.1' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
   };
   const applyReceipt = {
     schemaVersion: 'archcontext.projection-apply-identity/v1' as const,
@@ -200,6 +245,107 @@ function applyEnvelope(
   return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.run', data };
 }
 
+function committedApplyEnvelope(request: ProjectionRequestV1) {
+  if (!request.acceptedChange) throw new Error('fixture requires acceptedChange');
+  const original = applyEnvelope(request.requestId, request.expected, request.acceptedChange, 'applied').data;
+  const identity = createProjectionApplyIdentity({
+    repositoryId: request.expected.repositoryId,
+    workspaceId: request.expected.workspaceId,
+    acceptedChange: request.acceptedChange,
+    changeSetId: original.applyReceipt.semanticCommit.changeSetId,
+    idempotencyKey: original.applyReceipt.semanticCommit.idempotencyKey,
+    files: original.files,
+    refreshSignals: original.refreshSignals as unknown as Parameters<typeof createProjectionApplyIdentity>[0]['refreshSignals'],
+  });
+  const { receiptDigest: _old, ...body } = original;
+  const receiptDigest = projectionResultReceiptDigest({ ...body, applyReceipt: identity });
+  const data = {
+    ...body,
+    applyReceipt: identity,
+    receiptDigest,
+    refreshSignals: body.refreshSignals.map((signal) => ({ ...signal, projectionReceiptDigest: receiptDigest })),
+  };
+  return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.run', data };
+}
+
+function committedApplyReadback(request: ProjectionRequestV1, result: ReturnType<typeof committedApplyEnvelope>['data']) {
+  const signal = result.refreshSignals[0]!;
+  const resultingDigests = {
+    modelDigest: signal.resultingDigests.modelDigest!,
+    sourceTreeDigest: signal.resultingDigests.sourceTreeDigest!,
+    flowProofDigest: signal.resultingDigests.flowProofDigest!,
+    projectionDigest: signal.resultingDigests.projectionDigest!,
+  };
+  const ownedOutputDigest = digest('c');
+  const recovery = {
+    schemaVersion: 'archcontext.projection-apply-recovery-binding/v1' as const,
+    targets: request.targets,
+    changedPaths: request.changedPaths,
+    originalExpectedSnapshot: request.expected,
+    expectedResultingDigests: resultingDigests,
+    rendererVersion: result.outputSnapshot.rendererVersion,
+    layoutVersion: result.outputSnapshot.layoutVersion,
+    generatedFrom: result.outputSnapshot.generatedFrom,
+    ownedOutputDigest,
+    receiptDigest: result.receiptDigest,
+  };
+  const body = {
+    schemaVersion: 'archcontext.projection-apply-readback-result/v1' as const,
+    requestId: request.requestId,
+    requestDigest: digestProjectionJson(request),
+    receipt: { schemaVersion: 'archcontext.projection-apply-receipt/v1' as const, identity: result.applyReceipt, result, recovery },
+    current: { snapshot: result.outputSnapshot, resultingDigests, ownedOutputDigest, fixedPointDigest: digest('d') },
+  };
+  return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.readback', data: { ...body, readbackDigest: digestProjectionJson(body) } };
+}
+
+function absentApplyReadback(request: ProjectionRequestV1) {
+  if (!request.acceptedChange) throw new Error('fixture requires acceptedChange');
+  const body = {
+    schemaVersion: 'archcontext.projection-apply-absence/v1' as const,
+    requestId: request.requestId,
+    requestDigest: digestProjectionJson(request),
+    lookupKey: projectionApplyLookupKey({
+      repositoryId: request.expected.repositoryId,
+      workspaceId: request.expected.workspaceId,
+      acceptedChange: request.acceptedChange,
+    }),
+    current: request.expected,
+  };
+  return { schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'projection.readback',
+    data: { ...body, absenceDigest: digestProjectionJson(body) } };
+}
+
+function unresolvedAcceptanceResult(request: ProjectionRequestV1): ProjectionResultV1 {
+  const change: NonNullable<ProjectionRequestV1['acceptedChange']> = {
+    changeSetId: 'changeset.pending-acceptance',
+    eventId: 'event.pending-acceptance',
+    reasonCodes: ['responsibility-changed'],
+    affectedNodeIds: ['capability.test.core'],
+  };
+  const applied = applyEnvelope(request.requestId, request.expected, change, 'applied').data;
+  const { acceptedChange: _acceptedChange, ...refreshSignal } = applied.refreshSignals[0]!;
+  const signal: ArchitectureRefreshSignalV1 = {
+    ...refreshSignal,
+    signalId: digest('9'),
+    mode: 'human-action-required',
+    cause: 'unresolved-major-candidate',
+  };
+  const body: Omit<ProjectionResultV1, 'receiptDigest'> = {
+    schemaVersion: 'archcontext.projection-result/v2',
+    requestId: request.requestId,
+    status: 'human-action-required',
+    inputSnapshot: applied.inputSnapshot,
+    outputSnapshot: applied.outputSnapshot,
+    affectedNodeIds: ['capability.test.core'],
+    files: [],
+    humanActions: [{ reasonCode: 'unresolved-major-change', affectedNodeIds: ['capability.test.core'], requestPayloadDigest: digest('8') }],
+    refreshSignals: [signal],
+  };
+  const receiptDigest = projectionResultReceiptDigest(body);
+  return { ...body, receiptDigest, refreshSignals: [{ ...signal, projectionReceiptDigest: receiptDigest }] };
+}
+
 function runner(calls: Array<{ binary: string; args: readonly string[] }>, docs: ReturnType<typeof projectionEnvelope>): RunArchctxProcess {
   return (binary, args): ArchctxProcessResult => {
     calls.push({ binary, args });
@@ -207,9 +353,310 @@ function runner(calls: Array<{ binary: string; args: readonly string[] }>, docs:
   };
 }
 
+function refreshOwnedMutationFixture() {
+  const f = fixture();
+  const initial = request(f.repoRoot);
+  const [candidate] = recordArchitectureProjectionAcceptanceCandidates(f.repoRoot, initial, unresolvedAcceptanceResult(initial));
+  if (!candidate) throw new Error('candidate fixture failed');
+  const failMarker = join(f.root, 'fail-capability-context');
+  writeFileSync(failMarker, '1\n');
+  const stubCli = join(f.root, 'stub-repo-harness-cli.ts');
+  const architectureEvent = join(import.meta.dir, '..', 'scripts', 'architecture-event.ts');
+  writeFileSync(stubCli, `import { spawnSync } from 'node:child_process';
+import { existsSync, rmSync } from 'node:fs';
+const [command, sub] = process.argv.slice(2);
+if (command === 'run' && sub === 'architecture-queue') process.exit(0);
+if (command === 'run' && sub === 'context-contract-sync') {
+  const sync = spawnSync(process.execPath, [${JSON.stringify(architectureEvent)}, 'sync-context-map',
+    '--context-map', '.ai/context/context-map.json', '--block', 'src/core', '--capability-id', 'capability.test.core',
+    '--contract-agents', 'src/core/AGENTS.md', '--contract-claude', 'src/core/CLAUDE.md',
+    '--architecture-domain', 'test', '--architecture-capability', 'core'], { stdio: 'inherit' });
+  process.exit(sync.status ?? 1);
+}
+if (command === 'capability-context') {
+  if (existsSync(${JSON.stringify(failMarker)})) {
+    rmSync(${JSON.stringify(failMarker)});
+    process.stderr.write('capability helper unavailable');
+    process.exit(1);
+  }
+  process.exit(0);
+}
+process.exit(2);
+`);
+  let semanticApplies = 0;
+  let committedResult: ReturnType<typeof committedApplyEnvelope> | null = null;
+  const run: RunArchctxProcess = (_binary, args) => {
+    if (args[0] === 'capabilities') return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
+    if (args[0] !== 'projection' || args[1] !== 'run') throw new Error(`unexpected provider command: ${args.join(' ')}`);
+    if (committedResult) {
+      return { status: 1, signal: null, stdout: '', stderr: 'AC_PRECONDITION_FAILED: committed projection receipt requires explicit projection recover' };
+    }
+    const wireRequest = JSON.parse(args[3]!) as ProjectionRequestV1;
+    semanticApplies += 1;
+    mkdirSync(join(f.repoRoot, 'docs', 'architecture'), { recursive: true });
+    writeFileSync(join(f.repoRoot, 'docs', 'architecture', 'index.md'), 'committed projection\n');
+    committedResult = committedApplyEnvelope(wireRequest);
+    return { status: 0, signal: null, stdout: JSON.stringify(committedResult), stderr: '' };
+  };
+  return {
+    repoRoot: f.repoRoot,
+    initial,
+    signalId: candidate.signalId,
+    approval: 'event.user-approval-refresh-owned-mutation',
+    options: {
+      consumerRoot: f.consumerRoot,
+      policy,
+      run,
+      env: { ...process.env, REPO_HARNESS_CLI: stubCli, REPO_HARNESS_BUN: process.execPath },
+    },
+    semanticApplies: () => semanticApplies,
+  };
+}
+
 describe('package-local ArchContext projection provider', () => {
+  test('recovers an accepted apply when refresh fails after the provider commit', () => {
+    const f = fixture();
+    const initial = request(f.repoRoot);
+    const [candidate] = recordArchitectureProjectionAcceptanceCandidates(f.repoRoot, initial, unresolvedAcceptanceResult(initial));
+    if (!candidate) throw new Error('candidate fixture failed');
+    let semanticApplies = 0;
+    let refreshAttempts = 0;
+    let committedResult: ReturnType<typeof committedApplyEnvelope> | null = null;
+    let committedRequest: ProjectionRequestV1 | null = null;
+    const run: RunArchctxProcess = (_binary, args) => {
+      if (args[0] === 'capabilities') return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
+      if (args[0] === 'projection' && args[1] === 'readback' && committedResult && committedRequest) {
+        const wireRequest = JSON.parse(args[3]!) as ProjectionRequestV1;
+        expect(wireRequest).toEqual(committedRequest);
+        return { status: 0, signal: null, stdout: JSON.stringify(committedApplyReadback(wireRequest, committedResult.data)), stderr: '' };
+      }
+      if (args[0] !== 'projection' || args[1] !== 'run') throw new Error(`unexpected provider command: ${args.join(' ')}`);
+      if (committedResult) {
+        return { status: 1, signal: null, stdout: '', stderr: 'AC_PRECONDITION_FAILED: committed projection receipt requires explicit projection recover' };
+      }
+      const wireRequest = JSON.parse(args[3]!) as ProjectionRequestV1;
+      if (!wireRequest.acceptedChange) throw new Error('accepted apply request is missing acceptedChange');
+      semanticApplies += 1;
+      committedRequest = wireRequest;
+      mkdirSync(join(f.repoRoot, 'docs', 'architecture'), { recursive: true });
+      writeFileSync(join(f.repoRoot, 'docs', 'architecture', 'index.md'), 'committed projection\n');
+      committedResult = committedApplyEnvelope(wireRequest);
+      return { status: 0, signal: null, stdout: JSON.stringify(committedResult), stderr: '' };
+    };
+    const approval = 'event.user-approval-interrupted-acceptance';
+    const options = {
+      consumerRoot: f.consumerRoot,
+      policy,
+      run,
+      runRefreshActions: () => {
+        refreshAttempts += 1;
+        return [{ actionKey: 'architecture-queue:src/core/a.ts', action: 'architecture-queue' as const,
+          status: refreshAttempts === 1 ? 1 : 0, stdout: '', stderr: refreshAttempts === 1 ? 'helper unavailable' : '' }];
+      },
+    };
+    expect(() => acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, approval, options))
+      .toThrow('architecture refresh architecture-queue failed');
+    expect(semanticApplies).toBe(1);
+    expect(existsSync(join(f.repoRoot, '.ai/harness/architecture-projection/acceptance-receipts', `${candidate.signalId.slice(7)}.json`))).toBe(false);
+    expect(inspectArchitectureProjectionAcceptanceState(f.repoRoot).unresolvedCandidates).toBe(1);
+
+    const receipt = acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, approval, options);
+    expect(receipt.result.applyReceipt).toEqual(committedResult!.data.applyReceipt);
+    expect(receipt.result.refreshSignals).toEqual(committedResult!.data.refreshSignals);
+    expect(receipt.refreshReceiptDigests).toHaveLength(1);
+    expect(semanticApplies).toBe(1);
+    expect(refreshAttempts).toBe(2);
+    expect(inspectArchitectureProjectionAcceptanceState(f.repoRoot).unresolvedCandidates).toBe(0);
+    expect(() => acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, 'event.other-approval', options))
+      .toThrow('different approval reference');
+  });
+
+  test('known limitation: a refresh-owned input change after a committed apply fails closed on retry', () => {
+    const m = refreshOwnedMutationFixture();
+    expect(() => acceptArchitectureProjectionCandidate(m.repoRoot, m.signalId, m.approval, m.options))
+      .toThrow('architecture refresh capability-context-request failed');
+    expect(existsSync(join(m.repoRoot, '.ai', 'context', 'context-map.json'))).toBe(true);
+    expect(captureArchitectureProjectionSnapshot(m.repoRoot).worktreeDigest).not.toBe(m.initial.expected.worktreeDigest);
+
+    expect(() => acceptArchitectureProjectionCandidate(m.repoRoot, m.signalId, m.approval, m.options))
+      .toThrow(`architecture acceptance refresh signal is stale: ${m.signalId}`);
+    expect(m.semanticApplies()).toBe(1);
+    expect(existsSync(join(m.repoRoot, '.ai/harness/architecture-projection/acceptance-receipts', `${m.signalId.slice(7)}.json`))).toBe(false);
+    expect(inspectArchitectureProjectionAcceptanceState(m.repoRoot)).toMatchObject({ receipts: 0, unresolvedCandidates: 1 });
+  });
+
+  test('explicit readback closes a legacy orphan after provider commit but before its response', () => {
+    const f = fixture();
+    const initial = request(f.repoRoot);
+    const [candidate] = recordArchitectureProjectionAcceptanceCandidates(f.repoRoot, initial, unresolvedAcceptanceResult(initial));
+    if (!candidate) throw new Error('candidate fixture failed');
+    let committedRequest: ProjectionRequestV1 | null = null;
+    let committedResult: ReturnType<typeof committedApplyEnvelope> | null = null;
+    let semanticApplies = 0;
+    let readbacks = 0;
+    const run: RunArchctxProcess = (_binary, args) => {
+      if (args[0] === 'capabilities') return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
+      if (args[0] === 'projection' && args[1] === 'readback' && committedRequest && committedResult) {
+        readbacks += 1;
+        const wireRequest = JSON.parse(args[3]!) as ProjectionRequestV1;
+        expect(wireRequest).toEqual(committedRequest);
+        return { status: 0, signal: null, stdout: JSON.stringify(committedApplyReadback(wireRequest, committedResult.data)), stderr: '' };
+      }
+      if (args[0] !== 'projection' || args[1] !== 'run') throw new Error(`unexpected provider command: ${args.join(' ')}`);
+      semanticApplies += 1;
+      const wireRequest = JSON.parse(args[3]!) as ProjectionRequestV1;
+      committedRequest = wireRequest;
+      committedResult = committedApplyEnvelope(wireRequest);
+      mkdirSync(join(f.repoRoot, 'docs', 'architecture'), { recursive: true });
+      writeFileSync(join(f.repoRoot, 'docs', 'architecture', 'index.md'), 'committed projection\n');
+      return { status: 1, signal: null, stdout: '', stderr: 'provider response lost after committed apply' };
+    };
+    const approval = 'event.user-approval-legacy-orphan';
+    const options = { consumerRoot: f.consumerRoot, policy, run,
+      runRefreshActions: () => [{ actionKey: 'architecture-queue:src/core/a.ts', action: 'architecture-queue' as const,
+        status: 0, stdout: '', stderr: '' }],
+    };
+    expect(() => acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, approval, options))
+      .toThrow('provider response lost after committed apply');
+    const pendingPath = join(f.repoRoot, '.ai/harness/architecture-projection/acceptance-pending', `${candidate.signalId.slice(7)}.json`);
+    expect(existsSync(pendingPath)).toBe(true);
+    rmSync(pendingPath);
+    const receipt = acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, approval, { ...options, recover: true });
+    expect(receipt.result).toEqual(committedResult!.data);
+    expect(receipt.refreshReceiptDigests).toHaveLength(1);
+    expect(semanticApplies).toBe(1);
+    expect(readbacks).toBe(1);
+    const repeated = acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, approval, { ...options, recover: true });
+    expect(repeated).toEqual(receipt);
+    expect(readbacks).toBe(1);
+  });
+
+  test('refuses to switch a committed apply intent to adoption without a second semantic call', () => {
+    const f = fixture();
+    const initial = request(f.repoRoot);
+    const [candidate] = recordArchitectureProjectionAcceptanceCandidates(f.repoRoot, initial, unresolvedAcceptanceResult(initial));
+    if (!candidate) throw new Error('candidate fixture failed');
+    let committedResult: ReturnType<typeof committedApplyEnvelope> | null = null;
+    const semanticModes: string[] = [];
+    let readbacks = 0;
+    const run: RunArchctxProcess = (_binary, args) => {
+      if (args[0] === 'capabilities') return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
+      const wireRequest = JSON.parse(args[3]!) as ProjectionRequestV1;
+      if (args[0] === 'projection' && args[1] === 'readback' && committedResult) {
+        readbacks += 1;
+        return { status: 0, signal: null, stdout: JSON.stringify(committedApplyReadback(wireRequest, committedResult.data)), stderr: '' };
+      }
+      if (args[0] !== 'projection' || args[1] !== 'run') throw new Error(`unexpected provider command: ${args.join(' ')}`);
+      semanticModes.push(wireRequest.mode);
+      committedResult = committedApplyEnvelope(wireRequest);
+      mkdirSync(join(f.repoRoot, 'docs', 'architecture'), { recursive: true });
+      writeFileSync(join(f.repoRoot, 'docs', 'architecture', 'index.md'), 'committed projection\n');
+      return { status: 1, signal: null, stdout: '', stderr: 'provider response lost after committed apply' };
+    };
+    const options = { consumerRoot: f.consumerRoot, policy, run,
+      runRefreshActions: () => { throw new Error('must not refresh'); },
+    };
+    const approval = 'event.user-approval-committed-then-adopt';
+    expect(() => acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, approval, options))
+      .toThrow('provider response lost after committed apply');
+    expect(() => acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, approval, {
+      ...options, adoptionPlanId: 'adopt-plan-0123456789abcdef',
+    })).toThrow('cannot switch to adoption after a committed apply');
+    expect(semanticModes).toEqual(['apply']);
+    expect(readbacks).toBe(1);
+    expect(inspectArchitectureProjectionAcceptanceState(f.repoRoot).unresolvedCandidates).toBe(1);
+  });
+
+  test('validated absence permits one normal retry after a precommit provider failure', () => {
+    const f = fixture();
+    const initial = request(f.repoRoot);
+    const [candidate] = recordArchitectureProjectionAcceptanceCandidates(f.repoRoot, initial, unresolvedAcceptanceResult(initial));
+    if (!candidate) throw new Error('candidate fixture failed');
+    let applyAttempts = 0;
+    let readbacks = 0;
+    const run: RunArchctxProcess = (_binary, args) => {
+      if (args[0] === 'capabilities') return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
+      const wireRequest = JSON.parse(args[3]!) as ProjectionRequestV1;
+      if (args[0] === 'projection' && args[1] === 'readback') {
+        readbacks += 1;
+        return { status: 0, signal: null, stdout: JSON.stringify(absentApplyReadback(wireRequest)), stderr: '' };
+      }
+      if (args[0] !== 'projection' || args[1] !== 'run') throw new Error(`unexpected provider command: ${args.join(' ')}`);
+      applyAttempts += 1;
+      if (applyAttempts === 1) return { status: 1, signal: null, stdout: '', stderr: 'precommit provider unavailable' };
+      mkdirSync(join(f.repoRoot, 'docs', 'architecture'), { recursive: true });
+      writeFileSync(join(f.repoRoot, 'docs', 'architecture', 'index.md'), 'committed projection\n');
+      return { status: 0, signal: null, stdout: JSON.stringify(committedApplyEnvelope(wireRequest)), stderr: '' };
+    };
+    const options = { consumerRoot: f.consumerRoot, policy, run,
+      runRefreshActions: () => [{ actionKey: 'architecture-queue:src/core/a.ts', action: 'architecture-queue' as const,
+        status: 0, stdout: '', stderr: '' }],
+    };
+    const approval = 'event.user-approval-precommit-retry';
+    expect(() => acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, approval, options))
+      .toThrow('precommit provider unavailable');
+    const receipt = acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, approval, options);
+    expect(receipt.result.status).toBe('applied');
+    expect(receipt.refreshReceiptDigests).toHaveLength(1);
+    expect(applyAttempts).toBe(2);
+    expect(readbacks).toBe(1);
+  });
+
+  test('explicit recovery of a fresh absence leaves no pending journal or apply effect', () => {
+    const f = fixture();
+    const initial = request(f.repoRoot);
+    const [candidate] = recordArchitectureProjectionAcceptanceCandidates(f.repoRoot, initial, unresolvedAcceptanceResult(initial));
+    if (!candidate) throw new Error('candidate fixture failed');
+    let applyAttempts = 0;
+    const run: RunArchctxProcess = (_binary, args) => {
+      if (args[0] === 'capabilities') return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
+      const wireRequest = JSON.parse(args[3]!) as ProjectionRequestV1;
+      if (args[1] === 'readback') return { status: 0, signal: null, stdout: JSON.stringify(absentApplyReadback(wireRequest)), stderr: '' };
+      if (args[1] !== 'run') throw new Error(`unexpected provider command: ${args.join(' ')}`);
+      applyAttempts += 1;
+      mkdirSync(join(f.repoRoot, 'docs', 'architecture'), { recursive: true });
+      writeFileSync(join(f.repoRoot, 'docs', 'architecture', 'index.md'), 'committed projection\n');
+      return { status: 0, signal: null, stdout: JSON.stringify(committedApplyEnvelope(wireRequest)), stderr: '' };
+    };
+    const options = { consumerRoot: f.consumerRoot, policy, run,
+      runRefreshActions: () => [{ actionKey: 'architecture-queue:src/core/a.ts', action: 'architecture-queue' as const,
+        status: 0, stdout: '', stderr: '' }],
+    };
+    const approval = 'event.user-approval-fresh-absence';
+    expect(() => acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, approval, { ...options, recover: true }))
+      .toThrow('explicit recovery found no committed provider apply');
+    expect(applyAttempts).toBe(0);
+    expect(existsSync(join(f.repoRoot, '.ai/harness/architecture-projection/acceptance-pending', `${candidate.signalId.slice(7)}.json`))).toBe(false);
+    expect(acceptArchitectureProjectionCandidate(f.repoRoot, candidate.signalId, approval, options).result.status).toBe('applied');
+    expect(applyAttempts).toBe(1);
+  });
+
+  test('rejects a re-digested readback whose current output proof differs from the committed receipt', () => {
+    const f = fixture();
+    const accepted = request(f.repoRoot);
+    accepted.mode = 'apply';
+    accepted.acceptedChange = {
+      changeSetId: 'changeset.docs-projection-readback-proof', eventId: 'event.readback-proof',
+      reasonCodes: ['responsibility-changed'], affectedNodeIds: ['capability.test.core'],
+    };
+    const committed = committedApplyEnvelope(accepted);
+    const forged = committedApplyReadback(accepted, committed.data);
+    forged.data.current.ownedOutputDigest = digest('e');
+    const { readbackDigest: _old, ...body } = forged.data;
+    forged.data.readbackDigest = digestProjectionJson(body);
+    const run: RunArchctxProcess = (_binary, args) => ({
+      status: 0, signal: null,
+      stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : forged), stderr: '',
+    });
+    expect(() => readArchitectureProjectionApply(accepted, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }))
+      .toThrow('readback current state differs from committed recovery binding');
+  });
+
   test('bounds a real provider process tree whose descendant keeps captured pipes open', () => {
     const f = fixture();
+    // Include runtime selection and startup so the provider reaches its descendant
+    // before the timeout exercises process-tree cleanup. Selection has its own test.
+    const providerBudgetMs = 2_000;
     const descendantPidPath = join(f.root, 'descendant.pid');
     const node = resolveCompatibleNodeRuntime(process.env);
     writeFileSync(f.binary, [
@@ -226,9 +673,10 @@ describe('package-local ArchContext projection provider', () => {
       `import { archctxCapabilities } from ${JSON.stringify(providerModule)};`,
       `const started = Date.now();`,
       `try {`,
-      `  archctxCapabilities(${JSON.stringify(f.repoRoot)}, { consumerRoot: ${JSON.stringify(f.consumerRoot)}, policy: { provider: 'archctx', applyMode: 'manual', failureGate: 'advisory', requiredVersion: '${ARCHCTX_REQUIRED_VERSION}', timeoutMs: 500 }, env: { ...process.env, REPO_HARNESS_NODE_BIN: ${JSON.stringify(node)}, ARCHCTX_DESCENDANT_PID_PATH: ${JSON.stringify(descendantPidPath)} }, deadlineMs: Date.now() + 500 });`,
+      `  archctxCapabilities(${JSON.stringify(f.repoRoot)}, { consumerRoot: ${JSON.stringify(f.consumerRoot)}, policy: { provider: 'archctx', applyMode: 'manual', failureGate: 'advisory', requiredVersion: '${ARCHCTX_REQUIRED_VERSION}', timeoutMs: ${providerBudgetMs} }, env: { ...process.env, REPO_HARNESS_NODE_BIN: ${JSON.stringify(node)}, ARCHCTX_DESCENDANT_PID_PATH: ${JSON.stringify(descendantPidPath)} }, deadlineMs: Date.now() + ${providerBudgetMs} });`,
       `  process.exitCode = 2;`,
       `} catch (error) {`,
+      `  console.error(String(error));`,
       `  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);`,
       `  const pid = Number((await import('node:fs')).readFileSync(${JSON.stringify(descendantPidPath)}, 'utf8'));`,
       `  let descendantAlive = true;`,
@@ -285,6 +733,7 @@ describe('package-local ArchContext projection provider', () => {
       '--signal-id',
       '--approval-reference',
       '--adoption-plan-id',
+      '--recover',
     ]);
     const reconcile = command.commands.find((candidate) => candidate.name() === 'reconcile');
     expect(reconcile).toBeDefined();
@@ -328,7 +777,7 @@ describe('package-local ArchContext projection provider', () => {
     const resolved = resolvePackageLocalArchctx(f.consumerRoot);
     expect(resolved.binaryPath).toBe(realpathSync(f.binary));
     writeFileSync(join(f.consumerRoot, 'node_modules', 'archctx', 'package.json'), '{"name":"archctx","version":"0.3.0"}\n');
-    expect(() => resolvePackageLocalArchctx(f.consumerRoot)).toThrow('expected archctx@0.5.10');
+    expect(() => resolvePackageLocalArchctx(f.consumerRoot)).toThrow('expected archctx@0.6.1');
   });
 
   test('resolves a hoisted package from an installed repo-harness package root', () => {
@@ -338,22 +787,49 @@ describe('package-local ArchContext projection provider', () => {
     expect(resolvePackageLocalArchctx(installedHarnessRoot).binaryPath).toBe(realpathSync(f.binary));
   });
 
-  test('resolves the target repo dependency tree before the running CLI package root', () => {
+  test.each(['0.0.1', ARCHCTX_REQUIRED_VERSION])('runtime provider is not overridden by target archctx@%s', (version) => {
     const f = fixture();
-    const repoBinary = vendorArchctx(f.repoRoot, '9.9.9');
+    const repoBinary = vendorArchctx(f.repoRoot, version);
+    const before = readFileSync(join(f.repoRoot, 'node_modules', 'archctx', 'package.json'), 'utf8');
+    const calls: string[] = [];
     const handshake = archctxCapabilities(f.repoRoot, {
-      policy: { ...policy, requiredVersion: '9.9.9' },
-      run: () => ({ status: 0, signal: null, stdout: JSON.stringify(capabilities('9.9.9')), stderr: '' }),
+      policy,
+      run: (binary) => {
+        calls.push(binary);
+        return { status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' };
+      },
     });
-    expect(handshake.resolved.binaryPath).toBe(realpathSync(repoBinary));
-    expect(handshake.resolved.version).toBe('9.9.9');
+    expect(handshake.resolved.packageRoot).toBe(realpathSync(join(import.meta.dir, '..', 'node_modules', 'archctx')));
+    expect(handshake.resolved.binaryPath).not.toBe(realpathSync(repoBinary));
+    expect(calls).toEqual([handshake.resolved.binaryPath]);
+    expect(handshake.resolved.version).toBe(ARCHCTX_REQUIRED_VERSION);
+    expect(readFileSync(join(f.repoRoot, 'node_modules', 'archctx', 'package.json'), 'utf8')).toBe(before);
   });
 
-  test('fails closed when the target repo vendors a mismatching archctx', () => {
+  test('fails closed on a mismatching runtime provider even when the target has a valid copy', () => {
+    const f = fixture();
+    vendorArchctx(f.repoRoot, ARCHCTX_REQUIRED_VERSION);
+    vendorArchctx(f.consumerRoot, '0.0.1');
+    expect(() => archctxCapabilities(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run: () => ({ status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' }) }))
+      .toThrow(`expected archctx@${ARCHCTX_REQUIRED_VERSION}, got archctx@0.0.1 (resolved from consumer root ${f.consumerRoot})`);
+  });
+
+  test('status CLI uses its runtime provider for a repository with stale local archctx', () => {
     const f = fixture();
     vendorArchctx(f.repoRoot, '0.0.1');
-    expect(() => archctxCapabilities(f.repoRoot, { policy, run: () => ({ status: 0, signal: null, stdout: JSON.stringify(capabilities()), stderr: '' }) }))
-      .toThrow(`expected archctx@${ARCHCTX_REQUIRED_VERSION}, got archctx@0.0.1 (resolved from repo root ${f.repoRoot})`);
+    const home = join(f.root, 'home');
+    mkdirSync(join(home, '.repo-harness'), { recursive: true });
+    writeFileSync(join(home, '.repo-harness', 'config.json'), JSON.stringify({
+      architecture: { projection_provider: 'archctx', projection_apply: 'automatic' },
+    }));
+    const output = execFileSync(process.execPath, [
+      join(import.meta.dir, '..', 'src', 'cli', 'index.ts'), 'architecture-projection', 'status', '--json',
+    ], { cwd: f.repoRoot, env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 10_000 });
+    const readiness = JSON.parse(output);
+    expect(readiness.projectionProvider.state).toBe('ready');
+    expect(readiness.projectionProvider.version).toBe(ARCHCTX_REQUIRED_VERSION);
+    expect(readiness.projectionProvider.binaryPath).toBe(resolvePackageLocalArchctx(join(import.meta.dir, '..')).binaryPath);
+    expect(JSON.parse(readFileSync(join(f.repoRoot, 'node_modules', 'archctx', 'package.json'), 'utf8')).version).toBe('0.0.1');
   });
 
   test('fails closed when the pinned version omits the prior-committed-applies feature', () => {
@@ -646,7 +1122,7 @@ describe('package-local ArchContext projection provider', () => {
     expect(manifest.devDependencies?.['archctx-contracts']).toBeUndefined();
     expect(manifest.scripts?.['check:archctx-integration']).toBe('bun scripts/axr5-archctx-clean-room.ts');
     expect(readback.status).toBe('verified');
-    expect(readback.packages.contracts.version).toBe('0.5.7');
+    expect(readback.packages.contracts.version).toBe('0.6.1');
     expect(Object.keys(readback.packages.contracts).sort()).toEqual(['file', 'name', 'version']);
     expect(Object.keys(readback.packages.archctx).sort()).toEqual(['file', 'name', 'version']);
     expect(readback.consumer.authoritativeNodeSchema).toBe('archcontext.node/v2');
@@ -762,5 +1238,73 @@ describe('package-local ArchContext projection provider', () => {
       : { status: 1, signal: null, stdout: '', stderr: 'AC_PRECONDITION_FAILED: expected snapshot is stale' };
     expect(() => runArchitectureProjection(projectionRequest, f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, onDiagnostic: (value) => diagnostics.push(value) })).toThrow('expected snapshot is stale');
     expect(diagnostics).toEqual([]);
+  });
+});
+
+
+describe('ArchContext maintenance reminders', () => {
+  const incompatible = {
+    schemaVersion: 'archcontext.envelope/v1', ok: true, requestId: 'daemon.status',
+    data: { running: true, versionUnsupported: {
+      reason: 'product-version-mismatch', expected: ARCHCTX_REQUIRED_VERSION, received: '0.2.3',
+      action: 'upgrade-archctx-runtime', command: 'archctx daemon upgrade',
+    } },
+  };
+
+  test('daemon lifecycle mismatch requests authorization without running recovery', () => {
+    const f = fixture();
+    const calls: string[][] = [];
+    const run: RunArchctxProcess = (_binary, args) => {
+      calls.push([...args]);
+      return { status: 0, signal: null, stdout: JSON.stringify(incompatible), stderr: '' };
+    };
+    expect(() => verifyArchctxDaemonRuntime(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }))
+      .toThrow('received 0.2.3. User authorization required');
+    expect(calls).toEqual([['daemon', 'status', '--json']]);
+  });
+
+  test('healthy and stopped daemons need no maintenance; malformed status fails closed', () => {
+    const f = fixture();
+    const check = (data: unknown) => verifyArchctxDaemonRuntime(f.repoRoot, {
+      consumerRoot: f.consumerRoot, policy,
+      run: () => ({ status: 0, signal: null, stdout: JSON.stringify({ schemaVersion: 'archcontext.envelope/v1', ok: true, data }), stderr: '' }),
+    });
+    expect(() => check({ running: false })).not.toThrow();
+    expect(() => check({ running: true, rpcVersionCompatible: true, productVersionCompatible: true })).not.toThrow();
+    expect(() => check({ running: true })).toThrow('did not prove runtime compatibility');
+    expect(() => check({ running: 'true' })).toThrow('invalid envelope');
+    expect(() => check({ running: false, staleConnection: true })).toThrow('unhealthy connection');
+    expect(() => check({ ...incompatible.data, versionUnsupported: { ...incompatible.data.versionUnsupported, action: 'unknown' } }))
+      .toThrow('invalid versionUnsupported diagnostic');
+  });
+
+  test('projection failure preserves typed maintenance guidance beyond diagnostic truncation', () => {
+    const f = fixture();
+    const calls: string[][] = [];
+    const run: RunArchctxProcess = (_binary, args) => {
+      calls.push([...args]);
+      return { status: args[0] === 'capabilities' ? 0 : 1, signal: null, stderr: 'short stderr', stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : {
+        schemaVersion: 'archcontext.envelope/v1', ok: false, requestId: 'projection',
+        error: { code: 'AC_RUNTIME_VERSION_UNSUPPORTED', action: 'upgrade-archctx-runtime', message: 'x'.repeat(400) + ' daemon 0.2.3 requires replacement' },
+      }) };
+    };
+    let message = '';
+    try { runArchitectureProjection(request(f.repoRoot), f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }); }
+    catch (error) { message = (error as Error).message; }
+    expect(message).toContain('daemon 0.2.3 requires replacement');
+    expect(message).toContain('User authorization required');
+    expect(message).toContain('only if it is missing or stale');
+    expect(calls.map((args) => args[0])).toEqual(['capabilities', 'projection']);
+  });
+
+  test('untyped stderr and wrong envelope schemas never produce a reset recommendation', () => {
+    const f = fixture();
+    for (const schemaVersion of ['unknown', 'archcontext.envelope/v1']) {
+      const run: RunArchctxProcess = (_binary, args) => ({ status: args[0] === 'capabilities' ? 0 : 1, signal: null,
+        stdout: JSON.stringify(args[0] === 'capabilities' ? capabilities() : { schemaVersion, ok: false, error: { code: 'AC_RUNTIME_VERSION_UNSUPPORTED', action: 'unknown', message: 'not authority' } }),
+        stderr: 'AC_RUNTIME_VERSION_UNSUPPORTED' });
+      expect(() => runArchitectureProjection(request(f.repoRoot), f.repoRoot, { consumerRoot: f.consumerRoot, policy, run }))
+        .toThrow('exit 1: AC_RUNTIME_VERSION_UNSUPPORTED');
+    }
   });
 });

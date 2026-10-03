@@ -1,15 +1,12 @@
+import { recordFixtureAcceptance, fixtureReviewResult } from './helpers/repo-fixture';
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "child_process";
 import { createHash } from "crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { withTempRepo } from "./helpers/repo-fixture";
 
-import { LEDGER_EPOCH_START_SHA } from "../src/effects/evidence/epoch";
-import { importAttestedEvidence, type AttestedReceiptInput } from "../src/effects/evidence/attested-import";
-import { readAcceptedEvents, readGenesisRecord } from "../src/effects/evidence/event-log";
-import { buildReviewSubject } from "../src/effects/review/diff-fingerprint";
-import { prepareChangeAssessment } from "../src/effects/review/change-assessment";
 import {
   acceptanceReceiptPath,
   archiveProjectionReceiptPath,
@@ -18,19 +15,15 @@ import {
   runAcceptanceReceiptCli,
   sealArchiveProjection,
 } from "../scripts/acceptance-receipt";
+import { importAttestedEvidence, type AttestedReceiptInput } from "../src/effects/evidence/attested-import";
+import { LEDGER_EPOCH_START_SHA } from "../src/effects/evidence/epoch";
+import { readAcceptedEvents, readGenesisRecord } from "../src/effects/evidence/event-log";
+import { prepareChangeAssessment } from "../src/effects/review/change-assessment";
+import { buildReviewSubject } from "../src/effects/review/diff-fingerprint";
 import { emptyVerificationEvaluation, withEmptyVerificationPlan } from "./helpers/verification-plan-fixture";
 
 function git(repoRoot: string, args: readonly string[]): string {
   return execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf-8" });
-}
-
-function withTempRepo(prefix: string, fn: (repoRoot: string) => void): void {
-  const repoRoot = mkdtempSync(join(tmpdir(), `${prefix}-`));
-  try {
-    fn(repoRoot);
-  } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
-  }
 }
 
 /**
@@ -82,7 +75,7 @@ function baseReceipt(contractRelative: string, overrides: Partial<AttestedReceip
   return {
     disposition: "external_pass",
     reviewer: "Claude",
-    source: "claude-review",
+    source: "generic-review",
     actor: null,
     summary: "candidate accepted",
     findings: [],
@@ -154,7 +147,7 @@ describe("importAttestedEvidence: trust mapping", () => {
       const payload = result.event.payload as Record<string, unknown>;
       expect(payload.disposition).toBe("external_pass");
       expect(payload.reviewer).toBe("Claude");
-      expect(payload.source).toBe("claude-review");
+      expect(payload.source).toBe("generic-review");
       expect(payload.actor).toBeNull();
       expect(payload.summary).toBe("candidate accepted");
       expect(payload.findings_count).toBe(0);
@@ -503,14 +496,14 @@ describe("scripts/acceptance-receipt.ts record: attested-import wiring", () => {
     const livePlan = "plans/plan-fixture.md";
     const liveContract = "tasks/contracts/fixture-cli.contract.md";
     const liveReview = "tasks/reviews/fixture-cli.review.md";
-    await recordAcceptance({
+    await recordFixtureAcceptance({
       root,
       authorityHome: home,
       contract: liveContract,
       verification: ".ai/harness/checks/latest.json",
       disposition: "external_pass",
       reviewer: "Claude",
-      source: "claude-review",
+      source: "generic-review",
       actor: null,
       summary: "initial live acceptance",
       findings: [],
@@ -575,14 +568,16 @@ describe("scripts/acceptance-receipt.ts record: attested-import wiring", () => {
     cwdStack.push(process.cwd());
     process.chdir(root);
 
+    const reviewResultFile = join(home, 'fixture-review-result.json');
+    writeFileSync(reviewResultFile, JSON.stringify(await fixtureReviewResult({ root, contract: 'tasks/contracts/fixture-cli.contract.md', verification: '.ai/harness/checks/latest.json', reviewer: 'Claude', disposition: 'external_pass', summary: 'cli wiring dogfood fixture', findings: [] })));
     const exitCode = await runAcceptanceReceiptCli(
       [
-        "record",
+        "record", "--review-result", reviewResultFile,
         "--contract", "tasks/contracts/fixture-cli.contract.md",
         "--verification", ".ai/harness/checks/latest.json",
         "--disposition", "external_pass",
         "--reviewer", "Claude",
-        "--source", "claude-review",
+        "--source", "generic-review",
         "--summary", "cli wiring dogfood fixture",
       ],
       { authorityHome: home },
@@ -600,14 +595,16 @@ describe("scripts/acceptance-receipt.ts record: attested-import wiring", () => {
     cwdStack.push(process.cwd());
     process.chdir(root);
 
+    const reviewResultFile = join(home, 'fixture-review-result.json');
+    writeFileSync(reviewResultFile, JSON.stringify(await fixtureReviewResult({ root, contract: 'tasks/contracts/fixture-cli.contract.md', verification: '.ai/harness/checks/latest.json', reviewer: 'Claude', disposition: 'reject', summary: 'rejected in cli wiring fixture', findings: [{ severity: 'P1', message: 'blocking issue' }] })));
     const exitCode = await runAcceptanceReceiptCli(
       [
-        "record",
+        "record", "--review-result", reviewResultFile,
         "--contract", "tasks/contracts/fixture-cli.contract.md",
         "--verification", ".ai/harness/checks/latest.json",
         "--disposition", "reject",
         "--reviewer", "Claude",
-        "--source", "claude-review",
+        "--source", "generic-review",
         "--summary", "rejected in cli wiring fixture",
         "--findings-json", '[{"severity":"P1","message":"blocking issue"}]',
       ],

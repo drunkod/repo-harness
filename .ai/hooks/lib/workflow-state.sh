@@ -1352,8 +1352,11 @@ workflow_write_run_summary() {
     return 0
   fi
 
+  # Same field set as the jq branch above: run-summary retention identifies this
+  # record by its shape, so a short fallback would make every jq-less host's
+  # summaries permanently unreclaimable.
   cat > "$output_file" <<EOF_RUN
-{"generated_at":"$(workflow_json_escape "$(date '+%Y-%m-%dT%H:%M:%S%z')")","run_id":"$(workflow_json_escape "$run_id")","reason":"$(workflow_json_escape "$reason")","checks_file":"$(workflow_json_escape "$(workflow_checks_file)")","handoff_file":"$(workflow_json_escape "$(workflow_handoff_file)")"}
+{"generated_at":"$(workflow_json_escape "$(date '+%Y-%m-%dT%H:%M:%S%z')")","run_id":"$(workflow_json_escape "$run_id")","reason":"$(workflow_json_escape "$reason")","active_plan":"$(workflow_json_escape "${active_plan:-}")","active_contract":"$(workflow_json_escape "${active_contract:-}")","active_review":"$(workflow_json_escape "${active_review:-}")","active_notes":"$(workflow_json_escape "${active_notes:-}")","checks_file":"$(workflow_json_escape "$(workflow_checks_file)")","handoff_file":"$(workflow_json_escape "$(workflow_handoff_file)")","policy_file":"$(workflow_json_escape "$(workflow_policy_file)")","context_map_file":"$(workflow_json_escape "$(workflow_context_map_file)")"}
 EOF_RUN
 }
 
@@ -1465,7 +1468,7 @@ workflow_acceptance_expected_reviewer() {
       select(
         (.protocol == 1 and (keys | sort) == ["protocol", "reviewer", "user_waiver"] and (.reviewer == "Claude" or .reviewer == "Codex"))
         or
-        (.protocol == 2 and (keys | sort) == ["protocol", "reviewer", "source", "user_waiver"] and .reviewer == "Codex" and (.source == "codex-review" or .source == "codex-plugin"))
+        (.protocol == 2 and (keys | sort) == ["protocol", "reviewer", "source", "user_waiver"] and .reviewer == "Codex" and (.source == "generic-review"))
       )
       | select(.user_waiver == "allowed" or .user_waiver == "forbidden")
       | .reviewer
@@ -1478,8 +1481,8 @@ workflow_acceptance_expected_reviewer() {
 workflow_acceptance_source_for_reviewer() {
   local reviewer="${1:-}"
   case "$(printf '%s' "$reviewer" | tr '[:upper:]' '[:lower:]')" in
-    claude) printf 'claude-review' ;;
-    *) printf 'codex-review' ;;
+    claude|codex) printf 'generic-review' ;;
+    *) return 1 ;;
   esac
 }
 
@@ -1490,8 +1493,8 @@ workflow_acceptance_expected_source() {
   printf '%s' "$policy_json" | jq -er '
     select(.user_waiver == "allowed" or .user_waiver == "forbidden")
     | if .protocol == 1 and (keys | sort) == ["protocol", "reviewer", "user_waiver"] then
-        if .reviewer == "Claude" then "claude-review" elif .reviewer == "Codex" then "codex-review" else empty end
-      elif .protocol == 2 and (keys | sort) == ["protocol", "reviewer", "source", "user_waiver"] and .reviewer == "Codex" and (.source == "codex-review" or .source == "codex-plugin") then
+        if .reviewer == "Claude" or .reviewer == "Codex" then "generic-review" else empty end
+      elif .protocol == 2 and (keys | sort) == ["protocol", "reviewer", "source", "user_waiver"] and .reviewer == "Codex" and (.source == "generic-review") then
         .source
       else empty end
   ' 2>/dev/null
@@ -1859,7 +1862,15 @@ workflow_contract_allows_path() {
     esac
 
     if [[ "$section" == "allowed_paths" && "$trimmed" =~ ^-[[:space:]]*(.+)$ ]]; then
-      item="$(workflow_strip_quotes "${BASH_REMATCH[1]}")"
+      item="${BASH_REMATCH[1]}"
+      # Drop a YAML inline comment: `#` at the start or after whitespace, outside a leading quoted scalar.
+      case "$item" in
+        \"*\"*) item="\"$(printf '%s' "${item:1}" | cut -d'"' -f1)\"" ;;
+        \'*\'*) item="'$(printf '%s' "${item:1}" | cut -d"'" -f1)'" ;;
+        *) item="$(printf '%s' "$item" | sed -E 's/^#.*$//; s/[[:space:]]+#.*$//')" ;;
+      esac
+      item="$(workflow_strip_quotes "$item")"
+      [[ -n "$item" ]] || continue
       pattern="$item"
       if [[ "$pattern" == */ ]]; then
         [[ "$file_path" == "$pattern"* ]] && return 0

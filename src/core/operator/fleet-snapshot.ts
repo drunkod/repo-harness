@@ -1,3 +1,5 @@
+import { isOperatorServiceEpoch } from './observation-identity';
+import { basename } from 'path';
 import {
   FLEET_BOARD_PROTOCOL,
   fleetBoardErrorMessage,
@@ -33,6 +35,7 @@ export type OperatorFleetCardV1 = FleetBoardCardV1;
 
 export interface OperatorFleetRepositoryV1 {
   readonly repository_id: string;
+  readonly display_name: string;
   readonly access_mode: 'read_only' | 'read_write';
   readonly status: FleetRepositoryStatus;
   readonly snapshot_consistency: OperatorFleetSnapshotConsistency;
@@ -40,7 +43,9 @@ export interface OperatorFleetRepositoryV1 {
   readonly error: OperatorFleetErrorV1 | null;
 }
 
-export interface OperatorFleetSnapshotV1 extends Omit<FleetBoardSnapshotV1, 'kind' | 'repositories' | 'snapshot_sha256'> {
+export interface OperatorFleetSnapshotV1 extends Omit<FleetBoardSnapshotV1, 'protocol' | 'kind' | 'repositories' | 'snapshot_sha256'> {
+  readonly protocol: 7;
+  readonly service_epoch: string;
   readonly kind: 'operator_fleet_snapshot';
   readonly repositories: readonly OperatorFleetRepositoryV1[];
   /** Digest of the canonical source snapshot, not of this redacted document. */
@@ -70,9 +75,17 @@ function projectCard(card: FleetBoardCardV1): OperatorFleetCardV1 {
     task_index: card.task_index,
     claim_id: card.claim_id,
     generation: card.generation,
-    column: card.column,
+    task_state: card.task_state,
+    placement: Object.freeze(card.placement.kind === 'column'
+      ? { kind: 'column' as const, column: card.placement.column }
+      : card.placement.kind === 'alternate_workflow'
+        ? { kind: 'alternate_workflow' as const, workflow: card.placement.workflow }
+        : card.placement.kind === 'unclassified'
+          ? { kind: 'unclassified' as const, reason: card.placement.reason }
+          : { kind: 'preparation' as const }),
     attention_owner: card.attention_owner,
     execution_readiness: card.execution_readiness,
+    readiness_blockers: card.readiness_blockers === null ? null : Object.freeze(card.readiness_blockers.map(blocker => Object.freeze({ code: blocker.code, attention_owner: blocker.attention_owner }))),
     lease_state: card.lease_state,
     publication_id: card.publication_id,
     head_sha: card.head_sha,
@@ -116,6 +129,7 @@ function projectRepository(repository: FleetRepositoryBoardV1): OperatorFleetRep
   const error = repository.error;
   return Object.freeze({
     repository_id: repository.repository_id,
+    display_name: basename(repository.repo_root),
     access_mode: repository.access_mode,
     status: repository.status,
     snapshot_consistency: repository.snapshot_consistency,
@@ -133,13 +147,14 @@ function projectRepository(repository: FleetRepositoryBoardV1): OperatorFleetRep
  * Project the canonical Fleet read model into a browser-safe document.
  *
  * This function deliberately does not classify cards, recalculate counts, or
- * derive attention from labels.  The output keeps the Fleet protocol and
+ * derive attention from labels.  The output versions its browser contract separately and keeps the Fleet
  * digest so consumers can correlate the transport view with the source read
  * model while absolute paths and diagnostic causes stay server-side.
  */
 export function projectOperatorFleetSnapshot(
-  snapshot: FleetBoardSnapshotV1,
+  snapshot: FleetBoardSnapshotV1, serviceEpoch: string,
 ): OperatorFleetSnapshotV1 {
+  if (!isOperatorServiceEpoch(serviceEpoch)) throw new Error('invalid operator service epoch');
   if (snapshot.protocol !== FLEET_BOARD_PROTOCOL) {
     throw new Error(`unsupported Fleet snapshot protocol: ${String(snapshot.protocol)}`);
   }
@@ -147,7 +162,8 @@ export function projectOperatorFleetSnapshot(
   const repositories = Object.freeze(snapshot.repositories.map(projectRepository));
   const sourceSnapshotSha256 = snapshot.snapshot_sha256;
   return Object.freeze({
-    protocol: snapshot.protocol,
+    protocol: 7,
+    service_epoch: serviceEpoch,
     kind: 'operator_fleet_snapshot',
     registry_revision: snapshot.registry_revision,
     sequence: snapshot.sequence,
@@ -162,6 +178,10 @@ export function projectOperatorFleetSnapshot(
       done: snapshot.counts.done,
       unreadable: snapshot.counts.unreadable,
       unclassified: snapshot.counts.unclassified,
+      preparation: snapshot.counts.preparation,
+      alternate_workflow: snapshot.counts.alternate_workflow,
+      isolated_execution: snapshot.counts.isolated_execution,
+      known_tasks: snapshot.counts.known_tasks,
     }),
     source_snapshot_sha256: sourceSnapshotSha256,
   });

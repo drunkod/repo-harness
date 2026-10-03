@@ -29,7 +29,7 @@ import { inspectArchitectureProjectionAcceptanceState } from '../src/effects/arc
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const digest = (token: string) => `sha256:${token.repeat(64).slice(0, 64)}` as const;
-const policy: ArchitectureProjectionPolicy = { provider: 'archctx', applyMode: 'automatic', failureGate: 'advisory', requiredVersion: '0.5.10', timeoutMs: 120_000 };
+const policy: ArchitectureProjectionPolicy = { provider: 'archctx', applyMode: 'automatic', failureGate: 'advisory', requiredVersion: '0.6.1', timeoutMs: 120_000 };
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'repo-harness-axr6-'));
@@ -40,7 +40,7 @@ function fixture() {
   mkdirSync(join(repoRoot, '.archcontext/model/nodes'), { recursive: true });
   mkdirSync(join(repoRoot, 'src'), { recursive: true });
   mkdirSync(join(consumerRoot, 'node_modules/archctx/bin'), { recursive: true });
-  writeFileSync(join(repoRoot, '.ai/harness/policy.json'), `${JSON.stringify({ architecture: { projection_provider: 'archctx', projection_apply: 'automatic', projection_version: '0.5.10', projection_timeout_ms: 120000 } })}\n`);
+  writeFileSync(join(repoRoot, '.ai/harness/policy.json'), `${JSON.stringify({ architecture: { projection_provider: 'archctx', projection_apply: 'automatic', projection_version: '0.6.1', projection_timeout_ms: 120000 } })}\n`);
   writeFileSync(join(repoRoot, '.archcontext/model/nodes/root.yaml'), `schemaVersion: archcontext.node/v2
 kind: capability
 id: capability.test.root
@@ -62,7 +62,7 @@ extensions:
   writeFileSync(join(repoRoot, 'src/index.ts'), 'export const value = 1;\n');
   writeFileSync(join(repoRoot, 'AGENTS.md'), '# agents\n');
   writeFileSync(join(repoRoot, 'CLAUDE.md'), '# claude\n');
-  writeFileSync(join(consumerRoot, 'node_modules/archctx/package.json'), `${JSON.stringify({ name: 'archctx', version: '0.5.10', engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
+  writeFileSync(join(consumerRoot, 'node_modules/archctx/package.json'), `${JSON.stringify({ name: 'archctx', version: '0.6.1', engines: { node: '>=22.22 <26' }, bin: { archctx: './bin/archctx' } })}\n`);
   writeFileSync(join(consumerRoot, 'node_modules/archctx/bin/archctx'), '#!/bin/sh\nexit 1\n');
   chmodSync(join(consumerRoot, 'node_modules/archctx/bin/archctx'), 0o755);
   execFileSync('git', ['init'], { cwd: repoRoot, stdio: 'ignore' });
@@ -77,7 +77,7 @@ extensions:
 function capabilities(): ArchctxProcessResult {
   return { status: 0, signal: null, stderr: '', stdout: JSON.stringify({
     schemaVersion: 'archcontext.capabilities/v1',
-    package: { name: 'archctx', version: '0.5.10' },
+    package: { name: 'archctx', version: '0.6.1' },
     protocols: { projectionRequest: 'archcontext.projection-request/v1', projectionResult: 'archcontext.projection-result/v2', architectureRefreshSignal: 'archcontext.architecture-refresh-signal/v1' },
     renderers: { architectureDocs: 'archcontext.docs-renderer/v4', agentContext: 'archcontext.agent-context-renderer/v1' },
     features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'projection-apply-receipt-v1', 'projection-prior-committed-applies-v1', 'projection-protocol-v2'],
@@ -91,7 +91,7 @@ function envelope(request: ProjectionRequestV1) {
     sourceTreeDigest: digest('1'), modelDigest: digest('2'), codeGraphDigest: digest('3'), indexedWorktreeDigest: digest('4'), projectionInputDigest: digest('5'),
     rendererVersion: 'archcontext.docs-renderer/v4' as const,
     layoutVersion: 'archcontext.docs-layout/v1' as const,
-    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.5.0' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
+    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.6.1' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
   };
   const body: Omit<ProjectionResultV1, 'receiptDigest'> = {
     schemaVersion: 'archcontext.projection-result/v2' as const,
@@ -116,7 +116,7 @@ function reconcileEnvelope(
     sourceTreeDigest: digest('1'), modelDigest: digest('2'), codeGraphDigest: digest('3'), indexedWorktreeDigest: digest('4'), projectionInputDigest: digest('5'),
     rendererVersion: 'archcontext.docs-renderer/v4' as const,
     layoutVersion: 'archcontext.docs-layout/v1' as const,
-    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.5.0' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
+    generatedFrom: { codeGraphPackage: '@colbymchenry/codegraph' as const, codeGraphVersion: '1.6.1' as const, codeGraphBinaryDigest: digest('6'), codeGraphStatus: 'ready' as const },
   };
   const applyReceipt = {
     schemaVersion: 'archcontext.projection-apply-identity/v1' as const,
@@ -343,6 +343,7 @@ describe('durable architecture projection orchestration', () => {
     const result = drain(f.repoRoot, { consumerRoot: f.consumerRoot, policy, run, nowMs: () => clockMs, deadlineMs: 20_000 });
     expect(timeouts).toEqual([10_000, 19_000]);
     expect(result.status).toBe('retry-pending');
+    expect(result.yieldReason).toBe('host-budget');
     expect(result.acknowledgeSourceEvents).toBe(false);
     expect(result.queue.pending).toBe(1);
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -669,6 +670,49 @@ describe('durable architecture projection orchestration', () => {
     expect(readPendingPostEditEvents(f.repoRoot)).toHaveLength(0);
   });
 
+  test('owned-only source events drain an existing pending job without enqueueing generated paths', () => {
+    const f = fixture();
+    const pending = enqueueArchitectureProjectionJob(realpathSync(f.repoRoot), ['event-before-restamp'], ['source-before-restamp'], ['src/index.ts'])!;
+    const sourceEvents = [{ event_id: 'event-restamp', source_key: 'source-restamp', changed_paths: ['docs/architecture/index.md', 'AGENTS.md'] }];
+    const requests: ProjectionRequestV1[] = [];
+    const run: RunArchctxProcess = (_binary, args) => {
+      if (args[0] === 'capabilities') return capabilities();
+      const request = JSON.parse(args[3]!) as ProjectionRequestV1;
+      requests.push(request);
+      return { status: 0, signal: null, stderr: '', stdout: JSON.stringify(envelope(request)) };
+    };
+    const result = drainArchitectureProjectionJobs(f.repoRoot, { consumerRoot: f.consumerRoot, policy, sourceEvents, run });
+    expect(result).toMatchObject({ status: 'succeeded', jobId: pending.jobId, sourceEventIds: pending.sourceEventIds, acknowledgeSourceEvents: true });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.changedPaths).toEqual(['src/index.ts']);
+    expect(architectureProjectionJobState(f.repoRoot, pending.jobId)).toBe('receipt');
+    expect(result.queue).toMatchObject({ pending: 0, running: 0, receipts: 1, deadLetters: 0 });
+
+    const next = drainArchitectureProjectionJobs(f.repoRoot, { consumerRoot: f.consumerRoot, policy, sourceEvents, run });
+    expect(next).toMatchObject({ status: 'idle', sourceEventIds: ['event-restamp'], acknowledgeSourceEvents: true });
+    expect(requests).toHaveLength(1);
+  });
+
+  test('owned-only source events preserve a failed pending attempt without acknowledging it', () => {
+    const f = fixture();
+    const pending = enqueueArchitectureProjectionJob(realpathSync(f.repoRoot), ['event-before-restamp'], ['source-before-restamp'], ['src/index.ts'])!;
+    let projectionCalls = 0;
+    const result = drainArchitectureProjectionJobs(f.repoRoot, {
+      consumerRoot: f.consumerRoot, policy,
+      sourceEvents: [{ event_id: 'event-restamp', source_key: 'source-restamp', changed_paths: ['docs/architecture/index.md'] }],
+      run: (_binary, args) => {
+        if (args[0] === 'capabilities') return capabilities();
+        projectionCalls += 1;
+        return { status: 1, signal: null, stdout: '', stderr: 'provider unavailable' };
+      },
+    });
+    expect(result).toMatchObject({ status: 'retry-pending', jobId: pending.jobId, sourceEventIds: pending.sourceEventIds, acknowledgeSourceEvents: false });
+    expect(projectionCalls).toBe(1);
+    expect(result.queue).toMatchObject({ pending: 1, running: 0, receipts: 0, deadLetters: 0 });
+    const retained = JSON.parse(readFileSync(join(f.repoRoot, '.ai/harness/architecture-projection/pending', `${pending.jobId}.json`), 'utf8'));
+    expect(retained).toMatchObject({ attempt: 1, sourceEventIds: pending.sourceEventIds, changedPaths: ['src/index.ts'], lastFailure: { kind: 'process' } });
+  });
+
   test('suppresses projection-owned docs and context paths without spawning', () => {
     const f = fixture();
     for (const path of ['docs/architecture/index.md', 'AGENTS.md', 'CLAUDE.md']) {
@@ -680,6 +724,26 @@ describe('durable architecture projection orchestration', () => {
     expect(drained.acknowledgeSourceEvents).toBe(true);
     expect(projectionCalls.count).toBe(0);
     expect(architectureProjectionQueueState(f.repoRoot).pending).toBe(0);
+  });
+
+  test('one host configuration drives durable projection jobs in two repos without policy overrides', () => {
+    const home = mkdtempSync(join(tmpdir(), 'global-projection-drain-'));
+    roots.push(home);
+    mkdirSync(join(home, '.repo-harness'));
+    writeFileSync(join(home, '.repo-harness/config.json'), JSON.stringify({ architecture: {
+      projection_provider: 'archctx', projection_apply: 'automatic', projection_failure_gate: 'advisory',
+    } }));
+    for (let index = 0; index < 2; index += 1) {
+      const f = fixture();
+      writeFileSync(join(f.repoRoot, '.ai/harness/policy.json'), '{}\n');
+      runMutationObserved({ collector: f.collector, input: JSON.stringify({ file_path: 'src/index.ts', session_id: `global-${index}` }) });
+      const calls = { count: 0 };
+      const result = drain(f.repoRoot, { env: { ...process.env, HOME: home }, consumerRoot: f.consumerRoot, run: successfulRunner(calls) });
+      expect(result.status).toBe('succeeded');
+      expect(result.acknowledgeSourceEvents).toBe(true);
+      expect(calls.count).toBe(1);
+      expect(architectureProjectionQueueState(f.repoRoot).pending).toBe(0);
+    }
   });
 
   test('disabled provider does not spawn and leaves legacy architecture cascade authority to the caller', () => {
@@ -742,7 +806,7 @@ describe('durable architecture projection orchestration', () => {
 
   test('manual drain leaves the cursor unchanged when the legacy cascade helper fails', () => {
     const f = fixture();
-    writeFileSync(join(f.repoRoot, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"disabled","projection_apply":"disabled"}}\n');
+    // An empty fixture HOME selects disabled projection through the global authority.
     runMutationObserved({ collector: f.collector, input: JSON.stringify({ file_path: 'src/rollback.ts', session_id: 'rollback' }) });
     writeFileSync(join(f.repoRoot, 'src/shell-written.ts'), 'export const written = 1;\n');
     const failingCli = join(dirname(f.repoRoot), 'failing-cascade-cli.ts');
@@ -750,7 +814,7 @@ describe('durable architecture projection orchestration', () => {
     const cli = realpathSync(join(import.meta.dir, '..', 'src', 'cli', 'index.ts'));
     const result = spawnSync(process.execPath, [cli, 'architecture-projection', 'drain', '--json'], {
       cwd: f.repoRoot,
-      env: { ...process.env, REPO_HARNESS_CLI: failingCli },
+      env: { ...process.env, HOME: dirname(f.repoRoot), REPO_HARNESS_CLI: failingCli },
       encoding: 'utf8',
     });
     expect(result.status).toBe(1);
@@ -819,7 +883,7 @@ describe('durable architecture projection orchestration', () => {
     expect(first[0]?.actions[0]?.outputDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
-  test('typed refresh authority runs canonical sync actions even when architecture-queue reports no drift card', () => {
+  test('explicit architecture refresh records provider facts without automatic queues or context writes', () => {
     const f = fixture();
     const bin = join(dirname(f.repoRoot), 'refresh-bin');
     const calls = join(dirname(f.repoRoot), 'refresh-calls.txt');
@@ -839,19 +903,11 @@ describe('durable architecture projection orchestration', () => {
     const [receipt] = consumeArchitectureRefreshSignals(f.repoRoot, [signal], ['src/index.ts'], {
       env: { ...process.env, PATH: bin, AXR6_REFRESH_CALLS: calls },
     });
-    expect(receipt?.actions.map((action) => action.action)).toEqual([
-      'architecture-queue',
-      'context-contract-sync',
-      'capability-context-request',
-    ]);
-    expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual([
-      'run architecture-queue record --file src/index.ts',
-      'run context-contract-sync sync-latest',
-      'capability-context request --from-latest-architecture-event',
-    ]);
+    expect(receipt?.actions).toEqual([]);
+    expect(existsSync(calls)).toBe(false);
   });
 
-  test('default refresh runner checkpoints each successful action before the next deadline check', () => {
+  test('default refresh produces a fact receipt without per-edit work even when no execution budget remains', () => {
     const f = fixture();
     const bin = join(dirname(f.repoRoot), 'checkpoint-bin');
     mkdirSync(bin, { recursive: true });
@@ -869,30 +925,11 @@ describe('durable architecture projection orchestration', () => {
       resultingDigests: { modelDigest: digest('c'), sourceTreeDigest: digest('d'), flowProofDigest: digest('e'), projectionDigest: digest('f') },
       projectionReceiptDigest: digest('0'),
     };
-    let clockReads = 0;
-    expect(() => consumeArchitectureRefreshSignals(f.repoRoot, [signal], ['src/a.ts', 'src/b.ts'], {
-      env: { ...process.env, PATH: bin },
-      // deadlineMs minus the virtual now is handed to spawnSync as a REAL
-      // wall-clock kill timer; keep the derived budget generous so a loaded
-      // machine cannot SIGTERM the fake action before the second clock read.
-      deadlineMs: 30_000,
-      nowMs: () => clockReads++ === 0 ? 0 : 60_000,
-    })).toThrow('timeout before canonical action');
-    const progressPath = join(f.repoRoot, '.ai/harness/architecture-projection/refresh-progress', `${signal.signalId.replace(/^sha256:/, '')}.json`);
-    expect(JSON.parse(readFileSync(progressPath, 'utf8')).actions.map((entry: { actionKey: string }) => entry.actionKey)).toEqual(['architecture-queue:src/a.ts']);
-    let resumedFrom: string[] = [];
-    const [receipt] = consumeArchitectureRefreshSignals(f.repoRoot, [signal], ['src/a.ts', 'src/b.ts'], {
-      run: (_root, _signal, _paths, _env, completed) => {
-        resumedFrom = [...completed];
-        return [
-          { actionKey: 'architecture-queue:src/b.ts', action: 'architecture-queue', status: 0, stdout: '', stderr: '' },
-          { actionKey: 'context-contract-sync', action: 'context-contract-sync', status: 0, stdout: '', stderr: '' },
-          { actionKey: 'capability-context-request', action: 'capability-context-request', status: 0, stdout: '', stderr: '' },
-        ];
-      },
-    });
-    expect(resumedFrom).toEqual(['architecture-queue:src/a.ts']);
-    expect(receipt?.actions).toHaveLength(4);
+    const [receipt] = consumeArchitectureRefreshSignals(f.repoRoot, [signal], ['src/a.ts'], { deadlineMs: 1, nowMs: () => 2 });
+    expect(receipt?.actions).toEqual([]);
+    expect(existsSync(join(f.repoRoot, 'tasks/workstreams'))).toBe(false);
+    expect(readFileSync(join(f.repoRoot, 'AGENTS.md'), 'utf8')).toBe('# agents\n');
+    expect(readFileSync(join(f.repoRoot, 'CLAUDE.md'), 'utf8')).toBe('# claude\n');
   });
 
   test('refresh retry resumes after the last durable action progress record', () => {

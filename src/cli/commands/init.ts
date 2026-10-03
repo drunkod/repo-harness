@@ -1,3 +1,7 @@
+import { readGlobalArchitectureConfiguration } from '../../effects/architecture/projection-config';
+import { inspectArchitectureProjectionReadiness } from '../../effects/architecture/archctx-provider';
+import { ensureGlobalArchitectureProjection } from './architecture-configuration';
+import { ensureGlobalRefactorRecommendations } from './refactor-recommendation-configuration';
 /**
  * Existing-repo harness bootstrap/update implementation.
  *
@@ -17,6 +21,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  lstatSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -33,7 +38,9 @@ import {
   probeExpectations as catalogProbeExpectations,
   type SkillSurfaceCatalog,
 } from "../../core/skill-surface/catalog";
-import { PROFILE_COMPONENTS } from "../installer/install-profile";
+import { skillTreeSha256 } from "../../effects/skill-tree-integrity";
+import { withRuntimeHostTransactionLock } from "../installer/runtime-host-lock";
+import { beginInstallHostTransaction, commitInstallHostTransaction, rollbackInstallHostTransaction, managedInstallSurfaceIsCurrent, readInstalledProfile, PROFILE_COMPONENTS } from "../installer/install-profile";
 import {
   defaultBrainRootChoice,
   discoverBrainRootChoices,
@@ -42,13 +49,6 @@ import {
 } from "./brain-root";
 import { configureCodegraph, ensureCodegraph } from "../tools/codegraph";
 import { runProcess as runBoundedProcess } from "../../effects/process-runner";
-import {
-  inspectOfficialCodexPluginInventory,
-  inspectOfficialCodexPluginReadiness,
-  OFFICIAL_CODEX_MARKETPLACE,
-  OFFICIAL_CODEX_MARKETPLACE_NAME,
-  OFFICIAL_CODEX_PLUGIN_ID,
-} from "../../effects/review/codex-plugin-provider";
 import { askConfirm, writeLine } from "../tty-prompt";
 import { validateRepoAdoptionTarget } from "../repo-adoption/target";
 import { runAdoptionApply, runAdoptionPlan } from "./adoption-plan";
@@ -82,7 +82,7 @@ export interface GlobalContextOptions {
 
 /**
  * Host-scoped skills bundled under `assets/skills/<skill>`. The cross-review
- * skill is host-aware; claude-plan remains a Codex-host external-brain consult.
+ * skill is host-aware; task-agent owns persistent plan consultation.
  */
 type BundledHostSkill = { skill: string; host: "claude" | "codex"; step: string };
 type BundledHostAgent = { source: string; agent: string; host: "claude" | "codex"; step: string };
@@ -112,7 +112,7 @@ function loadSkillSurfaceCatalog(sourceRoot: string): SkillSurfaceCatalog {
  * The unconditional (no installed-profile concept in this init flow)
  * cross-review/external-brain bundle: repo-harness-cross-review on both
  * claude and codex (host-aware provider mode selection lives inside the
- * package), plus claude-plan on codex only. Step-name prefix mirrors the
+ * package). Step-name prefix mirrors the
  * catalog's cross-model-acceptance vs. adaptive-workflow component split
  * (the same split that separates "cross-review skill" from "external-brain
  * skill" naming below).
@@ -444,8 +444,10 @@ function syncBundledItemsAtHome(
   home: string | null,
   skills: ReadonlyArray<BundledHostSkill>,
   agents: ReadonlyArray<BundledHostAgent>,
+  env?: NodeJS.ProcessEnv,
 ): InitStep[] {
   const steps: InitStep[] = [];
+  const installed = home ? readInstalledProfile({ ...env, HOME: home }) : null;
   for (const { skill, host, step } of skills) {
     if (target !== "both" && target !== host) continue;
     if (!home) {
@@ -465,17 +467,29 @@ function syncBundledItemsAtHome(
     if (
       existsSync(dest) &&
       (samePath(source, dest) ||
-        (existsSync(destSkill) && readFileSync(destSkill, "utf-8") === readFileSync(srcSkill, "utf-8")))
+        (existsSync(destSkill) && lstatSync(dest).isDirectory() && skillTreeSha256(dest) === skillTreeSha256(source)))
     ) {
       steps.push({ step, status: "ok", detail: "already present" });
       continue;
     }
     if (existsSync(dest)) {
-      steps.push({
-        step,
-        status: "failed",
-        detail: `refusing to overwrite unowned or modified skill at ${dest}`,
-      });
+      const owned = installed?.ownership_manifest.find(surface =>
+        surface.path === dest && surface.type === "directory-copy");
+      if (!owned || !managedInstallSurfaceIsCurrent(owned)) {
+        steps.push({ step, status: "failed", detail: `refusing to overwrite unowned or modified skill at ${dest}` });
+        continue;
+      }
+      const transaction = beginInstallHostTransaction([dest], { HOME: home });
+      try {
+        // Replace the verified old tree so retired references cannot survive an upgrade.
+        rmSync(dest, { recursive: true });
+        cpSync(source, dest, { recursive: true });
+        commitInstallHostTransaction(transaction);
+        steps.push({ step, status: "ok", detail: `synced ${dest}` });
+      } catch (error) {
+        rollbackInstallHostTransaction(transaction);
+        steps.push({ step, status: "failed", detail: `cannot update bundled skill ${dest}: ${String(error)}` });
+      }
       continue;
     }
     cpSync(source, dest, { recursive: true });
@@ -515,77 +529,8 @@ export function syncCrossReviewSkills(
   env?: NodeJS.ProcessEnv,
 ): InitStep[] {
   const catalog = loadSkillSurfaceCatalog(sourceRoot);
-  const steps = syncBundledItemsAtHome(sourceRoot, target, homeDir(env), crossReviewSkillsFromCatalog(catalog), []);
-  if (target === "codex" || target === "both") steps.push(ensureOfficialCodexPlugin(sourceRoot, env));
+  const steps = syncBundledItemsAtHome(sourceRoot, target, homeDir(env), crossReviewSkillsFromCatalog(catalog), [], env);
   return steps;
-}
-
-function marketplaceConfigured(stdout: string): boolean | null {
-  try {
-    const value: unknown = JSON.parse(stdout);
-    if (!Array.isArray(value)) return null;
-    const matches = value.filter((entry) => {
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
-      const item = entry as { name?: unknown; repo?: unknown };
-      return item.name === OFFICIAL_CODEX_MARKETPLACE_NAME;
-    });
-    if (matches.length > 1) return null;
-    if (matches.length === 0) return false;
-    return (matches[0] as { repo?: unknown }).repo === OFFICIAL_CODEX_MARKETPLACE;
-  } catch {
-    return null;
-  }
-}
-
-function ensureOfficialCodexPlugin(cwd: string, env?: NodeJS.ProcessEnv): InitStep {
-  const claudeCommand = env?.REPO_HARNESS_CLAUDE_EXECUTABLE ?? "claude";
-  let inspection = inspectOfficialCodexPluginInventory(cwd, { env, claudeCommand });
-  if (inspection.status === "failed") {
-    return {
-      step: "official Codex plugin",
-      status: "failed",
-      command: [...inspection.invocation.command],
-      stderr: inspection.message,
-    };
-  }
-  if (inspection.status === "missing") {
-    const marketplaces = runProcess(claudeCommand, ["plugin", "marketplace", "list", "--json"], cwd, env);
-    if (marketplaces.status === "failed") return withStepName(marketplaces, "official Codex plugin", "marketplace inventory failed");
-    const configured = marketplaceConfigured(marketplaces.stdout ?? "");
-    if (configured === null) {
-      return {
-        step: "official Codex plugin",
-        status: "failed",
-        command: marketplaces.command,
-        stderr: `marketplace ${OFFICIAL_CODEX_MARKETPLACE_NAME} is duplicated, malformed, or does not point to ${OFFICIAL_CODEX_MARKETPLACE}`,
-      };
-    }
-    if (!configured) {
-      const added = runProcess(claudeCommand, ["plugin", "marketplace", "add", OFFICIAL_CODEX_MARKETPLACE], cwd, env);
-      if (added.status === "failed") return withStepName(added, "official Codex plugin", "marketplace add failed");
-    }
-    const installed = runProcess(claudeCommand, ["plugin", "install", OFFICIAL_CODEX_PLUGIN_ID, "-s", "user", "-y"], cwd, env);
-    if (installed.status === "failed") return withStepName(installed, "official Codex plugin", "install failed");
-    inspection = inspectOfficialCodexPluginInventory(cwd, { env, claudeCommand });
-  }
-  if (inspection.status === "disabled") {
-    const enabled = runProcess(claudeCommand, ["plugin", "enable", OFFICIAL_CODEX_PLUGIN_ID, "-s", "user"], cwd, env);
-    if (enabled.status === "failed") return withStepName(enabled, "official Codex plugin", "enable failed");
-    inspection = inspectOfficialCodexPluginInventory(cwd, { env, claudeCommand });
-  }
-  const readiness = inspection.status === "ready"
-    ? inspectOfficialCodexPluginReadiness(cwd, { env, claudeCommand })
-    : inspection;
-  if (readiness.status !== "ready") {
-    const detail = readiness.status === "failed" ? readiness.message : `readback status=${readiness.status}`;
-    return { step: "official Codex plugin", status: "failed", detail, stderr: detail };
-  }
-  return {
-    step: "official Codex plugin",
-    status: "ok",
-    command: [...readiness.invocation.command],
-    detail: `enabled ${OFFICIAL_CODEX_PLUGIN_ID} version=${String(readiness.plugin.version)}`,
-  };
 }
 
 function syncWazaSharedRules(target: InstallTargetSpec, env?: NodeJS.ProcessEnv): InitStep {
@@ -818,6 +763,20 @@ export function runInit(
     });
   }
 
+  if (apply && migrate.status === "ok") {
+    try {
+      // Install/update snapshot and roll back this same account configuration.
+      // Join their lock before either initializer reads its current values.
+      withRuntimeHostTransactionLock(commandEnv, () => {
+        const architecture = ensureGlobalArchitectureProjection(commandEnv);
+        steps.push(architecture);
+        if (architecture.status === "ok") steps.push(ensureGlobalRefactorRecommendations(commandEnv));
+      });
+    } catch (error) {
+      steps.push({ step: "global automation defaults", status: "failed", detail: String(error) });
+    }
+  }
+
   if (externalSkills && apply && migrate.status === "ok") {
     steps.push(...installExternalSkills(sourceRoot, target, commandEnv));
   } else {
@@ -949,6 +908,23 @@ export function runInit(
     steps.push(withStepName(verifyStep, "verify repo harness", "repo-harness run check-task-workflow --strict"));
   } else {
     steps.push({ step: "verify repo harness", status: "skipped" });
+  }
+
+  if (apply && adoption.exitCode === 0 && mode !== 'minimal') {
+    try {
+      const { initialized } = readGlobalArchitectureConfiguration(commandEnv);
+      const readiness = inspectArchitectureProjectionReadiness(repoRoot, { env: commandEnv });
+      const provider = readiness.projectionProvider;
+      steps.push({
+        step: 'architecture projection readiness',
+        status: !initialized ? 'skipped' : provider.state === 'ready' || provider.state === 'disabled' ? 'ok' : 'failed',
+        detail: !initialized ? 'global architecture is not initialized; run repo-harness update once for this account' : provider.state === 'ready' && !readiness.apply.enabled
+          ? 'global provider ready; project architecture model is not ready for apply; run repo-harness architecture-projection status --json'
+          : provider.reason,
+      });
+    } catch (error) {
+      steps.push({ step: 'architecture projection readiness', status: 'failed', detail: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   const failed = steps.some((step) => step.status === "failed");

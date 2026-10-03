@@ -12,7 +12,9 @@ import {
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(SCRIPT_DIR, '..', '..', '..');
-const PACKAGE_HELPERS_ROOT = join(PACKAGE_ROOT, 'assets', 'templates', 'helpers');
+// Packaged authoring scripts are the sole executable helper authority.
+// Frozen downstream templates are scaffold inputs, never a runtime fallback.
+const PACKAGE_HELPERS_ROOT = join(PACKAGE_ROOT, 'scripts');
 const PACKAGE_CONTRACT = join(PACKAGE_ROOT, 'assets', 'workflow-contract.v1.json');
 const PACKAGE_WORKFLOW_STATE = join(PACKAGE_ROOT, 'assets', 'hooks', 'lib', 'workflow-state.sh');
 const PROTECTED_HELPERS = new Set(['acceptance-receipt', 'contract-worktree', 'ship-worktrees', 'merge-gate']);
@@ -423,6 +425,9 @@ export function runHelper(opts: RunHelperOptions): RunHelperResult {
     childEnv.REPO_HARNESS_BASH_BIN = trustedBash;
     childEnv.REPO_HARNESS_GIT_BIN = trustedGit;
     childEnv.REPO_HARNESS_BUN_BIN = process.execPath;
+    childEnv.REPO_HARNESS_CLI_BIN = resolveFromDir(
+      'index.ts', join(PACKAGE_ROOT, 'src', 'cli'), 'package', resolved.repoRoot,
+    ).path;
     childEnv.REPO_HARNESS_HOOK_CLI = resolveFromDir(
       'hook-entry.ts', join(PACKAGE_ROOT, 'src', 'cli'), 'package', resolved.repoRoot,
     ).path;

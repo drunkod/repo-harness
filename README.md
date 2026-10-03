@@ -120,6 +120,11 @@ bun test
 
 ### Success looks like this
 
+Successful init enables automatic architecture document projection and proactive
+Stop-hook refactor recommendations when those preferences are unset. Explicit
+disabled choices are preserved. Suggestions present evidence for a user decision;
+they do not authorize a refactor. Dry-run does not write these preferences.
+
 Apply ends with `=== Migration Report ===`, naming where generated hook behavior
 comes from, the user-level `~/.claude/settings.json` and `~/.codex/hooks.json`
 adapter target, the repo-local surfaces created or refreshed, the
@@ -439,15 +444,12 @@ revision to a task that already has an approved plan and contract.
 ### Persistent acceptance review
 
 ```bash
-repo-harness claude-review round --timeout-ms 1800000
-repo-harness claude-review status
-repo-harness claude-review close
+repo-harness review round --contract tasks/contracts/<task>.contract.md --reviewer-repo <linked-checkout> --herdr-endpoint <address.json>
+repo-harness review status --contract tasks/contracts/<task>.contract.md
+repo-harness review close --contract tasks/contracts/<task>.contract.md
 ```
 
-A read-only Claude reviewer hosted in an owned herdr session that survives up to
-three repair rounds against prepared `verify-sprint` evidence. A repeat session
-past the round budget is refused with
-`claude_review_session_budget_exhausted`.
+A dedicated linked checkout hosts one fleet `deep-reasoner` task-agent in the addressed Herdr session for at most three repair rounds. Default selection uses the owner’s opposite harness; `--harness` explicitly selects Claude or Codex. Only a missing executable before start allows a reported fallback. File Results pass domain binding/finding checks and the generic-review Receipt writer/verifier before close. Terminal history is observation. Claude uses an exact result-file allowlist plus mutation fingerprints; production OS write isolation and complete large-packet ingestion remain unverified.
 
 ## Hooks
 
@@ -507,9 +509,9 @@ paths.
 
 As an optional sidecar, `repo-harness mcp` exposes workflow artifacts to MCP
 clients through the default `planner` profile. ChatGPT reads real repo state and
-moves an idea through PRD, checklist Sprint, and Codex goal handoff artifacts —
+moves an idea through PRD, checklist Sprint, and task goal handoff artifacts —
 with no default source-code write access, arbitrary shell execution, or default
-runner. Codex remains the executor.
+runner. The task owner directs an explicitly addressed Herdr agent to execute the task goal.
 
 ```bash
 repo-harness mcp setup chatgpt --repo .
@@ -522,8 +524,8 @@ the human workflow is:
 1. ChatGPT reads repo-harness workflow files through MCP.
 2. ChatGPT writes a PRD with `write_prd_from_idea`.
 3. ChatGPT writes a checklist Sprint with `write_checklist_sprint`.
-4. ChatGPT prepares `.ai/harness/handoff/codex-goal.md` with `prepare_codex_goal_from_sprint`.
-5. Codex runs the host-native `/goal` prompt and stages each completed Sprint phase.
+4. ChatGPT prepares `.ai/harness/handoff/task-goal.md` with `prepare_task_goal_from_sprint`.
+5. The task owner sends the generated execution prompt to an explicitly addressed Herdr agent and stages each completed Sprint phase.
 
 General repo reader/writer tools, snapshot and index consistency, server
 profiles, and the opt-in dev runner:
@@ -581,8 +583,7 @@ hooks own execution.
 | `repo-harness-check` | Workflow and release checks plus a deploy-readiness reference |
 | `repo-harness-ship` | Validate finished worktrees, push branches, and open PRs |
 | `repo-harness-architecture` | Architecture docs, drift requests, and diagrams without a full harness refresh |
-| `repo-harness-cross-review` | Independent outside review: Claude hosts use direct Codex; Codex hosts use OpenAI's official `codex@openai-codex` plugin app-server runtime |
-| `claude-plan` | Codex-side provider skill: independent Claude plan-mode consult for a design fork or high-stakes decision; not a direct user entrypoint |
+| `repo-harness-cross-review` | Generic acceptance through persistent fleet deep-reasoner task-agent + Herdr review; direct advisory runtime retired |
 | `repo-harness-chatgpt` | Oracle browser/GPT Pro consults, MCP Connector setup, and bridge handoff; explicit setup only |
 | `merge-gate` (external) | Exact-candidate final gate; repo-harness ships no merge-gate Skill — see [external tooling](docs/reference-configs/external-tooling.md) |
 
@@ -660,8 +661,8 @@ repo-harness commit scripts or hooks unless that repo adopts the same policy.
 
 ## Current Release
 
-- npm package: `repo-harness@0.19.0`
-- Generated workflow stamp: `repo-harness@0.19.0+template@0.19.0`
+- npm package: `repo-harness@0.20.0`
+- Generated workflow stamp: `repo-harness@0.20.0+template@0.20.0`
 - GitHub repository: `Ancienttwo/repo-harness`
 - Release notes and history: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 

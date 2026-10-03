@@ -21,6 +21,27 @@ function cleanup(path: string): void {
 }
 
 describe("canonical adoption plan", () => {
+  test("adoption supplies the Herdr pin to old repositories and preserves explicit floors", () => {
+    const repo = tempRepo();
+    const pin = JSON.parse(readFileSync(join(ROOT, ".ai/harness/policy.json"), "utf8")).external_tooling.herdr;
+    try {
+      mkdirSync(join(repo, ".ai/harness"), { recursive: true });
+      writeFileSync(join(repo, ".ai/harness/policy.json"), JSON.stringify({ external_tooling: { routing: { custom: "kept" } } }));
+      const plan = planAdoption({ repoRoot: repo, mode: "standard", apply: true });
+      const operation = plan.operations.find(op => op.path === ".ai/harness/policy.json");
+      if (!operation || operation.kind !== "writeFile") throw new Error("policy operation missing");
+      expect(JSON.parse(operation.content).external_tooling.herdr).toEqual(pin);
+      expect(applyAdoptionPlan(plan).ok).toBe(true);
+      const policy = JSON.parse(readFileSync(join(repo, ".ai/harness/policy.json"), "utf8"));
+      expect(policy.external_tooling.herdr).toEqual(pin);
+      policy.external_tooling.herdr.min_version = "99.0.0";
+      writeFileSync(join(repo, ".ai/harness/policy.json"), JSON.stringify(policy));
+      const next = planAdoption({ repoRoot: repo, mode: "standard" }).operations.find(op => op.path === ".ai/harness/policy.json");
+      if (!next || next.kind !== "writeFile") throw new Error("policy operation missing");
+      expect(JSON.parse(next.content).external_tooling.herdr.min_version).toBe("99.0.0");
+    } finally { cleanup(repo); }
+  });
+
   test("standard plan is a complete repo-local projection and does not install root helpers", () => {
     const repo = tempRepo();
     try {
@@ -31,7 +52,7 @@ describe("canonical adoption plan", () => {
         throw new Error("expected a writeFile operation for .ai/harness/policy.json");
       }
       const generatedPolicy = JSON.parse(policyOperation.content);
-      expect(generatedPolicy.agent_runtime).toEqual({ mode: 'off', adapters: { 'codex-app-thread': { enabled: false }, 'herdr-cli-agent': { enabled: false } } });
+      expect(generatedPolicy.agent_runtime).toEqual({ mode: 'off', adapters: { 'herdr-cli-agent': { enabled: false } } });
       expect(generatedPolicy.agentic_development.routing.design_options_choice).toBe("convention:design-options");
       expect(plan.operations.some((operation) => operation.path === ".ai/context/capabilities.json")).toBe(true);
       expect(plan.operations.some((operation) => operation.path === "deploy/README.md")).toBe(true);
@@ -75,7 +96,7 @@ describe("canonical adoption plan", () => {
       const apply = applyAdoptionPlan(planAdoption({ repoRoot: repo, mode: "standard", apply: true }));
 
       expect(apply.ok).toBe(true);
-      expect(JSON.parse(readFileSync(join(repo, '.ai/harness/policy.json'), 'utf8')).agent_runtime.adapters).toEqual({ 'codex-app-thread': {enabled:false}, 'herdr-cli-agent': {enabled:false} });
+      expect(JSON.parse(readFileSync(join(repo, '.ai/harness/policy.json'), 'utf8')).agent_runtime.adapters).toEqual({ 'herdr-cli-agent': {enabled:false} });
       expect(apply.transactionManifestPath).toBeDefined();
       expect(existsSync(join(repo, ".ai", "harness", "workflow-contract.json"))).toBe(true);
       expect(existsSync(join(repo, ".ai", "harness", "policy.json"))).toBe(true);
@@ -507,9 +528,12 @@ describe("init command cutover", () => {
       const apply = spawnSync("bun", [CLI, "init", "--repo", repo, "--mode", "minimal", "--no-verify", "--no-codegraph", "--json"], {
         cwd: ROOT,
         encoding: "utf-8",
-        env: { ...process.env, REPO_HARNESS_HOME: home },
+        env: { ...process.env, HOME: home, REPO_HARNESS_HOME: join(home, ".repo-harness") },
       });
       expect(apply.status).toBe(0);
+      const config = JSON.parse(readFileSync(join(home, ".repo-harness", "config.json"), "utf8"));
+      expect(config.architecture.projection_apply).toBe("automatic");
+      expect(config.refactor_recommendations.enabled).toBe(true);
       expect(existsSync(join(repo, ".ai", "harness", "workflow-contract.json"))).toBe(true);
       const retired = spawnSync("bun", [CLI, "init", "--experimental-ts-apply"], { cwd: ROOT, encoding: "utf-8" });
       expect(retired.status).toBe(1);

@@ -14,6 +14,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
 
+import { copyHelpers } from "./helpers/helper-script-fixture";
+
 const ROOT = join(import.meta.dir, "..");
 const REAL_GIT = Bun.which("git");
 if (!REAL_GIT) throw new Error("git executable is required for contract-worktree publication tests");
@@ -102,10 +104,7 @@ function installFixture(container: string): { primary: string; linked: string } 
     "src/cli",
   ]) mkdirSync(join(primary, dir), { recursive: true });
 
-  for (const helper of ["contract-worktree.sh", "worktree-merge-lib.sh", "archive-workflow.sh"]) {
-    copyFileSync(join(ROOT, "scripts", helper), join(primary, "scripts", helper));
-    chmodSync(join(primary, "scripts", helper), 0o755);
-  }
+  copyHelpers(primary, { linkDependencies: false });
   copyFileSync(join(ROOT, "assets/hooks/lib/workflow-state.sh"), join(primary, ".ai/hooks/lib/workflow-state.sh"));
   writeFileSync(join(primary, "scripts/acceptance-receipt.ts"), "process.exit(0);\n");
   writeFileSync(
@@ -116,7 +115,7 @@ function installFixture(container: string): { primary: string; linked: string } 
       'const counterFile = process.env.MERGE_GATE_COUNTER_FILE;',
       'const count = counterFile ? Number(readFileSync(counterFile, "utf-8") || "0") + 1 : 0;',
       'if (counterFile) writeFileSync(counterFile, String(count));',
-      'if (process.env.MOVE_TARGET_ON_SECOND_GATE === "1" && count === 2) {',
+      'if (process.env.MOVE_TARGET_ON_GATE === "1" && count === 1) {',
       '  const moved = spawnSync("git", ["-C", process.env.PUBLICATION_TARGET_WORKTREE!, "commit", "--allow-empty", "-m", "concurrent target movement"], { encoding: "utf-8" });',
       '  if (moved.status !== 0) process.exit(moved.status ?? 1);',
       '}',
@@ -133,6 +132,7 @@ function installFixture(container: string): { primary: string; linked: string } 
       'import { mkdirSync, writeFileSync } from "fs";',
       'import { join } from "path";',
       'const args = process.argv.slice(2);',
+      'if (args[0] === "architecture-projection" && args[1] === "policy") { console.log(JSON.stringify({ provider: "archctx", applyMode: "automatic" })); process.exit(0); }',
       'if (args[0] !== "architecture-projection" || args[1] !== "acknowledge-publication") process.exit(64);',
       'const shaIndex = args.indexOf("--publication-sha");',
       'const publicationSha = shaIndex >= 0 ? args[shaIndex + 1] : "";',
@@ -280,9 +280,7 @@ describe("contract-worktree single publication commit", () => {
         .toBe('{"projection":"reviewed-with-contract"}\n');
       expect(run("git", ["show", "--pretty=format:", "--name-only", "main"], primary).stdout)
         .toContain("docs/architecture/.projection-manifest.json");
-      expect(
-        JSON.parse(readFileSync(join(primary, ".ai/harness/state/architecture-drift-cursor.json"), "utf-8")),
-      ).toEqual({ head_sha: published });
+      expect(existsSync(join(primary, ".ai/harness/state/architecture-drift-cursor.json"))).toBe(false);
       expect(existsSync(join(primary, "plans/archive"))).toBe(true);
 
       const attempts = finishAttempts(primary);
@@ -311,7 +309,7 @@ describe("contract-worktree single publication commit", () => {
 
       const finish = run("bash", ["scripts/contract-worktree.sh", "finish", "--merge"], linked, {
         MERGE_GATE_COUNTER_FILE: counterFile,
-        MOVE_TARGET_ON_SECOND_GATE: "1",
+        MOVE_TARGET_ON_GATE: "1",
         PUBLICATION_TARGET_WORKTREE: primary,
       });
 
@@ -545,7 +543,7 @@ describe("contract-worktree finish cleans up the merged worktree", () => {
       // Cleanup runs strictly after the transaction commits: it must not be
       // able to unwind the publication it just proved was absorbed.
       expect(run("git", ["log", "-1", "--format=%s", "main"], primary).stdout.trim()).toBe(
-        "feat(contract): complete demo",
+        "feat: complete demo",
       );
       expect(existsSync(join(primary, "src/change.ts"))).toBe(true);
     } finally {
@@ -591,7 +589,7 @@ describe("contract-worktree finish cleans up the merged worktree", () => {
         run("git", ["show-ref", "--verify", "--quiet", "refs/heads/codex/demo"], primary).status,
       ).toBe(0);
       expect(run("git", ["log", "-1", "--format=%s", "main"], primary).stdout.trim()).toBe(
-        "feat(contract): complete demo",
+        "feat: complete demo",
       );
     } finally {
       rmSync(container, { recursive: true, force: true });

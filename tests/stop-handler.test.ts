@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync, mkdirSync, symlinkSync } from 'fs';
 import { spawnSync } from 'child_process';
 import { dirname, join } from 'path';
 import { tmpdir } from 'os';
 import type { EffectiveState } from '../src/core/state/types';
-import { runStopHandler, type StopProjectionTarget } from '../src/cli/hook/stop-handler';
+import { runStopHandler as runStopHandlerRuntime, type StopProjectionTarget } from '../src/cli/hook/stop-handler';
+import { observeRefactorRecommendations } from '../src/effects/refactor/recommendations';
+import { RUN_SUMMARY_RETENTION_COUNT } from '../src/effects/run-summary-retention';
 import { consumePendingPostEditEvents, readPendingPostEditEvents } from '../src/cli/hook/mutation-observed';
 import { advanceArchitectureDriftCursor, computeArchitectureDriftChangedSet, readArchitectureDriftCursor } from '../src/cli/hook/architecture-drift';
 
@@ -14,10 +16,15 @@ afterEach(() => {
   while (fixtures.length > 0) rmSync(fixtures.pop()!, { recursive: true, force: true });
 });
 
+function runStopHandler(options: Parameters<typeof runStopHandlerRuntime>[0]) {
+  return runStopHandlerRuntime({ ...options, env: { ...process.env, ...options.env, HOME: join(options.collector.getRepoRoot(), '.ai/harness/test-home') } });
+}
+
 function fixture(): string {
   const cwd = mkdtempSync(join(tmpdir(), 'repo-harness-stop-handler-'));
   fixtures.push(cwd);
   mkdirSync(join(cwd, '.ai/harness'), { recursive: true });
+  mkdirSync(join(cwd, '.ai/harness/test-home/.repo-harness'), { recursive: true });
   writeFileSync(join(cwd, '.ai/harness/policy.json'), '{}\n');
   return cwd;
 }
@@ -42,7 +49,7 @@ function gitFixture(): { cwd: string; head: string } {
 }
 
 function canonicalState(options: {
-  profile?: 'lite' | 'standard' | 'strict';
+  profile?: 'routine' | 'high';
   stop?: 'allow' | 'block';
   stopReasons?: readonly string[];
   ship?: 'allow' | 'block';
@@ -51,7 +58,7 @@ function canonicalState(options: {
   const stop = options.stop ?? 'allow';
   const ship = options.ship ?? 'allow';
   return {
-    workflow_profile: options.profile ?? 'standard',
+    workflow_profile: options.profile ?? 'routine',
     review: { path: null, freshness: 'missing', recommendation: null, recorded_subject_sha256: null, recorded_target_revision: null },
     readiness: {
       ok: true,
@@ -156,427 +163,7 @@ function normalizedStopArtifacts(cwd: string, runId: string): Record<string, str
   ]));
 }
 
-describe('runStopHandler', () => {
-  test('surfaces projection retry advisory and blocks only under the independent projection failure gate', () => {
-    const failedDrain = () => ({
-      schemaVersion: 'repo-harness.architecture-projection-drain/v1' as const,
-      status: 'retry-pending' as const,
-      jobId: 'job-test', sourceEventIds: ['event-test'], resultStatus: null,
-      error: 'archctx projection failed: exit 1', acknowledgeSourceEvents: false,
-      queue: { schemaVersion: 'repo-harness.architecture-projection-queue-state/v1' as const, pending: 1, running: 0, receipts: 0, deadLetters: 0, oldestPendingJobId: 'job-test', oldestDeadLetterJobId: null },
-    });
-    const advisoryRoot = fixture();
-    writeFileSync(join(advisoryRoot, '.ai/harness/policy.json'), '{"architecture":{"projection_failure_gate":"advisory"}}\n');
-    const advisory = runStopHandler({ collector: collector(advisoryRoot, () => canonicalState()), dependencies: { drainArchitectureProjection: failedDrain } });
-    expect(advisory.exitCode).toBe(0);
-    expect(advisory.stderr).toContain('[ArchitectureProjection] retry-pending');
-
-    const freshnessRoot = fixture();
-    writeFileSync(join(freshnessRoot, '.ai/harness/policy.json'), '{"architecture":{"freshness_gate":"strict"}}\n');
-    const freshnessOnly = runStopHandler({ collector: collector(freshnessRoot, () => canonicalState()), dependencies: { drainArchitectureProjection: failedDrain } });
-    expect(freshnessOnly.stdout).not.toContain('Strict projection failure gate blocked Stop');
-
-    const strictRoot = fixture();
-    writeFileSync(join(strictRoot, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"archctx","projection_apply":"automatic","projection_version":"0.5.10","projection_failure_gate":"strict"}}\n');
-    const strict = runStopHandler({ collector: collector(strictRoot, () => canonicalState()), dependencies: { drainArchitectureProjection: failedDrain } });
-    expect(strict.exitCode).toBe(0);
-    expect(JSON.parse(strict.stdout).decision).toBe('block');
-    expect(strict.stdout).toContain('Strict projection failure gate blocked Stop');
-
-    const deadLetter = runStopHandler({
-      collector: collector(strictRoot, () => canonicalState()),
-      dependencies: { drainArchitectureProjection: () => ({ ...failedDrain(), status: 'dead-letter' as const }) },
-    });
-    expect(deadLetter.stdout).toContain('retry-dead-letter --job-id job-test --json');
-
-    const invalidGateRoot = fixture();
-    writeFileSync(join(invalidGateRoot, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"archctx","projection_apply":"automatic","projection_version":"0.5.10","projection_failure_gate":"block"}}\n');
-    const invalidGate = runStopHandler({ collector: collector(invalidGateRoot, () => canonicalState()), dependencies: { drainArchitectureProjection: failedDrain } });
-    expect(invalidGate.stdout).toContain('Strict projection failure gate blocked Stop');
-    expect(invalidGate.stdout).toContain('projection policy invalid');
-
-    const disabledRoot = fixture();
-    writeFileSync(join(disabledRoot, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"disabled","projection_apply":"disabled","projection_failure_gate":"strict"}}\n');
-    const disabled = runStopHandler({ collector: collector(disabledRoot, () => canonicalState()), dependencies: { drainArchitectureProjection: failedDrain } });
-    expect(disabled.exitCode).toBe(0);
-    expect(disabled.stdout).not.toContain('Strict projection failure gate blocked Stop');
-
-    const malformedInactiveRoot = fixture();
-    writeFileSync(join(malformedInactiveRoot, '.ai/harness/policy.json'), '{not-json\n');
-    const malformedInactive = runStopHandler({ collector: collector(malformedInactiveRoot, () => canonicalState()) });
-    expect(malformedInactive.exitCode).toBe(0);
-    expect(malformedInactive.stdout).not.toContain('Strict projection failure gate blocked Stop');
-    expect(malformedInactive.stderr).toContain('JSON Parse error');
-  });
-
-  test('consumes journal trigger effects independently of the projection drain outcome', () => {
-    const cwd = fixture();
-    const pending = join(cwd, '.ai/harness/journal/post-edit/pending');
-    mkdirSync(pending, { recursive: true });
-    const eventId = 'event-consumed';
-    writeFileSync(join(pending, '0123456789abcdefabcd.json'), `${JSON.stringify({
-      schema: 'change_observed',
-      schema_version: 2,
-      source_key: '0123456789abcdefabcd',
-      event_id: eventId,
-      session_id: 'session-consumed',
-      created_at: '2026-08-09T00:00:00.000Z',
-      updated_at: '2026-08-09T00:00:00.000Z',
-      changed_paths: ['src/example.ts'],
-      subject_revision: null,
-      dirty: { 'contract-verification': true, context: true, capability: true, 'minimal-change': true, checkpoint: false },
-      payload: {
-        contract_verification: { contract_file: 'tasks/contracts/example.contract.md', checks_file: '.ai/harness/checks/latest.json' },
-        minimal_change: { path: 'src/example.ts', base_ref: 'HEAD' },
-      },
-    }, null, 2)}\n`);
-    const failedDrain = () => ({
-      schemaVersion: 'repo-harness.architecture-projection-drain/v1' as const,
-      status: 'retry-pending' as const,
-      jobId: 'job-retained', sourceEventIds: ['drift-unrelated'], resultStatus: null,
-      error: 'projection failed', acknowledgeSourceEvents: false,
-      queue: { schemaVersion: 'repo-harness.architecture-projection-queue-state/v1' as const, pending: 1, running: 0, receipts: 0, deadLetters: 0, oldestPendingJobId: 'job-retained', oldestDeadLetterJobId: null },
-    });
-
-    runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      env: { ...process.env, PATH: '' },
-      dependencies: { drainArchitectureProjection: failedDrain },
-    });
-
-    // The journal no longer carries any architecture datum, so its trigger
-    // effects are never held back by the architecture lane's outcome.
-    expect(readPendingPostEditEvents(cwd)).toEqual([]);
-  });
-
-  test('advances past a contract verification timeout instead of retrying the queue head forever', () => {
-    const cwd = fixture();
-    const pending = join(cwd, '.ai/harness/journal/post-edit/pending');
-    mkdirSync(pending, { recursive: true });
-    writeFileSync(join(pending, '0123456789abcdefabcd.json'), `${JSON.stringify({
-      schema: 'change_observed',
-      schema_version: 2,
-      source_key: '0123456789abcdefabcd',
-      event_id: 'event-timeout',
-      session_id: 'session-timeout',
-      created_at: '2026-09-03T00:00:00.000Z',
-      updated_at: '2026-09-03T00:00:00.000Z',
-      changed_paths: ['src/slow-contract.ts'],
-      subject_revision: null,
-      dirty: { 'contract-verification': true, context: false, capability: false, 'minimal-change': false, checkpoint: false },
-      payload: {
-        contract_verification: { contract_file: 'tasks/contracts/slow.contract.md', checks_file: '.ai/harness/checks/latest.json' },
-      },
-    }, null, 2)}\n`);
-
-    const stubCli = join(cwd, 'slow-cli.ts');
-    writeFileSync(stubCli, 'await Bun.sleep(10_000);\n');
-    const originalWrite = process.stderr.write.bind(process.stderr);
-    const captured: string[] = [];
-    process.stderr.write = (chunk: string) => {
-      captured.push(String(chunk));
-      return true;
-    };
-    let summary;
-    const startedAt = Date.now();
-    try {
-      summary = consumePendingPostEditEvents(
-        cwd,
-        { ...process.env, REPO_HARNESS_CLI: stubCli },
-        { deadlineMs: Date.now() + 5_000, helperTimeoutMs: 100 },
-      );
-    } finally {
-      process.stderr.write = originalWrite;
-    }
-
-    expect(Date.now() - startedAt).toBeLessThan(2_000);
-    expect(summary).toMatchObject({ consumed: 1, pending: 0, errors: 1 });
-    expect(summary.warnings).toHaveLength(1);
-    expect(summary.warnings[0]).toContain('contract verification timed out');
-    expect(captured.join('')).toContain('removed pending event event-timeout');
-    expect(readPendingPostEditEvents(cwd)).toEqual([]);
-  });
-
-  test('acknowledges a minimal-change event when its remaining journal budget is exhausted', () => {
-    const cwd = fixture();
-    writeFileSync(join(cwd, '.ai/harness/policy.json'), JSON.stringify({
-      minimal_change: { mode: 'advice', post_edit_observer: true },
-    }));
-    const pending = join(cwd, '.ai/harness/journal/post-edit/pending');
-    mkdirSync(pending, { recursive: true });
-    writeFileSync(join(pending, 'fedcba9876543210abcd.json'), `${JSON.stringify({
-      schema: 'change_observed',
-      schema_version: 2,
-      source_key: 'fedcba9876543210abcd',
-      event_id: 'event-minimal-change-timeout',
-      session_id: 'session-minimal-change-timeout',
-      created_at: '2026-09-03T00:00:00.000Z',
-      updated_at: '2026-09-03T00:00:00.000Z',
-      changed_paths: ['src/minimal-change.ts'],
-      subject_revision: null,
-      dirty: { 'contract-verification': false, context: false, capability: false, 'minimal-change': true, checkpoint: false },
-      payload: { minimal_change: { path: 'src/minimal-change.ts', base_ref: 'HEAD' } },
-    }, null, 2)}\n`);
-
-    let clock = 0;
-    const summary = consumePendingPostEditEvents(
-      cwd,
-      process.env,
-      { deadlineMs: 5, nowMs: () => (clock += 3) },
-    );
-
-    expect(summary).toMatchObject({ consumed: 1, pending: 0, errors: 1 });
-    expect(summary.warnings[0]).toContain('minimal-change signals reached the journal deadline');
-    expect(readPendingPostEditEvents(cwd)).toEqual([]);
-  });
-
-  test('uses the Stop-entry deadline and acknowledges the queue head after preceding work exhausts it', () => {
-    const cwd = fixture();
-    const pending = join(cwd, '.ai/harness/journal/post-edit/pending');
-    mkdirSync(pending, { recursive: true });
-    writeFileSync(join(pending, 'aaaaaaaaaaaaaaaaaaaa.json'), `${JSON.stringify({
-      schema: 'change_observed',
-      schema_version: 2,
-      source_key: 'aaaaaaaaaaaaaaaaaaaa',
-      event_id: 'event-preceding-work-timeout',
-      session_id: 'session-preceding-work-timeout',
-      created_at: '2026-09-03T00:00:00.000Z',
-      updated_at: '2026-09-03T00:00:00.000Z',
-      changed_paths: ['src/preceding-work.ts'],
-      subject_revision: null,
-      dirty: { 'contract-verification': true, context: false, capability: false, 'minimal-change': false, checkpoint: false },
-      payload: {
-        contract_verification: { contract_file: 'tasks/contracts/slow.contract.md', checks_file: '.ai/harness/checks/latest.json' },
-      },
-    }, null, 2)}\n`);
-    const sentinel = join(cwd, 'verification-started');
-    const stubCli = join(cwd, 'sentinel-cli.ts');
-    writeFileSync(stubCli, `await Bun.write(${JSON.stringify(sentinel)}, 'started\\n');\n`);
-    let wallClock = 0;
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      env: { ...process.env, REPO_HARNESS_CLI: stubCli },
-      dependencies: {
-        wallClockMs: () => wallClock,
-        drainArchitectureProjection: () => {
-          wallClock = 25_000;
-          return {
-            schemaVersion: 'repo-harness.architecture-projection-drain/v1',
-            status: 'idle', jobId: null, sourceEventIds: [], resultStatus: null,
-            error: null, acknowledgeSourceEvents: true,
-            queue: { schemaVersion: 'repo-harness.architecture-projection-queue-state/v1', pending: 0, running: 0, receipts: 0, deadLetters: 0, oldestPendingJobId: null, oldestDeadLetterJobId: null },
-          };
-        },
-      },
-    });
-
-    expect(result.exitCode).toBe(0);
-    expect(existsSync(sentinel)).toBe(false);
-    expect(readPendingPostEditEvents(cwd)).toEqual([]);
-  });
-
-  test('advances the drift cursor only for an acknowledged architecture delivery', () => {
-    const held = gitFixture();
-    writeFileSync(join(held.cwd, 'src-shell-write.ts'), 'export const written = 1;\n');
-    const drainResult = (acknowledgeSourceEvents: boolean) => () => ({
-      schemaVersion: 'repo-harness.architecture-projection-drain/v1' as const,
-      status: acknowledgeSourceEvents ? 'succeeded' as const : 'retry-pending' as const,
-      jobId: 'job-cursor', sourceEventIds: [], resultStatus: null,
-      error: acknowledgeSourceEvents ? null : 'projection failed',
-      acknowledgeSourceEvents,
-      queue: { schemaVersion: 'repo-harness.architecture-projection-queue-state/v1' as const, pending: 0, running: 0, receipts: 0, deadLetters: 0, oldestPendingJobId: null, oldestDeadLetterJobId: null },
-    });
-
-    const heldResult = runStopHandler({
-      collector: collector(held.cwd, () => canonicalState()),
-      env: { ...process.env, PATH: '', HOOK_RUN_ID: 'cursor-held' },
-      dependencies: { drainArchitectureProjection: drainResult(false) },
-    });
-    expect(readArchitectureDriftCursor(held.cwd)).toBeNull();
-    expect(heldResult.stderr).toContain('drift cursor (missing) is unresolvable');
-
-    const advanced = gitFixture();
-    runStopHandler({
-      collector: collector(advanced.cwd, () => canonicalState()),
-      env: { ...process.env, PATH: '', HOOK_RUN_ID: 'cursor-advanced' },
-      dependencies: { drainArchitectureProjection: drainResult(true) },
-    });
-    expect(readArchitectureDriftCursor(advanced.cwd)?.head_sha).toBe(advanced.head);
-  });
-
-  test('retains a committed drift range when the disabled-provider cascade runner is unavailable', () => {
-    const { cwd, head: anchor } = gitFixture();
-    writeFileSync(join(cwd, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"disabled","projection_apply":"disabled"}}\n');
-    advanceArchitectureDriftCursor(cwd, anchor, null);
-    writeFileSync(join(cwd, 'committed-only.ts'), 'export const committed = true;\n');
-    git(cwd, ['add', 'committed-only.ts']);
-    git(cwd, ['commit', '-m', 'committed drift']);
-
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      env: { PATH: '', HOOK_RUN_ID: 'cascade-runner-unavailable' },
-    });
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toContain('[ArchitectureProjection] orchestration failed:');
-    expect(result.stderr).toContain('legacy architecture cascade runner is unavailable');
-    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(anchor);
-    expect(computeArchitectureDriftChangedSet(cwd).paths).toContain('committed-only.ts');
-  });
-
-  test('retains a committed drift range when a request-triggered cascade follow-up fails', () => {
-    const { cwd, head: anchor } = gitFixture();
-    writeFileSync(join(cwd, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"disabled","projection_apply":"disabled"}}\n');
-    advanceArchitectureDriftCursor(cwd, anchor, null);
-    writeFileSync(join(cwd, 'follow-up-failure.ts'), 'export const followUp = true;\n');
-    git(cwd, ['add', 'follow-up-failure.ts']);
-    git(cwd, ['commit', '-m', 'follow-up drift']);
-
-    const stubRoot = mkdtempSync(join(tmpdir(), 'repo-harness-stop-follow-up-'));
-    fixtures.push(stubRoot);
-    const stateFile = join(stubRoot, 'state.txt');
-    const stubCli = join(stubRoot, 'stub-cli.ts');
-    writeFileSync(stubCli, [
-      "import { existsSync, writeFileSync } from 'fs';",
-      "const args = process.argv.slice(2);",
-      "if (args[0] === 'run' && args[1] === 'architecture-queue') {",
-      "  if (existsSync(process.env.STOP_FOLLOWUP_STATE!)) process.stdout.write('[ArchitectureDrift] No architecture drift update for follow-up-failure.ts (unchanged request).\\n');",
-      "  process.stdout.write('[ArchitectureDrift] Request: docs/architecture/requests/root.md\\n');",
-      "  process.exit(0);",
-      "}",
-      "if (args[0] === 'run' && args[1] === 'context-contract-sync') {",
-      "  if (!existsSync(process.env.STOP_FOLLOWUP_STATE!)) { writeFileSync(process.env.STOP_FOLLOWUP_STATE!, 'failed-once\\n'); process.exit(9); }",
-      "  process.exit(0);",
-      "}",
-      "process.exit(0);",
-      '',
-    ].join('\n'));
-
-    const env = { ...process.env, HOOK_RUN_ID: 'cascade-follow-up-failure', REPO_HARNESS_CLI: stubCli, STOP_FOLLOWUP_STATE: stateFile };
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      env,
-    });
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toContain('context-contract-sync exited 9');
-    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(anchor);
-    expect(computeArchitectureDriftChangedSet(cwd).paths).toContain('follow-up-failure.ts');
-
-    const retried = runStopHandler({ collector: collector(cwd, () => canonicalState()), env });
-    expect(retried.exitCode).toBe(0);
-    expect(retried.stderr).not.toContain('legacy architecture cascade failed');
-    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(git(cwd, ['rev-parse', 'HEAD']));
-  });
-
-  test('feeds every shell-written path of a codex fleet session to the architecture cascade', () => {
-    // The reported failure: a Codex worktree session writes exclusively
-    // through shell, so no post-edit journal event exists and drift recording
-    // saw nothing. Every mutation below is a plain fs/git write -- no hook
-    // payload is ever handed to the journal writer.
-    const { cwd } = gitFixture();
-    writeFileSync(join(cwd, '.ai/harness/policy.json'), '{"architecture":{"projection_provider":"disabled","projection_apply":"disabled"}}\n');
-    const anchor = git(cwd, ['rev-parse', 'HEAD']);
-
-    const stubRoot = mkdtempSync(join(tmpdir(), 'repo-harness-stop-cascade-'));
-    fixtures.push(stubRoot);
-    const calls = join(stubRoot, 'calls.txt');
-    const stubCli = join(stubRoot, 'stub-cli.ts');
-    writeFileSync(stubCli, [
-      "import { appendFileSync } from 'fs';",
-      "appendFileSync(process.env.STOP_CASCADE_CALLS!, `${process.argv.slice(2).join(' ')}\\n`);",
-      '',
-    ].join('\n'));
-
-    mkdirSync(join(cwd, 'src'), { recursive: true });
-    writeFileSync(join(cwd, 'src/committed-change.ts'), 'export const committed = 1;\n');
-    git(cwd, ['add', '-A']);
-    git(cwd, ['commit', '-m', 'shell commit']);
-    const head = git(cwd, ['rev-parse', 'HEAD']);
-    writeFileSync(join(cwd, 'src/shell-write.ts'), 'export const shellWritten = 1;\n');
-    mkdirSync(join(cwd, 'packages/new-pkg/src'), { recursive: true });
-    writeFileSync(join(cwd, 'packages/new-pkg/src/index.ts'), 'export const added = 1;\n');
-    rmSync(join(cwd, 'README.md'));
-
-    // The commit above already landed, so only a cursor at the earlier anchor
-    // proves the commit range is part of the changed set.
-    advanceArchitectureDriftCursor(cwd, anchor, null);
-
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      env: { ...process.env, HOOK_RUN_ID: 'fleet-shell-writes', REPO_HARNESS_CLI: stubCli, STOP_CASCADE_CALLS: calls },
-    });
-
-    expect(result.exitCode).toBe(0);
-    expect(readPendingPostEditEvents(cwd)).toEqual([]);
-    expect(readFileSync(calls, 'utf8').trim().split('\n').sort()).toEqual([
-      'run architecture-queue record --file README.md',
-      'run architecture-queue record --file packages/new-pkg/src/index.ts',
-      'run architecture-queue record --file src/committed-change.ts',
-      'run architecture-queue record --file src/shell-write.ts',
-    ]);
-    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(head);
-  }, 30_000);
-
-  test('resumes completed cascade paths across Stop deadlines and preserves newer commits', () => {
-    const { cwd, head: anchor } = gitFixture();
-    advanceArchitectureDriftCursor(cwd, anchor, null);
-    const paths = ['a.test.ts', 'b.test.ts', 'z-source.ts'];
-    for (const path of paths) writeFileSync(join(cwd, path), 'export const value = 1;\n');
-    git(cwd, ['add', '-A']);
-    git(cwd, ['commit', '-m', 'backlog']);
-    const batchHead = git(cwd, ['rev-parse', 'HEAD']);
-    const stubRoot = mkdtempSync(join(tmpdir(), 'repo-harness-resume-cascade-'));
-    fixtures.push(stubRoot);
-    const calls = join(stubRoot, 'calls.txt');
-    const stubCli = join(stubRoot, 'stub.ts');
-    writeFileSync(calls, '');
-    writeFileSync(stubCli, "import { appendFileSync } from 'fs';\nif (process.argv[3] === 'architecture-queue') appendFileSync(process.env.STOP_CASCADE_CALLS!, process.argv.at(-1) + '\\n');\n");
-    const env = { ...process.env, REPO_HARNESS_CLI: stubCli, STOP_CASCADE_CALLS: calls };
-    const recorded = () => readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean);
-    const stop = () => {
-      const before = recorded().length;
-      return runStopHandler({ collector: collector(cwd, () => canonicalState()), env,
-        dependencies: { wallClockMs: () => recorded().length > before ? 20_001 : 0 } });
-    };
-    expect(stop().stderr).toContain('deadline exhausted');
-    expect(recorded()).toEqual([paths[0]]);
-    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(anchor);
-    writeFileSync(join(cwd, 'newer.ts'), 'export const newer = true;\n');
-    git(cwd, ['add', 'newer.ts']);
-    git(cwd, ['commit', '-m', 'newer change']);
-    stop();
-    stop();
-    expect(recorded()).toEqual(paths);
-    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(batchHead);
-    expect(computeArchitectureDriftChangedSet(cwd).paths).toEqual(['newer.ts']);
-    stop();
-    expect(recorded()).toEqual([...paths, 'newer.ts']);
-    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(git(cwd, ['rev-parse', 'HEAD']));
-  }, 30_000);
-
-  test('bounds a slow cascade child and retains the unacknowledged drift range', () => {
-    const { cwd, head } = gitFixture();
-    advanceArchitectureDriftCursor(cwd, head, null);
-    writeFileSync(join(cwd, 'slow.ts'), 'export const slow = true;\n');
-    git(cwd, ['add', 'slow.ts']);
-    git(cwd, ['commit', '-m', 'change']);
-    const stubRoot = mkdtempSync(join(tmpdir(), 'repo-harness-slow-cascade-'));
-    fixtures.push(stubRoot);
-    const stubCli = join(stubRoot, 'stub.ts');
-    writeFileSync(stubCli, 'await Bun.sleep(1500);\n');
-    let calls = 0;
-    const start = Date.now();
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      env: { ...process.env, REPO_HARNESS_CLI: stubCli, HOOK_RUN_ID: 'bounded-cascade' },
-      dependencies: { wallClockMs: () => calls++ === 0 ? 0 : 19_900 },
-    });
-    expect(Date.now() - start).toBeLessThan(1400);
-    expect(result.stderr).toContain('architecture cascade');
-    expect(readArchitectureDriftCursor(cwd)?.head_sha).toBe(head);
-  }, 10_000);
-
+describe('Stop recovery and safety invariants', () => {
   test('commits the exact four-target projection once before the single state resolution', () => {
     const cwd = fixture();
     const observed: StopProjectionTarget[] = [];
@@ -731,270 +318,6 @@ describe('runStopHandler', () => {
       env: { HOOK_RUN_ID: '../../../../outside-run' },
     })).toThrow('write path escapes repository');
     expect(existsSync(outside)).toBe(false);
-  });
-
-  test('readiness wins over plan completeness without a minimal-change suffix', () => {
-    const cwd = fixture();
-    seedMinimalChange(cwd);
-    seedDelegation(cwd);
-    mkdirSync(join(cwd, '.ai/harness/planning'), { recursive: true });
-    writeFileSync(join(cwd, '.ai/harness/planning/pending.json'), `${JSON.stringify({ kind: 'codex-plan', prompt_slug: 'ordered', created_at: 'now' })}\n`);
-
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState({ stop: 'block' })),
-      input: JSON.stringify({
-        turn_id: 'ordered',
-        last_assistant_message: `Approach ${'decision-complete '.repeat(20)}`,
-      }),
-      env: { HOOK_RUN_ID: 'stop-readiness-first' },
-    });
-
-    expect(result.stdout).toContain('[ReadinessGate]');
-    expect(result.stdout).not.toContain('[MinimalChange]');
-    expect(existsSync(join(cwd, '.ai/harness/planning/plan-completeness.json'))).toBe(false);
-  });
-
-  test('plan completeness carries the minimal-change suffix', () => {
-    const cwd = fixture();
-    seedMinimalChange(cwd);
-    seedDelegation(cwd);
-    mkdirSync(join(cwd, '.ai/harness/planning'), { recursive: true });
-    writeFileSync(join(cwd, '.ai/harness/planning/pending.json'), `${JSON.stringify({ kind: 'codex-plan', prompt_slug: 'ordered', created_at: 'now' })}\n`);
-
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      input: JSON.stringify({
-        turn_id: 'ordered',
-        last_assistant_message: `Approach ${'decision-complete '.repeat(20)}`,
-      }),
-      env: { HOOK_RUN_ID: 'stop-plan-first' },
-    });
-
-    expect(result.stdout).toContain('[PlanCompletenessGate]');
-    expect(result.stdout).toContain('[MinimalChange]');
-  });
-
-  test('enforce mode blocks a review verdict that carries no audit receipt', () => {
-    const cwd = fixture();
-    seedMinimalChangeEnforce(cwd);
-
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      input: JSON.stringify({ turn_id: 'enforce-block' }),
-      env: { HOOK_RUN_ID: 'stop-minimal-enforce-block' },
-    });
-
-    expect(result.stdout).toContain('[MinimalChange] Enforce gate blocked Stop');
-    expect(JSON.parse(result.stdout).decision).toBe('block');
-    expect(result.stdout).toContain('.ai/harness/checks/minimal-change-audit.latest.json');
-    expect(result.stdout).toContain(ENFORCE_FINGERPRINT);
-    expect(result.stdout).toContain('[dependency] package.json');
-    // The reason is self-contained: it names the methodology without making
-    // the gate depend on that skill being installed.
-    expect(result.stdout).toContain('reclaim-code-entropy');
-    expect(result.stderr).toContain('[MinimalChange] Enforced review');
-  });
-
-  test('a lite profile does not swallow the enforce gate', () => {
-    // The lite risk floor is reachable with exactly the change shapes that
-    // produce a `review` verdict: a single dependency-manifest edit is one
-    // implementation path (src/effects/review/diff-fingerprint.ts:399-401),
-    // one capability, and carries no strict path token
-    // (src/core/workflow/profile.ts:104-113), so the deterministic floor stays
-    // lite (profile.ts:256-273) while the report carries a dependency finding
-    // (src/cli/hook/minimal-change-signals.ts:398-408,589). The enforce gate
-    // must therefore run before Stop's lite early return, not after it.
-    const cwd = fixture();
-    seedMinimalChangeEnforce(cwd);
-
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState({ profile: 'lite' })),
-      input: JSON.stringify({ turn_id: 'lite-enforce-block' }),
-      env: { HOOK_RUN_ID: 'stop-minimal-lite-enforce-block' },
-    });
-
-    expect(JSON.parse(result.stdout).decision).toBe('block');
-    expect(result.stdout).toContain('[MinimalChange] Enforce gate blocked Stop');
-    expect(result.stdout).toContain(ENFORCE_FINGERPRINT);
-  });
-
-  test('a lite profile with nothing to audit keeps its zero-ceremony silence', () => {
-    const cwd = fixture();
-    // Enforce mode is ON; only the report is absent. Without this policy the
-    // test would pass on a disabled gate and prove nothing about the hoist --
-    // what it must pin is that the gate itself stays lazy when there is no
-    // `review` verdict to act on.
-    writeFileSync(join(cwd, '.ai/harness/policy.json'), `${JSON.stringify({
-      minimal_change: { mode: 'enforce', stop_review: true },
-    })}\n`);
-
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState({ profile: 'lite' })),
-      input: JSON.stringify({ turn_id: 'lite-enforce-quiet' }),
-      env: { HOOK_RUN_ID: 'stop-minimal-lite-enforce-quiet' },
-    });
-
-    expect(result.stdout).toBe('');
-    expect(result.stderr).not.toContain('[MinimalChange]');
-  });
-
-  test('a lite profile still gets the advice-mode review hint', () => {
-    // Intended consequence of the hoist, not collateral: advice mode means
-    // "surface the hint on every profile", and lite's previous silence was
-    // the other face of the same swallow this slice closes. Advice still
-    // never blocks.
-    const cwd = fixture();
-    seedMinimalChange(cwd);
-
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState({ profile: 'lite' })),
-      input: JSON.stringify({ turn_id: 'lite-advice-hint' }),
-      env: { HOOK_RUN_ID: 'stop-minimal-lite-advice-hint' },
-    });
-
-    expect(result.stdout).toBe('');
-    expect(result.stderr).toContain('[MinimalChange] Non-blocking review');
-  });
-
-  test('advice mode keeps the same review non-blocking end to end', () => {
-    const cwd = fixture();
-    seedMinimalChangeEnforce(cwd);
-    writeFileSync(join(cwd, '.ai/harness/policy.json'), `${JSON.stringify({
-      minimal_change: { mode: 'advice', stop_review: true, report_path: '.ai/harness/checks/minimal-change.latest.json' },
-    })}\n`);
-
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      input: JSON.stringify({ turn_id: 'advice-release' }),
-      env: { HOOK_RUN_ID: 'stop-minimal-advice-release' },
-    });
-
-    expect(result.stdout).toBe('');
-    expect(result.stderr).toContain('[MinimalChange] Non-blocking review');
-    expect(existsSync(join(cwd, '.ai/harness/state/circuit-breaker.json'))).toBe(false);
-  });
-
-  test('a matching audit receipt releases Stop, and only a matching one does', () => {
-    const cwd = fixture();
-    seedMinimalChangeEnforce(cwd);
-    const valid = {
-      version: 1,
-      fingerprint: ENFORCE_FINGERPRINT,
-      decisions: ['package.json dependency is required by the approved contract'],
-      generated_at: '2026-08-17T21:30:00.000Z',
-    };
-
-    writeAuditReceipt(cwd, valid);
-    const released = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      input: JSON.stringify({ turn_id: 'receipt-release' }),
-      env: { HOOK_RUN_ID: 'stop-minimal-receipt-release' },
-    });
-    expect(released.stdout).toBe('');
-    expect(released.stderr).toContain('[MinimalChange] Audit receipt accepted');
-    expect(existsSync(join(cwd, '.ai/harness/state/circuit-breaker.json'))).toBe(false);
-
-    // Every rejected receipt shape keeps the gate closed (fail closed).
-    const rejected: readonly unknown[] = [
-      { ...valid, fingerprint: `${ENFORCE_FINGERPRINT.slice(0, -1)}1` },
-      { ...valid, version: 2 },
-      { ...valid, decisions: [] },
-      { ...valid, decisions: ['  '] },
-      { ...valid, decisions: [{ decision: 'structured entries are not the receipt shape' }] },
-      { ...valid, generated_at: 'not-a-timestamp' },
-      { fingerprint: ENFORCE_FINGERPRINT, decisions: valid.decisions, generated_at: valid.generated_at },
-    ];
-    rejected.forEach((receipt, index) => {
-      rmSync(join(cwd, '.ai/harness/state'), { recursive: true, force: true });
-      writeAuditReceipt(cwd, receipt);
-      const blocked = runStopHandler({
-        collector: collector(cwd, () => canonicalState()),
-        input: JSON.stringify({ turn_id: `receipt-reject-${index}` }),
-        env: { HOOK_RUN_ID: `stop-minimal-receipt-reject-${index}` },
-      });
-      expect(blocked.stdout).toContain('[MinimalChange] Enforce gate blocked Stop');
-    });
-
-    // A malformed receipt file is not a release either.
-    rmSync(join(cwd, '.ai/harness/state'), { recursive: true, force: true });
-    writeFileSync(join(cwd, '.ai/harness/checks/minimal-change-audit.latest.json'), '{not-json');
-    const malformed = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      input: JSON.stringify({ turn_id: 'receipt-malformed' }),
-      env: { HOOK_RUN_ID: 'stop-minimal-receipt-malformed' },
-    });
-    expect(malformed.stdout).toContain('[MinimalChange] Enforce gate blocked Stop');
-  });
-
-  test('a review report without a fingerprint releases Stop instead of deadlocking it', () => {
-    const cwd = fixture();
-    seedMinimalChangeEnforce(cwd);
-    // Neither release path can act on a fingerprint-less report: no receipt can
-    // match it and the breaker cannot key on it, so the gate must stay out.
-    writeFileSync(join(cwd, '.ai/harness/checks/minimal-change.latest.json'), `${JSON.stringify({
-      version: 1,
-      verdict: 'review',
-      report_path: '.ai/harness/checks/minimal-change.latest.json',
-      findings: [{ tag: 'dependency', path: 'package.json', question: 'Is the new dependency required?' }],
-    })}\n`);
-
-    const result = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      input: JSON.stringify({ turn_id: 'missing-fingerprint' }),
-      env: { HOOK_RUN_ID: 'stop-minimal-missing-fingerprint' },
-    });
-
-    expect(result.stdout).toBe('');
-    expect(result.stderr).toContain('[MinimalChange] Enforce gate skipped');
-    expect(result.stderr).toContain('carries no fingerprint');
-    expect(existsSync(join(cwd, '.ai/harness/state/circuit-breaker.json'))).toBe(false);
-  });
-
-  test('the circuit breaker releases Stop after two blocks on the same fingerprint', () => {
-    const cwd = fixture();
-    seedMinimalChangeEnforce(cwd);
-    const run = (turn: string) => runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      input: JSON.stringify({ turn_id: turn }),
-      env: { HOOK_RUN_ID: `stop-minimal-breaker-${turn}` },
-    });
-
-    expect(run('one').stdout).toContain('[MinimalChange] Enforce gate blocked Stop');
-    expect(run('two').stdout).toContain('[MinimalChange] Enforce gate blocked Stop');
-    const third = run('three');
-    expect(third.stdout).toBe('');
-    expect(third.stderr).toContain('[MinimalChange] Circuit breaker tripped after 2 enforce blocks');
-
-    // A different report fingerprint is real progress: the gate blocks again.
-    seedMinimalChangeEnforce(cwd, `${ENFORCE_FINGERPRINT.slice(0, -1)}a`);
-    expect(run('four').stdout).toContain('[MinimalChange] Enforce gate blocked Stop');
-  });
-
-  test('explicit delegation state never authorizes a Stop-time alternate runner', () => {
-    const cwd = fixture();
-    seedMinimalChange(cwd);
-    const delegation = seedDelegation(cwd);
-    const standard = runStopHandler({
-      collector: collector(cwd, () => canonicalState()),
-      input: JSON.stringify({ turn_id: 'ordered' }),
-      env: { HOOK_RUN_ID: 'stop-delegation-last' },
-    });
-    expect(standard.stdout).toBe('');
-    expect(JSON.parse(readFileSync(delegation, 'utf8'))).toMatchObject({
-      explicit: true,
-      spawned: false,
-    });
-    expect(readFileSync(delegation, 'utf8')).not.toContain('fallback_used');
-
-    const liteCwd = fixture();
-    const liteDelegation = seedDelegation(liteCwd);
-    const lite = runStopHandler({
-      collector: collector(liteCwd, () => canonicalState({ profile: 'lite' })),
-      input: JSON.stringify({ turn_id: 'ordered' }),
-      env: { HOOK_RUN_ID: 'stop-lite' },
-    });
-    expect(lite.stdout).toBe('');
-    expect(readFileSync(liteDelegation, 'utf8')).not.toContain('fallback_used');
   });
 
   test('each named Stop commit phase converges on a fresh retry without duplicate events', () => {
@@ -1247,5 +570,26 @@ describe('runStopHandler', () => {
     })}\n`);
     policyRun(1);
     expect(readFileSync(join(policyRoot, '.ai/harness/events.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2);
+  });
+});
+
+
+describe('Stop observes workflow gaps without permission gates', () => {
+  test('missing recovery/readiness/review receipts do not prevent stopping', () => {
+    const cwd = fixture(); seedMinimalChangeEnforce(cwd);
+    const result = runStopHandler({ collector: collector(cwd, () => canonicalState({ profile: 'high', stop: 'block', ship: 'block' })) });
+    expect(result.exitCode).toBe(0); expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('Publication not verified');
+    expect(result.stderr).toContain('Non-blocking review');
+    expect(existsSync(join(cwd, '.ai/harness/handoff/current.md'))).toBe(true);
+  });
+  test('Stop does not start architecture provider, create a drift cursor or enqueue capability work', () => {
+    const { cwd } = gitFixture();
+    mkdirSync(join(cwd, 'src'), { recursive: true }); writeFileSync(join(cwd, 'src/change.ts'), 'export const x = 1;');
+    const result = runStopHandler({ collector: collector(cwd, () => canonicalState()), env: {
+      REPO_HARNESS_ARCHITECTURE_PROJECTION_FAILURE_GATE: 'strict',
+    } });
+    expect(result.stdout).toBe(''); expect(readArchitectureDriftCursor(cwd)).toBeNull();
+    expect(existsSync(join(cwd, '.ai/harness/capability-context/requests.jsonl'))).toBe(false);
   });
 });

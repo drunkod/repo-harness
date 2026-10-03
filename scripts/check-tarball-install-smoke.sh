@@ -182,18 +182,21 @@ if (!asset.ok || (await asset.arrayBuffer()).byteLength === 0) fail('operator st
 const snapshot = await fetch(`${baseUrl}/api/v1/fleet/snapshot`);
 if (!snapshot.ok) fail(`operator Fleet API returned ${snapshot.status}`);
 const payload = await snapshot.json();
-// payload.protocol tracks FLEET_BOARD_PROTOCOL (src/core/fleet/board.ts), not the /healthz route protocol above.
-if (payload?.protocol !== 4 || payload?.kind !== 'operator_fleet_snapshot' || !Array.isArray(payload?.repositories)
+// The operator browser payload versions itself separately from FLEET_BOARD_PROTOCOL
+// (src/core/fleet/board.ts) and from the /healthz route protocol above. Read the
+// installed package's own constant rather than restating it, so a protocol bump
+// cannot pass its own tests here while this smoke asserts a stale literal.
+const { decodeOperatorFleetSnapshot, OPERATOR_FLEET_PAYLOAD_PROTOCOL } = await import(`${process.cwd()}/node_modules/repo-harness/src/operator-web/types.ts`);
+if (payload?.protocol !== OPERATOR_FLEET_PAYLOAD_PROTOCOL || payload?.kind !== 'operator_fleet_snapshot' || !Array.isArray(payload?.repositories)
   || typeof payload?.source_snapshot_sha256 !== 'string') {
   fail('operator Fleet API did not return OperatorFleetSnapshotV1');
 }
-const { decodeOperatorFleetSnapshot } = await import(`${process.cwd()}/node_modules/repo-harness/src/operator-web/types.ts`);
 const { stableSnapshot } = await import(`${process.cwd()}/node_modules/repo-harness/src/operator-web/fixture.ts`);
 decodeOperatorFleetSnapshot(payload);
 const fixture = decodeOperatorFleetSnapshot(stableSnapshot);
 const evidence = fixture.repositories.flatMap((repo) => repo.cards).find((card) => card.inbox.delivery_evidence?.candidate_count === 1)?.inbox.delivery_evidence;
 if (!evidence?.latest || !/^sha256:[0-9a-f]{64}$/.test(evidence.latest.observation_sha256)) {
-  fail('installed protocol 4 consumer did not preserve nonempty notification evidence');
+  fail('installed operator payload consumer did not preserve nonempty notification evidence');
 }
 const serialized = JSON.stringify(payload);
 for (const forbidden of ['repo_root', 'cause', 'stderr', 'stack', isolatedHome]) {
@@ -509,5 +512,12 @@ if (result.capability_id !== "apps-web") {
   process.exit(1);
 }
 JS_EOF
+
+# Copy only test inputs; imports and the spawned server resolve inside the installed package.
+INSTALLED_ROOT="$APP_DIR/node_modules/$PACKAGE_NAME"
+mkdir -p "$INSTALLED_ROOT/tests/cli" "$INSTALLED_ROOT/.archcontext/model"
+cp "$ROOT/tests/cli/mcp-http.test.ts" "$INSTALLED_ROOT/tests/cli/mcp-http.test.ts"
+cp -R "$ROOT/.archcontext/model/nodes" "$INSTALLED_ROOT/.archcontext/model/nodes"
+(cd "$INSTALLED_ROOT" && bun test tests/cli/mcp-http.test.ts --test-name-pattern 'engineer OAuth E2E')
 
 echo "[tarball-smoke] OK: ${PACKAGE_NAME}-${PACKAGE_VERSION}.tgz installs, serves the packaged Operator, and packaged CLI bins start."

@@ -1,3 +1,9 @@
+import { isOperatorServiceEpoch } from '../core/operator/observation-identity';
+import { decodeOperatorPlanningSnapshot } from '../core/operator/planning-snapshot';
+import { decodeOperatorDecisionInventory, isDecisionCursor } from '../core/operator/decision-inventory';
+import { decodeOperatorOrganizationSnapshot } from '../core/operator/organization-snapshot';
+import type { OperatorWorkExchangeSnapshot } from '../core/operator/collaboration-snapshot';
+export type { OperatorWorkExchangeSnapshot } from '../core/operator/collaboration-snapshot';
 /** Browser projections import their transport types from the core authority. */
 export type {
   OperatorCollaborationActorKind,
@@ -9,7 +15,7 @@ export type {
   OperatorCollaborationOpportunityV1,
   OperatorCollaborationParticipantV1,
   OperatorCollaborationSignalV1,
-  OperatorCollaborationSnapshotV1,
+  OperatorCollaborationSnapshotV4,
   OperatorCollaborationSource,
   OperatorCollaborationThreadV1,
 } from '../core/operator/collaboration-snapshot';
@@ -30,7 +36,7 @@ import type {
   OperatorCollaborationOpportunityV1,
   OperatorCollaborationParticipantV1,
   OperatorCollaborationSignalV1,
-  OperatorCollaborationSnapshotV1,
+  OperatorCollaborationSnapshotV4,
   OperatorCollaborationSource,
   OperatorCollaborationThreadV1,
 } from '../core/operator/collaboration-snapshot';
@@ -49,14 +55,14 @@ import type {
  * module's literal type, so a drift from the core constant fails typecheck
  * here rather than at runtime.
  */
-export const OPERATOR_FLEET_PAYLOAD_PROTOCOL: OperatorFleetSnapshotV1['protocol'] = 4;
+export const OPERATOR_FLEET_PAYLOAD_PROTOCOL: OperatorFleetSnapshotV1['protocol'] = 7;
 
 /**
  * The collaboration protocol the browser transport accepts, restated for the
  * same reason and typed against the core literal, so a bump that forgets the
  * browser fails typecheck.
  */
-export const OPERATOR_COLLABORATION_PAYLOAD_PROTOCOL: OperatorCollaborationSnapshotV1['protocol'] = 1;
+export const OPERATOR_COLLABORATION_PAYLOAD_PROTOCOL: OperatorCollaborationSnapshotV4['protocol'] = 4;
 
 export interface OperatorApiErrorV1 {
   readonly code: string;
@@ -235,7 +241,7 @@ export function projectSnapshotViewState(snapshot: OperatorFleetSnapshotV1): Ope
   return { kind, snapshot } as OperatorSnapshotViewState;
 }
 
-export function allCards(snapshot: OperatorFleetSnapshotV1): readonly OperatorFleetCardV1[] {
+export function allCards(snapshot: Pick<OperatorFleetSnapshotV1, 'repositories'>): readonly OperatorFleetCardV1[] {
   return snapshot.repositories.flatMap((repository) => repository.cards);
 }
 
@@ -298,6 +304,7 @@ const MERGE_BLOCKERS = [
   'base_moved_since_verification',
   'review_subject_mismatch',
   'verification_evidence_stale',
+  'rollback_tags_pending',
   'checks_failed',
   'checks_pending',
   'acceptance_missing',
@@ -446,8 +453,41 @@ function decodeMergeReadiness(value: unknown): OperatorFleetCardV1['merge_readin
   });
 }
 
+function decodePlacement(value: unknown): OperatorFleetCardV1['placement'] {
+  const placement = requireRecord(value);
+  switch (placement.kind) {
+    case 'column':
+      requireExactKeys(placement, ['kind', 'column']);
+      return Object.freeze({ kind: 'column', column: requireOneOf(placement.column, COLUMNS) });
+    case 'preparation':
+      requireExactKeys(placement, ['kind']);
+      return Object.freeze({ kind: 'preparation' });
+    case 'alternate_workflow':
+      requireExactKeys(placement, ['kind', 'workflow']);
+      return Object.freeze({ kind: 'alternate_workflow', workflow: requireOneOf(placement.workflow, ['inline'] as const) });
+    case 'unclassified':
+      requireExactKeys(placement, ['kind', 'reason']);
+      return Object.freeze({ kind: 'unclassified', reason: requireOneOf(placement.reason, ['observation_failed', 'canonical_missing', 'task_drifted', 'readiness_unavailable', 'unsupported_readiness', 'state_unmapped'] as const) });
+    default: throw new OperatorPayloadError();
+  }
+}
+
+function decodeReadinessBlockers(value: unknown): OperatorFleetCardV1['readiness_blockers'] {
+  if (value === null) return null;
+  return Object.freeze(requireArray(value).map(value => {
+    const blocker = requireRecord(value);
+    requireExactKeys(blocker, ['code', 'attention_owner']);
+    return Object.freeze({ code: requireOneOf(blocker.code, [
+      'repo_read_only', 'repo_unavailable', 'canonical_unavailable', 'canonical_target_mismatch', 'row_not_pending',
+      'lease_unavailable', 'lease_unknown', 'snapshot_changed_during_read', 'mode_unsupported', 'plan_missing',
+      'plan_ambiguous', 'plan_not_approved', 'plan_source_mismatch', 'plan_not_projectable', 'contract_missing', 'contract_not_projectable',
+    ] as const), attention_owner: requireOneOf(blocker.attention_owner, ['agent', 'user', 'external'] as const) });
+  }));
+}
+
 function decodeCard(value: unknown, repositoryId: string): OperatorFleetCardV1 {
   const card = requireRecord(value);
+  if (Object.hasOwn(card, 'column')) throw new OperatorPayloadError();
   if (!hasRequiredString(card.repository_id) || card.repository_id !== repositoryId) throw new OperatorPayloadError();
   const taskId = requireTaskDigest(card.task_id);
   const taskRevision = requireTaskDigest(card.task_revision);
@@ -456,7 +496,9 @@ function decodeCard(value: unknown, repositoryId: string): OperatorFleetCardV1 {
   const claimId = card.claim_id === null ? null : requireUuid(card.claim_id);
   const generation = card.generation === null ? null : requirePositiveInteger(card.generation);
   if ((claimId === null) !== (generation === null)) throw new OperatorPayloadError();
-  const column = card.column === null ? null : requireOneOf(card.column, COLUMNS);
+  const placement = decodePlacement(card.placement);
+  const taskState = requireOneOf(card.task_state, ['pending', 'done', 'missing', 'drifted'] as const);
+  const readinessBlockers = decodeReadinessBlockers(card.readiness_blockers);
   const attentionOwner = requireOneOf(card.attention_owner, ATTENTION_OWNERS);
   const executionReadiness = card.execution_readiness === null
     ? null
@@ -484,6 +526,8 @@ function decodeCard(value: unknown, repositoryId: string): OperatorFleetCardV1 {
   ] as const);
   const snapshotConsistency = requireOneOf(card.snapshot_consistency, ['stable', 'changed_during_read'] as const);
   const error = decodeError(card.error);
+  if (error !== null && (placement.kind !== 'unclassified' || placement.reason !== 'observation_failed')) throw new OperatorPayloadError();
+  if ((taskState === 'missing' || taskState === 'drifted') && placement.kind !== 'unclassified') throw new OperatorPayloadError();
   const evidence = inbox.delivery_evidence === null ? null : requireRecord(inbox.delivery_evidence);
   if ((error !== null) !== (evidence === null)) throw new OperatorPayloadError();
   const candidateCount = evidence === null ? 0 : requireNonNegativeInteger(evidence.candidate_count);
@@ -492,7 +536,7 @@ function decodeCard(value: unknown, repositoryId: string): OperatorFleetCardV1 {
   const deliveryEvidence = evidence === null ? null : Object.freeze({
     candidate_count: candidateCount,
     latest: latest === null ? null : Object.freeze({
-      adapter_kind: requireOneOf(latest.adapter_kind, ['codex-app-thread', 'herdr-cli-agent'] as const),
+      adapter_kind: requireOneOf(latest.adapter_kind, ['herdr-cli-agent'] as const),
       effect_state: requireOneOf(latest.effect_state, ['intent_persisted', 'effect_started', 'observed_success', 'observed_failure', 'reconciliation_required', 'stopped', 'superseded'] as const),
       receipt_kind: latest.receipt_kind === null ? null : requireOneOf(latest.receipt_kind, ['task_message_delivery_receipt', 'module_message_delivery_receipt', 'controller_step_receipt'] as const),
       observed_at: requireNotificationInstant(latest.observed_at),
@@ -508,7 +552,9 @@ function decodeCard(value: unknown, repositoryId: string): OperatorFleetCardV1 {
     task_index: taskIndex,
     claim_id: claimId,
     generation,
-    column,
+    task_state: taskState,
+    placement,
+    readiness_blockers: readinessBlockers,
     attention_owner: attentionOwner,
     execution_readiness: executionReadiness,
     lease_state: leaseState,
@@ -538,6 +584,7 @@ function decodeCard(value: unknown, repositoryId: string): OperatorFleetCardV1 {
 function decodeRepository(value: unknown): OperatorFleetRepositoryV1 {
   const repository = requireRecord(value);
   const repositoryId = requireString(repository.repository_id);
+  const displayName = requireString(repository.display_name);
   const accessMode = requireOneOf(repository.access_mode, ['read_only', 'read_write'] as const);
   const status = requireOneOf(repository.status, ['ok', 'unreadable'] as const);
   const snapshotConsistency = requireOneOf(repository.snapshot_consistency, SNAPSHOT_CONSISTENCIES);
@@ -546,10 +593,13 @@ function decodeRepository(value: unknown): OperatorFleetRepositoryV1 {
   if (status === 'unreadable' && (error === null || cards.length !== 0 || snapshotConsistency !== 'degraded')) {
     throw new OperatorPayloadError();
   }
+  if (new Set(cards.map(card => card.task_id)).size !== cards.length) throw new OperatorPayloadError();
+  if (cards.some(card => card.placement.kind === 'unclassified') && snapshotConsistency !== 'degraded') throw new OperatorPayloadError();
   const cardChanged = cards.some((card) => card.snapshot_consistency === 'changed_during_read');
   if (cardChanged && snapshotConsistency === 'stable') throw new OperatorPayloadError();
   return Object.freeze({
     repository_id: repositoryId,
+    display_name: displayName,
     access_mode: accessMode,
     status,
     snapshot_consistency: snapshotConsistency,
@@ -665,18 +715,18 @@ function decodeCollaborationSources(value: unknown): readonly OperatorCollaborat
  * that silently dropped the entries it could not read would be the healthy-empty
  * reading the collaboration program exists to refuse.
  */
-export function decodeOperatorCollaborationSnapshot(value: unknown): OperatorCollaborationSnapshotV1 {
+export function decodeOperatorWorkExchangeSnapshot(value: unknown): OperatorWorkExchangeSnapshot {
   try {
     const snapshot = requireRecord(value);
     if (
-      snapshot.protocol !== OPERATOR_COLLABORATION_PAYLOAD_PROTOCOL
-      || snapshot.kind !== 'operator_collaboration_snapshot'
+      snapshot.protocol !== 1
+      || snapshot.kind !== 'operator_work_exchange_snapshot'
     ) {
       throw new OperatorPayloadError();
     }
     return Object.freeze({
-      protocol: OPERATOR_COLLABORATION_PAYLOAD_PROTOCOL,
-      kind: 'operator_collaboration_snapshot',
+      protocol: 1,
+      kind: 'operator_work_exchange_snapshot',
       repository_id: requireString(snapshot.repository_id),
       mode: requireOneOf(snapshot.mode, COLLABORATION_MODES),
       snapshot_consistency: requireOneOf(snapshot.snapshot_consistency, SNAPSHOT_CONSISTENCIES),
@@ -696,10 +746,45 @@ export function decodeOperatorCollaborationSnapshot(value: unknown): OperatorCol
   }
 }
 
+export function decodeOperatorCollaborationSnapshot(value: unknown): OperatorCollaborationSnapshotV4 {
+  try {
+    const v = requireRecord(value);
+    requireExactKeys(v, ['protocol', 'kind', 'repository_id', 'decision_after', 'decisions', 'exchange', 'organization', 'planning']);
+    if (v.protocol !== OPERATOR_COLLABORATION_PAYLOAD_PROTOCOL || v.kind !== 'operator_collaboration_snapshot') throw new OperatorPayloadError();
+    const repositoryId = requireString(v.repository_id);
+    if (!isDecisionCursor(v.decision_after)) throw new OperatorPayloadError();
+    const decisionAfter = v.decision_after;
+    const source = <T,>(value: unknown, decode: (snapshot: unknown) => T): import('../core/operator/collaboration-snapshot').OperatorCollaborationSourceObservation<T> => {
+      const s = requireRecord(value);
+      const observed_at = requireInstant(s.observed_at);
+      if (s.status === 'unavailable') {
+        requireExactKeys(s, ['status', 'observed_at', 'code']);
+        if (s.code !== 'source_unavailable') throw new OperatorPayloadError();
+        return { status: 'unavailable', observed_at, code: 'source_unavailable' };
+      }
+      requireExactKeys(s, ['status', 'observed_at', 'snapshot']);
+      if (s.status !== 'observed') throw new OperatorPayloadError();
+      return { status: 'observed', observed_at, snapshot: decode(s.snapshot) };
+    };
+    return {
+      protocol: OPERATOR_COLLABORATION_PAYLOAD_PROTOCOL, kind: 'operator_collaboration_snapshot', repository_id: repositoryId,
+      exchange: source(v.exchange, raw => {
+        const exchange = decodeOperatorWorkExchangeSnapshot(raw);
+        if (exchange.repository_id !== repositoryId) throw new OperatorPayloadError();
+        return exchange;
+      }),
+      organization: source(v.organization, raw => decodeOperatorOrganizationSnapshot(raw, repositoryId)),
+      planning: source(v.planning, raw => decodeOperatorPlanningSnapshot(raw, repositoryId)),
+      decision_after: decisionAfter,
+      decisions: source(v.decisions, raw => decodeOperatorDecisionInventory(raw, repositoryId, decisionAfter)),
+    };
+  } catch { throw new OperatorCollaborationPayloadError(); }
+}
+
 /** Decode the complete browser payload before any component receives it. */
 export function decodeOperatorFleetSnapshot(value: unknown): OperatorFleetSnapshotV1 {
   const snapshot = requireRecord(value);
-  if (snapshot.protocol !== OPERATOR_FLEET_PAYLOAD_PROTOCOL || snapshot.kind !== 'operator_fleet_snapshot') {
+  if (snapshot.protocol !== OPERATOR_FLEET_PAYLOAD_PROTOCOL || snapshot.kind !== 'operator_fleet_snapshot' || !isOperatorServiceEpoch(snapshot.service_epoch)) {
     throw new OperatorPayloadError();
   }
   const registryRevision = requireSha256(snapshot.registry_revision);
@@ -717,8 +802,24 @@ export function decodeOperatorFleetSnapshot(value: unknown): OperatorFleetSnapsh
     done: requireNonNegativeInteger(counts.done),
     unreadable: requireNonNegativeInteger(counts.unreadable),
     unclassified: requireNonNegativeInteger(counts.unclassified),
+    preparation: requireNonNegativeInteger(counts.preparation),
+    alternate_workflow: requireNonNegativeInteger(counts.alternate_workflow),
+    isolated_execution: requireNonNegativeInteger(counts.isolated_execution),
+    known_tasks: requireNonNegativeInteger(counts.known_tasks),
   });
   const repositories = requireArray(snapshot.repositories).map(decodeRepository);
+  const actualCounts = { available: 0, working: 0, in_review: 0, ready_to_merge: 0, done: 0, unreadable: 0, unclassified: 0, preparation: 0, alternate_workflow: 0, isolated_execution: 0, known_tasks: 0 };
+  if (new Set(repositories.map(repository => repository.repository_id)).size !== repositories.length) throw new OperatorPayloadError();
+  for (const repository of repositories) {
+    if (repository.status === 'unreadable') { actualCounts.unreadable++; continue; }
+    for (const card of repository.cards) {
+      if (card.task_state === 'missing') { actualCounts.isolated_execution++; continue; }
+      actualCounts.known_tasks++;
+      if (card.placement.kind === 'column') actualCounts[card.placement.column]++;
+      else actualCounts[card.placement.kind]++;
+    }
+  }
+  if ((Object.keys(actualCounts) as Array<keyof typeof actualCounts>).some(key => actualCounts[key] !== decodedCounts[key])) throw new OperatorPayloadError();
   const leastHealthyRepository = repositories.some((repository) => repository.snapshot_consistency === 'degraded')
     ? 'degraded'
     : repositories.some((repository) => repository.snapshot_consistency === 'changed_during_read')
@@ -732,6 +833,7 @@ export function decodeOperatorFleetSnapshot(value: unknown): OperatorFleetSnapsh
   }
   return Object.freeze({
     protocol: OPERATOR_FLEET_PAYLOAD_PROTOCOL,
+    service_epoch: snapshot.service_epoch,
     kind: 'operator_fleet_snapshot',
     registry_revision: registryRevision,
     sequence,

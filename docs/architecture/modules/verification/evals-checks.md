@@ -1,5 +1,5 @@
 # verification/evals-checks 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-evals-checks" sourceDigest="sha256:463d4ebee4c32feaf8e98dca3f6862530d876ff145ab4a6c0d1e83b9acd6d4b7" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:966f7438cd7b385cb411a2ef8c2de18c0b1e71eb067941c97375a4b284a873b9" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-verification-evals-checks" sourceDigest="sha256:b50663c64a52361dbca00738f16d1aa0ba8db58da22380676c2020f39fd67472" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:f441680980cbfba428fb128061ac15c3df130e0c6b5e66ffe05ac2ceeefa7f7c" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.verification.evals-checks`(kind `capability`)
 > **Matched Prefixes**:`tests/**`、`evals/**`、`scripts/run-skill-evals.ts`、`scripts/run-harness-profile-benchmark.ts`、`scripts/validate-harness-profile-benchmark.ts`、`scripts/run-bounded-verifier-command.ts`、`scripts/verify-contract.sh`、`scripts/verify-sprint.sh`、`scripts/check-task-workflow.sh`、`scripts/check-task-sync.sh`、`scripts/check-agent-tooling.sh`、`scripts/check-brain-manifest.sh`、`scripts/sync-brain-docs.sh`
@@ -15,22 +15,22 @@ Runs repository verification, contract gates, benchmarks, and evaluation suites.
 ```mermaid
 flowchart LR
   p1_capability_verification_evals_checks_82b2358d["Evals And Checks"]:::component
-  p1_component_evals_checks_primary_dcf800ce["Review Outcome Classifier"]:::component
-  p1_capability_verification_evals_checks_82b2358d -->|"Evaluate a cross-model review"| p1_component_evals_checks_primary_dcf800ce
+  p1_component_evals_checks_primary_dcf800ce["Verification Check Execution"]:::component
+  p1_capability_verification_evals_checks_82b2358d -->|"Execute a declared verification check"| p1_component_evals_checks_primary_dcf800ce
   classDef actor fill:#111827,color:#ffffff,stroke:#f9fafb,stroke-width:2px
   classDef component fill:#075985,color:#ffffff,stroke:#bae6fd,stroke-width:2px
   classDef datastore fill:#3f6212,color:#ffffff,stroke:#d9f99d,stroke-width:2px
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:3880bef0552ef076d7a1bf843c9fe14088ac05efe72c205d8e2428a7b1a8518c`).
+- Proof: `proven` (`sha256:6389a7cb8299424c2b2a6cccb2784ce04c4a1f82eb7c682270b06608f37fd801`).
 - Semantic nodes: `2`; declared relations: `1`.
 
 ### 1.2 模組職責表
 
 | 宣告入口 | 錨點 | 職責 |
 | --- | --- | --- |
-| `entrypoint.evals-checks.primary` | `src/cli/commands/cross-review.ts#runCrossReviewCommand` | `sink.evals-checks.primary` → `src/effects/review/cross-review-runner.ts#runCrossReview` |
+| `entrypoint.evals-checks.primary` | `src/effects/evidence/verification-execution.ts#executeVerificationContract` | `sink.evals-checks.primary` → `src/effects/evidence/verification-execution.ts#executeCheck` |
 
 ### 1.3 規模信號
 
@@ -42,7 +42,7 @@ flowchart LR
 
 出向關係:
 
-- `calls` → `component.evals-checks.primary` — Evaluate a cross-model review
+- `calls` → `component.evals-checks.primary` — Execute a declared verification check
 
 入向關係:
 
@@ -50,20 +50,20 @@ flowchart LR
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:3880bef0552ef076d7a1bf843c9fe14088ac05efe72c205d8e2428a7b1a8518c`); selectors `1/1`.
+> **Proof**: `proven` (`sha256:6389a7cb8299424c2b2a6cccb2784ce04c4a1f82eb7c682270b06608f37fd801`); selectors `1/1`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
 sequenceDiagram
   autonumber
   participant p2_capability_4262990f as Evals And Checks
-  participant p2_component_7b8d80ff as Review Outcome Classifier
-  p2_capability_4262990f->>p2_component_7b8d80ff: Dispatch Review Outcome Classifier
-  alt Evaluate a cross-model review completes
-  p2_capability_4262990f->>p2_component_7b8d80ff: Invoke Review Outcome Classifier
+  participant p2_component_7b8d80ff as Verification Check Execution
+  p2_capability_4262990f->>p2_component_7b8d80ff: Dispatch Verification Check Execution
+  alt Execute a declared verification check completes
+  p2_capability_4262990f->>p2_component_7b8d80ff: Invoke Verification Check Execution
     Note over p2_capability_4262990f: Return success receipt
-  else Evaluate a cross-model review is rejected or fails
-  p2_capability_4262990f->>p2_component_7b8d80ff: Propagate Review Outcome Classifier failure
+  else Execute a declared verification check is rejected or fails
+  p2_capability_4262990f->>p2_component_7b8d80ff: Propagate Verification Check Execution failure
     Note over p2_capability_4262990f: Return typed failure
   end
 ```
@@ -245,6 +245,52 @@ not runtime evidence.
   archive roundtrip.
 - Existing hook/runtime/contract tests continue to assert hook parity and the
   advisory PostToolUse behavior around architecture queue failures.
+
+## CI coverage selection
+
+`.github/workflows/ci.yml` schedules Governance independently of test selection.
+The pure `selectCoverage` function in `scripts/select-ci-coverage.ts` decides
+from the event, checked-out subject and complete raw Git diff. Its thin shell
+reads GitHub event/environment inputs and Git output. PR selection compares the
+event base to the tested synthetic merge; pushes compare every committed change
+between before and head. Missing endpoints, empty/unavailable diffs, checkout
+mismatch, malformed records, nonregular file modes and unknown paths retain
+full coverage. Rename detection is disabled so both paths remain visible.
+
+Documentation coverage includes `tasks/**`, `plans/**`, Markdown under `docs/`,
+`docs/architecture/.projection-manifest.json`, `.ai/harness/handoff/**` and
+`README.md`. `docs/reference-configs/**` remains full coverage, as do
+`.archcontext/**`, runtime policies/configs, deploy files, root agent instructions,
+source, tests and other unclassified paths. Documentation consumers are inferred
+from checkout-bound filesystem reads, including path aliases and local reader
+wrappers and static test-helper imports. It also conservatively includes reads
+of named tracked guides when the test resolves checkout code; documents explicitly
+authored as fixture content do not activate that secondary rule. True checkout
+reads stay covered even if a test also writes fixture documents. Ignored runtime
+files do not enter the tracked-guide inventory. The scanner is the inventory
+source; the workflow's sorted whole-file list is its projection, checked by the
+documentation drift test. No manually
+maintained consumer allowlist or per-test name filtering owns this lane.
+
+`bun scripts/replay-ci-coverage.ts --since YYYY-MM-DD` feeds pinned first-parent
+history into the same pure function and prints per-commit and mode/reason totals.
+It does not bypass checkout validation in the production shell. Historical hit
+rate and the actual documentation-lane duration are acceptance evidence;
+correct scheduling alone does not establish lower CI cost.
+
+Draft PRs defer expensive checks and explain that ready_for_review must run
+coverage. Required / CI never reports mergeable success for a deferred draft.
+Both ready_for_review and converted_to_draft trigger a new run; manual dispatch
+always selects full. The aggregate accepts only successful selection/Governance
+and exactly the prescribed success/skipped dispositions for full or docs mode.
+Failure, cancellation, unknown modes and unintended omissions remain failures.
+
+Functional, matrix and documentation jobs depend only on selection. The owner
+retained independent hosted Governance/Test failure visibility from the
+2026-09-09 incident; the measured wasted Test time on governance-only failures
+and the two-week revisit trigger are recorded in `tasks/todos.md`. Local/release
+`check-ci.sh` gates and the isolated file runner remain unchanged. PR evidence
+is not reused as acceptance for a different merge subject.
 
 ## Optimization Backlog
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import { tmpdir } from 'os';
@@ -19,13 +19,28 @@ import {
   prepareInstallProfileSwitch,
   readLegacyInstalledProfileForMigration,
   readInstalledProfile,
+  recordVerifiedAgentFleetOwnership,
   rollbackInstallHostTransaction,
   rollbackInstallProfile,
 } from '../src/cli/installer/install-profile';
 import { buildManagedHooks } from '../src/cli/installer/managed-entries';
+import { parseSkillSurfaceCatalog, probeExpectations } from '../src/core/skill-surface/catalog';
 
 const ROOT = join(import.meta.dir, '..');
 const CLI = join(ROOT, 'src/cli/index.ts');
+
+// probeInstalledComponents() derives the planning-integrations evidence set
+// from the catalog, so a fixture that hard-codes one facade's SKILL.md goes
+// stale the moment a second planning facade is declared. Read the same
+// catalog the probe reads.
+const PLANNING_CAPABILITY_PATHS = (() => {
+  const resolution = parseSkillSurfaceCatalog(
+    readFileSync(join(ROOT, 'assets/skill-commands/manifest.json'), 'utf-8'),
+    { declared: true, profileComponents: PROFILE_COMPONENTS },
+  );
+  if (resolution.status !== 'valid') throw new Error('skill-surface manifest is invalid');
+  return probeExpectations(resolution.catalog).planningCapabilityPaths;
+})();
 
 function withHome(run: (env: NodeJS.ProcessEnv) => void): void {
   const home = mkdtempSync(join(tmpdir(), 'repo-harness-profile-'));
@@ -74,7 +89,7 @@ function writeManagedHostSurfaces(
   writePath(join(source, 'src/core/workflow/profile.ts'), '// managed\n');
   writePath(join(source, 'src/cli/tools/codegraph.ts'), '// managed\n');
   if (profile === 'full') {
-    writePath(join(source, 'assets/skills/repo-harness-product/SKILL.md'), '# managed\n');
+    for (const relative of PLANNING_CAPABILITY_PATHS) writePath(join(source, relative), '# managed\n');
     for (const skill of ['think', 'hunt', 'check', 'health', 'mermaid']) {
       writePath(join(home, '.codex', 'skills', skill, 'SKILL.md'), '# external\n');
     }
@@ -82,7 +97,7 @@ function writeManagedHostSurfaces(
     writePath(join(source, 'scripts/verify-sprint.sh'), '# managed\n');
     writePath(join(source, 'scripts/ship-worktrees.sh'), '# managed\n');
     writePath(join(home, '.bun', 'bin', 'codegraph'), '#!/bin/sh\n');
-    for (const agent of ['explorer', 'deep-reasoner', 'fast-worker', 'gatekeeper', 'root-cause-prover', 'harness-evaluator']) {
+    for (const agent of ['explorer', 'deep-reasoner', 'fast-worker', 'deep-worker', 'gatekeeper', 'root-cause-prover', 'harness-evaluator']) {
       writePath(join(home, '.codex', 'agents', `${agent}.toml`), '# managed\n');
     }
     writePath(join(home, '.codex', 'skills', 'repo-harness-cross-review', 'SKILL.md'), '# external\n');
@@ -751,6 +766,54 @@ describe('install profiles', () => {
     expect(installedProfileStatus(refreshed.state, env).drift.status).toBe('consistent');
   }));
 
+  test('a verified fleet run adopts pristine agents so a fleet projection change upgrades past a user-managed agent', () => withHome((env) => {
+    const home = env.HOME!;
+    writeManagedHostSurfaces(env, 'full');
+    rmSync(join(home, '.codex', 'agents'), { recursive: true, force: true });
+    const packageRoot = join(home, 'fleet-package');
+    const script = join(packageRoot, 'scripts', 'install-agent-fleet.sh');
+    mkdirSync(join(packageRoot, 'scripts'), { recursive: true });
+    cpSync(join(ROOT, 'scripts', 'install-agent-fleet.sh'), script);
+    cpSync(join(ROOT, 'agents', 'fleet'), join(packageRoot, 'agents', 'fleet'), { recursive: true });
+    symlinkSync(join(ROOT, 'src'), join(packageRoot, 'src'), 'dir');
+    const runFleet = (...args: string[]) => spawnSync('bash', [script, ...args], { cwd: ROOT, encoding: 'utf-8', env });
+    expect(runFleet().status).toBe(0);
+
+    const custom = join(home, '.codex', 'agents', 'explorer.toml');
+    const customContent = readFileSync(custom, 'utf-8').replace('model = "gpt-6-luna"', 'model = "gpt-6.1-sol"');
+    writeFileSync(custom, customContent);
+    expect(runFleet('--accept-user-managed').status).toBe(0);
+
+    const pristine = join(home, '.codex', 'agents', 'deep-worker.toml');
+    const unverified = applyInstallProfile('full', env).state;
+    expect(unverified.ownership_manifest.some(({ path }) => path === pristine)).toBe(false);
+
+    // Update paths record into the existing manifest without re-applying the profile.
+    recordVerifiedAgentFleetOwnership('full', env);
+    const recorded = readInstalledProfile(env)!;
+    const recordedPaths = recorded.ownership_manifest.map(({ path }) => path);
+    expect(recordedPaths).toContain(pristine);
+    expect(recordedPaths).toContain(join(home, '.claude', 'agents', 'explorer.md'));
+    expect(recordedPaths).not.toContain(custom);
+    expect(installedProfileStatus(recorded, env).drift.status).toBe('consistent');
+
+    // Bootstrap has no prior manifest, so applyInstallProfile adopts directly.
+    rmSync(join(home, '.repo-harness', 'install-state.json'));
+    const adopted = applyInstallProfile('full', env, new Date(), undefined, undefined, { agentFleetVerified: true }).state;
+    expect(adopted.ownership_manifest.map(({ path }) => path).sort()).toEqual(recordedPaths.sort());
+
+    for (const agent of ['explorer', 'deep-reasoner', 'fast-worker', 'deep-worker', 'gatekeeper', 'root-cause-prover', 'harness-evaluator']) {
+      const source = join(packageRoot, 'agents', 'fleet', `${agent}.md`);
+      writeFileSync(source, `${readFileSync(source, 'utf-8')}\nUpdated role instruction.\n`);
+    }
+    const upgraded = runFleet();
+    expect(upgraded.status).toBe(0);
+    expect(upgraded.stdout).toContain('[fleet] codex/deep-worker.toml: installed');
+    expect(upgraded.stdout).toContain('[fleet] codex/explorer.toml: user-managed');
+    expect(readFileSync(pristine, 'utf-8')).toContain('Updated role instruction.');
+    expect(readFileSync(custom, 'utf-8')).toBe(customContent);
+  }), 60_000);
+
   test('downgrade preserves a user-owned staging skill registry when only host links are transaction-owned', () => withHome((env) => {
     writeManagedHostSurfaces(env, 'full');
     const names = ['think', 'hunt', 'check', 'health', 'mermaid', 'reverse-skill-router'];
@@ -808,7 +871,7 @@ describe('install profiles', () => {
     // fixture helper), then upgrade in place without a prior removal step.
     writePath(join(source, 'src/core/workflow/profile.ts'), '// managed\n');
     writePath(join(source, 'src/cli/tools/codegraph.ts'), '// managed\n');
-    writePath(join(source, 'assets/skills/repo-harness-product/SKILL.md'), '# managed\n');
+    for (const relative of PLANNING_CAPABILITY_PATHS) writePath(join(source, relative), '# managed\n');
     for (const skill of ['think', 'hunt', 'check', 'health', 'mermaid']) {
       writePath(join(env.HOME!, '.codex', 'skills', skill, 'SKILL.md'), '# external\n');
     }
@@ -816,7 +879,7 @@ describe('install profiles', () => {
     writePath(join(source, 'scripts/verify-sprint.sh'), '# managed\n');
     writePath(join(source, 'scripts/ship-worktrees.sh'), '# managed\n');
     writePath(join(env.HOME!, '.bun', 'bin', 'codegraph'), '#!/bin/sh\n');
-    for (const agent of ['explorer', 'deep-reasoner', 'fast-worker', 'gatekeeper', 'root-cause-prover', 'harness-evaluator']) {
+    for (const agent of ['explorer', 'deep-reasoner', 'fast-worker', 'deep-worker', 'gatekeeper', 'root-cause-prover', 'harness-evaluator']) {
       writePath(join(env.HOME!, '.codex', 'agents', `${agent}.toml`), '# managed\n');
     }
     writePath(join(env.HOME!, '.codex', 'skills', 'repo-harness-cross-review', 'SKILL.md'), '# external\n');

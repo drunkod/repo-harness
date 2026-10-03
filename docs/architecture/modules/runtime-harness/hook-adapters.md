@@ -1,5 +1,5 @@
 # runtime-harness/hook-adapters 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" sourceDigest="sha256:132d8cab10d94dc2d5add313cea2a2cfa120b63b2d180ff084f4d9a0fae044bf" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:49427c6729ca7883ed1d9f6f3b23ac6c4ed307748a6344c0e24a4bed00b701ce" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-hook-adapters" sourceDigest="sha256:51574f0e645f24d19390c1e62e3bd1a51f9a549540f1cb39860be2a047a0150e" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:c0e455c5b85a87dd8825c595e440fdbfe73054e0e2e637935e8641caffaff221" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.hook-adapters`(kind `capability`)
 > **Matched Prefixes**:`assets/hooks/**`、`.ai/hooks/**`、`scripts/run-skill-hook.ts`、`src/cli/installer/**`、`src/cli/hook/**`、`src/cli/hook-entry.ts`
@@ -34,7 +34,7 @@ flowchart LR
 
 ### 1.3 規模信號
 
-- 規模量級:`50–100` 個文件 / `10k–20k` 行
+- 規模量級:`50–100` 個文件 / `20k–50k` 行
 - 匹配前綴:`assets/hooks/**`、`.ai/hooks/**`、`scripts/run-skill-hook.ts`、`src/cli/installer/**`、`src/cli/hook/**`、`src/cli/hook-entry.ts`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
@@ -313,3 +313,7 @@ bash scripts/check-task-workflow.sh --strict
 ## 6. Workstream
 
 - `tasks/workstreams/runtime-harness/hook-adapters/github-issues-158-159.md`
+
+## Gate audit cutover
+
+The event route registry remains the host adapter authority. Ordinary edits and Stop no longer require plan, contract, review or archive stages. Risk has two values, `routine` and `high`; high risk selects focused safety coverage and optional independent review. Path/private-area checks and shared-store token fencing remain enforced. Hooks observe architecture on demand and never queue per-edit drift or write capability blocks into agent instructions. Main publication consumes trusted current CI facts; host permission changes, unsafe deletion and production effects retain their explicit authorization boundaries.

@@ -282,12 +282,20 @@ contract-assets 前缀，漂移由 `bun run sync:helpers` 的 `--check` 模式�
   uses best-effort `taskkill /T`, and direct raw Bash helper execution remains
   internal rather than a second supported lifecycle authority.
 
+## 2026-09-12 root drift card resolved without an architecture change
+
+- 漂移卡 `docs/architecture/requests/root.md`(high、workflow-surface、觸發檔
+  `scripts/ensure-task-workflow.sh`、Detected 2026-09-12T13:35)歸檔為 Resolved。
+- 該事件只是 helper 投影重寫:事件當下的 `scripts/ensure-task-workflow.sh` 與
+  `origin/main` 的版本逐位元組相同,最後一次真實內容改動仍停在 `9563083c`。
+  模組邊界、entrypoint、依賴規則、runtime path 與驗證命令都沒有動,所以不需要
+  snapshot;卡片的 Contract Files 是 `none`,也沒有本地契約需要同步。
+
 ## Pending Requests
 
 
 <!-- BEGIN ARCHITECTURE PENDING REQUESTS -->
-- [ ] 2026-09-08T05:10:12+0800 [low] `src/effects/automation/campaign-capability-registry.ts` -> [runtime-harness-automation-budget](requests/runtime-harness-automation-budget.md)
-- [ ] 2026-09-09T02:02:06+0800 [low] `src/effects/engineers/agent-runtime-adapters/herdr-cli-agent.ts` -> [runtime-harness-agent-runtime-effects](requests/runtime-harness-agent-runtime-effects.md)
+- (none)
 <!-- END ARCHITECTURE PENDING REQUESTS -->
 
 
@@ -297,7 +305,7 @@ contract-assets 前缀，漂移由 `bun run sync:helpers` 的 `--check` 模式�
 - Treat user-level `~/.codex/hooks.json` and `~/.claude/settings.json` as host adapters. Keep hook implementation under `.ai/hooks/`, and treat repo-local `.claude/settings.json` / `.codex/hooks.json` hook adapters as retired legacy config.
 - Consider adding `bun scripts/capability-resolver.ts validate --format text` to the strict workflow gate after the architecture registry has been used through one more real slice.
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.architecture.index" sourceDigest="sha256:b859983f97115344cb2d922ace1e8499d648eeca197ec66cf58b3775378e135d" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:2aaf8d426181a5d8bc11b51d018598e6151607326bc5d67af8db8da84de734eb" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.architecture.index" sourceDigest="sha256:c022eb5f01f2bdeb84713ae560d122badf0523983df27de89386765fa0842584" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:2aaf8d426181a5d8bc11b51d018598e6151607326bc5d67af8db8da84de734eb" -->
 # Architecture Index
 
 Generated: 1970-01-01T00:00:00.000Z

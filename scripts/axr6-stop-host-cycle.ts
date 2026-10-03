@@ -38,6 +38,8 @@ try {
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
   });
   const adapters = readInstalledAdapters(hostHome);
+  mkdirSync(join(hostHome, '.repo-harness'), { recursive: true });
+  writeFileSync(join(hostHome, '.repo-harness/config.json'), JSON.stringify({ architecture: { projection_provider: 'archctx', projection_apply: 'automatic' } }));
 
   initializeFixture(fixture);
   const hookEnv = {
@@ -131,7 +133,7 @@ try {
     schemaVersion: 'repo-harness.axr6-stop-host-cycle/v1',
     status: 'verified',
     installedPackage: { name: 'repo-harness', tarball: basename(repoHarnessTarball) },
-    provider: { name: 'archctx', version: '0.5.10', packageLocal: true, holdMs: HOLD_MS },
+    provider: { name: 'archctx', version: '0.6.1', packageLocal: true, holdMs: HOLD_MS },
     adapters: {
       codex: { stopTimeoutSeconds: adapters.codex.stop.timeout, nonStopTimeoutSeconds: adapters.codex.postEdit.timeout },
       claude: { stopTimeoutSeconds: adapters.claude.stop.timeout, nonStopTimeoutSeconds: adapters.claude.postEdit.timeout },
@@ -178,10 +180,6 @@ function initializeFixture(root: string): void {
   writeFileSync(join(root, '.ai', 'harness', 'policy.json'), `${JSON.stringify({
     context: { capability_source: 'archcontext' },
     architecture: {
-      projection_provider: 'archctx',
-      projection_apply: 'automatic',
-      projection_version: '0.5.10',
-      projection_timeout_ms: 120000,
       freshness_gate: 'advisory',
     },
   }, null, 2)}\n`);
@@ -218,7 +216,7 @@ function writeFakeArchctx(root: string): void {
   mkdirSync(dirname(bin), { recursive: true });
   writeFileSync(join(root, 'package.json'), `${JSON.stringify({
     name: 'archctx',
-    version: '0.5.10',
+    version: '0.6.1',
     type: 'module',
     engines: { node: '>=22.22 <26' },
     bin: { archctx: './bin/archctx.mjs' },
@@ -231,7 +229,7 @@ const args = process.argv.slice(2);
 if (args[0] === 'capabilities') {
   console.log(JSON.stringify({
     schemaVersion: 'archcontext.capabilities/v1',
-    package: { name: 'archctx', version: '0.5.10' },
+    package: { name: 'archctx', version: '0.6.1' },
     protocols: {
       projectionRequest: 'archcontext.projection-request/v1',
       projectionResult: 'archcontext.projection-result/v2',
@@ -258,7 +256,7 @@ const snapshot = {
   layoutVersion: 'archcontext.docs-layout/v1',
   generatedFrom: {
     codeGraphPackage: '@colbymchenry/codegraph',
-    codeGraphVersion: '1.5.0',
+    codeGraphVersion: '1.6.1',
     codeGraphBinaryDigest: digest,
     codeGraphStatus: 'unavailable',
   },

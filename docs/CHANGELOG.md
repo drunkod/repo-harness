@@ -2,7 +2,315 @@
 
 All notable changes to this skill are documented here.
 
-## [Unreleased]
+## [0.20.0] - 2026-10-01
+
+### Added
+
+- Persistent Herdr task-agent lifecycle and CLI commands for task-scoped execution,
+  protected result collection, and repository-scoped workspace cleanup.
+- Trusted engineer observation preparation and first-offer staleness checks.
+- Managed updates detect stale ArchContext daemons and request user authorization
+  for maintenance. Runtime verification rejects unhealthy connections; a pending
+  daemon replacement preserves the verified CLI and its dependency closure.
+
+### Changed
+
+- Replace the old Codex goal MCP names with task-goal commands.
+- Retire the Codex plugin review provider, App-thread execution backend, and
+  headless Claude planning surface. Codex review uses the explicit Codex provider;
+  Claude acceptance retains its persistent Herdr domain reviewer.
+
+- Publish host-invariant guidance through the reference-document reader.
+
+### Fixed
+
+- Sample the MCP working baseline after request delivery before accepting an idle
+  observation, and keep observation cancellation separate from result collection.
+- Reap owned review providers after post-spawn setup failures and preserve CLI
+  help section spacing.
+
+## [0.19.5] - 2026-09-30
+
+### Fixed
+
+- Fleet install now records verified ownership on every update path and adopts
+  verified pristine agent fleet files into the ownership manifest.
+- `allowed_paths` items in contracts drop YAML inline comments in every reader.
+
+### Changed
+
+- Pin `archctx` and `archctx-contracts` to `0.6.1` and
+  `@colbymchenry/codegraph` to `1.6.1`. The projection request, refresh signal
+  and capabilities protocol ids are unchanged; the only schema change is
+  `accepted-committed-change` v2, which repo-harness does not use.
+- `publishCoordinationSignal` and `publishWorkStateHandoff` call their builders
+  directly so archctx can prove the collaboration flow.
+- Refresh dev dependencies: `@modelcontextprotocol/sdk` 1.31.0, `vite` 8.3.1,
+  `react` 19.3.0, `happy-dom` 20.14.5, `@types/*`.
+- Remap agent fleet model/effort tiers and move the Sol workers to
+  `gpt-6.1-sol` with retuned effort.
+- Refresh the AXR5 clean-room readback (stale since `0.5.7`) against `arch-context`
+  tag `v0.6.1`, and update the test that pinned its contracts version.
+
+## [0.19.4] - 2026-09-28
+
+### Fixed
+
+- The agent fleet installer receives the runtime's already-validated Bun
+  executable through `REPO_HARNESS_BUN_BIN` instead of re-discovering `bun`
+  by name on `PATH`; a handed-off Bun below the version floor now fails the
+  whole helper closed instead of silently falling back to `PATH`/HOME
+  discovery.
+
+### Added
+
+- Isolated the two fleet Bun-handoff version tests from the invoking shell's
+  own `REPO_HARNESS_BUN_BIN`, and added a fail-closed regression test proving
+  a handed-off Bun below the version floor cannot fall back to `PATH`/HOME
+  discovery.
+
+### Changed
+
+- Pin `archctx` and `archctx-contracts` to `0.5.13`, moving through `0.5.12`
+  since `0.19.3`. Capabilities are unchanged across `0.5.11` through `0.5.13`,
+  confirmed against each installed package, so `ARCHCTX_REQUIRED_FEATURES`
+  needs no companion change.
+
+## [0.19.3] - 2026-09-24
+
+### Added
+
+- The operator board reads canonical Task context, activity, history, placement,
+  repository snapshots, automation and supervision evidence. Planning, formal
+  Human Decisions and organization observations use bounded read paths; task
+  links retain historical context and completed observations refresh in view.
+- Task reply intent and commit integrity are persisted through the Engineer MCP
+  with protected reads and canonical reply-size limits.
+- Architecture acceptance supports `accept --recover` for an exact interrupted
+  approval. A durable intent and result preserve the original provider proof;
+  retries use non-consuming readback and resume the existing refresh checkpoints.
+
+### Fixed
+
+- Fleet installation keeps the Bun executable already validated by the CLI,
+  including launcher filenames such as `bun.exe`; an invalid explicit runtime
+  fails without selecting a different PATH executable.
+
+- Task Inbox migration uses portable storage paths, preserves record protocols
+  and file identities, and reflushes recovered files through fresh inodes before
+  publishing its receipt. Rollback permits a later fresh upgrade.
+- Task observation recovery is bound to its service epoch, and read capacity
+  remains held until worker retirement. Publication readiness rejects stale
+  acceptance authority. Architecture projection continues after a Stop budget
+  yield while strict Stop stays blocked until the continuation completes.
+- `sprint-backlog status`, `next` and `start-task` drain their row selectors
+  instead of exiting early, so long backlogs no longer fail with SIGPIPE (141)
+  under `pipefail`; the heartbeat triage summary read has the same repair.
+- Installed-copy sync hashes managed copies through the installer's TypeScript
+  tree hash instead of spawning a process per file, so copy-mode sync of a large
+  source tree stays within its time budget on macOS; existing ownership markers
+  still verify. The copy also skips `.codegraph/`, whose daemon socket macOS
+  rsync cannot recreate.
+- `architecture-projection accept --adoption-plan-id` no longer rejects outright
+  when an earlier apply attempt left an uncommitted intent: once the provider
+  proves that exact apply absent, the adoption request is sent. A committed or
+  unprovable apply still refuses the switch.
+
+### Changed
+
+- Pin `archctx` and `archctx-contracts` to `0.5.12`, including architecture and
+  refactor admission, generated policy defaults and verification fixtures.
+- Route Codex agents by responsibility across GPT-6 Luna, Sol and Astra; worker
+  execution uses Sol at medium and xhigh reasoning for its two execution roles.
+
+### Limits
+
+- Native automatic execution remains subject to Host admission. These operator
+  observations and reply protocols do not establish an admitted Host or complete
+  the AKN automatic-delivery acceptance criteria.
+- Publication does not update an existing global installation or a persistent
+  `REPO_HARNESS_SOURCE_ROOT` override. Recovery still requires the exact original
+  candidate, approval reference and provider-owned fixed-point proof.
+- An interrupted refresh is not auto-resumed after a refresh action changed
+  repository inputs (for example the context map). Acceptance fails closed; commit
+  the refresh output and retire the candidate with `architecture-projection
+  retire-stale` before re-approval. A provider-side recovery proof is planned.
+- Adoption-mode acceptance still cannot complete: the provider adapter rejects an
+  apply receipt for non-apply requests while acceptance requires one. This
+  receipt-contract mismatch predates 0.19.3 and is scheduled with the
+  provider-side recovery work.
+
+## [0.19.2] - 2026-09-13
+
+### Fixed
+
+- Keep architecture queue first-detection metadata valid when concurrent events
+  arrive out of timestamp order.
+
+- Resolve archctx from the running repo-harness package. A target repository's
+  stale or independently installed copy no longer overrides the updated runtime.
+  Exact provider-version and executable-identity checks remain enforced.
+- When task-sync cannot resolve a workflow profile, report the exact current
+  diff binding needed to recover through canonical workflow evidence. Failed
+  resolution still fails closed; source changes invalidate previous bindings.
+
+### Added
+
+- SessionStart gives the Agent architecture coverage observations when the global
+  provider is enabled: empty capability models, missing module documents, and
+  tracked package roots with no match or a shared ancestor capability. The Agent
+  inspects source evidence and decides boundaries using the architecture skill;
+  hooks do not generate semantic nodes. New nodes use archctx ChangeSets.
+
+### Limits
+
+- Package observations cover Git-tracked package.json paths, not a complete
+  semantic inventory of every language. Public archctx 0.5.10 plan creates new
+  entities; updating existing nodes needs a supported typed ChangeSet surface.
+
+
+## [0.19.1] - 2026-09-13
+
+A maintenance release that gives three unbounded or unreachable surfaces an
+explicit operator exit: stale fleet registrations, accumulated harness evidence,
+and a campaign preparation record that could strand a worker between its own
+write and the runtime effect it was about to cause. Alongside those, the
+architecture projection and refactor-recommendation settings move to one
+per-user configuration document, the operator board scopes to the repository you
+selected, and installs stop overwriting content you edited yourself.
+
+### Added
+
+- **`repo-harness-test` guides testing in the source checkout.** The full-profile
+  skill covers fixtures, test execution, refactor evidence and Verification
+  Plans, while downstream projects use their own test commands and CI.
+
+- **`repo-harness fleet prune` removes stale repository registrations.** The
+  default run previews confirmed-absent registry rows; `--apply` removes them
+  under the registry mutation lock and requires `--expected-revision <digest>`
+  taken from that preview, so a registry that moved between preview and apply is
+  refused rather than pruned against a stale view. `--repo-id <id...>` limits
+  both inspection and removal. Registry rows only; nothing on disk is touched
+  and no backup is written.
+- **`repo-harness run evidence-gc` reclaims harness evidence on demand.**
+  Evidence checkpoint retention has shipped since 0.19.0 but only ran inside a
+  successful publish, so a repository whose ledger was reset, or that no longer
+  runs the harness, kept its whole backlog with no way to reclaim it: 9.7 GB in
+  one repository measured here. `run evidence-gc` applies both existing
+  retention policies on demand and `--dry-run` reports reclaimable bytes before
+  anything is removed.
+- **Stop run summaries are bounded.** Stop wrote one run summary per session and
+  nothing removed them (5931 files in this repository, back to 2026-05-25).
+  Retention now keeps the newest `RUN_SUMMARY_RETENTION_COUNT` entries and Stop
+  applies it after its own write. Records are selected by Stop's own shape: a
+  `run_id` plus `checks_file`, `handoff_file`, `policy_file`, and
+  `context_map_file`, every one a pointer the next Stop recomputes. This means the
+  immutable `verification-<executionId>.json` records the evidence ledger binds
+  by sha256, acceptance snapshots, and any shape a future writer adds are left to
+  their owners. `reason` is deliberately not the discriminator: it is free-form
+  operator text with about 190 distinct values here.
+- **`auto-campaign` bundled skill facade.** One user invocation authorizes one
+  bounded conversational campaign turn over the existing `repo-harness campaign`
+  commands, then reports and returns control. No daemon, cron, hook-triggered
+  execution, automatic next turn, or automatic merge; token and monetary caps
+  stay null rather than being claimed as a hard budget.
+- **`repo-harness refactor recommendations` surfaces measured refactor
+  opportunities for user approval.** It reads measured opportunities for an agent
+  to raise with you and never executes one; `--json` prints the recommendations
+  together with readiness. The user decision stays the gate.
+- **The operator board shows a fenced read-only task worktree diff.** The diff
+  carries explicit target and head identity, the tracked patch, and untracked
+  filenames. Git reads are bounded and cancellable, external filters and hidden
+  index changes are refused, lazy fetch and fsmonitor are disabled, and physical
+  directory identities are compared across Windows short and long aliases.
+
+### Changed
+
+- **CI selects coverage from the actual changed paths.** Documentation-only
+  changes use the documentation lane, draft PRs defer expensive testing, and
+  other changes keep full coverage; independent test files run in a bounded
+  worker pool.
+- **Source tests reuse isolated fixture templates and proven in-process CLI
+  seams.** Templates restore their original paths so repository-bound receipts
+  remain valid; real package-install and Herdr cases run in the explicit
+  release lane.
+
+- **Architecture projection is configured once per user, not once per
+  repository.** `projection_provider`, `projection_apply`,
+  `projection_failure_gate`, `projection_timeout_ms`, and the retired
+  `projection_version` no longer live in
+  `.ai/harness/policy.json#architecture`; the host-wide authority is
+  `~/.repo-harness/config.json#architecture`, seeded by the global runtime step
+  on install and update. Run `repo-harness update` once for the account, then
+  `repo-harness init --repo .` in each repository. Adoption strips the retired
+  repository keys rather than copying repository preferences into the host
+  configuration, and `init` reports an `architecture projection readiness` step
+  naming the exact repair when the global document is missing.
+- **The operator board is scoped to the selected repository** and the operator
+  browser payload moves to protocol 5, versioned separately from
+  `FLEET_BOARD_PROTOCOL`. The tarball smoke now imports
+  `OPERATOR_FLEET_PAYLOAD_PROTOCOL` from the installed package instead of
+  restating the number, so the next bump cannot pass its own tests while failing
+  the smoke.
+- **A repository that never opted in starts projecting after `update`.** The
+  retired repository defaults were `provider: disabled` and `apply: disabled`,
+  while the host defaults are `projection_provider: archctx` and
+  `projection_apply: automatic`, and adoption deletes the repository keys without
+  a warning. A repository that had projection off (deliberately or by never
+  having touched it) therefore projects automatically once the account runs
+  `update`, and one that set
+  `projection_failure_gate: strict` drops to `advisory`. Assert the `architecture`
+  block you want in `~/.repo-harness/config.json` before running `init`: the
+  repository keys are gone by the time `init` returns and the setting is no longer
+  representable at repository scope.
+
+### Fixed
+
+- **`init` establishes global automation defaults after successful adoption.**
+  Account configuration writes use the shared host transaction lock so init,
+  install and update cannot race the same configuration document.
+- **Issue observation and external-source refresh forward injected clocks.**
+  GitHub fetch deadlines use the caller's clock, avoiding mixed-clock failures
+  exposed by parallel test execution.
+
+- **Install honors ownership receipts on upgrade.** Unchanged files recorded in
+  the installation manifest can now upgrade to a newer package, while unowned or
+  user-modified content stays protected. Bundled skills synchronize their entire
+  trees, including updated and retired references, with rollback on copy
+  failure. `deep-worker` is included in installation transaction capture and
+  fleet completeness checks.
+- **Herdr repository configuration is seeded and diagnosed correctly.**
+  TypeScript repository adoption now supplies the canonical Herdr version pin.
+  A missing or malformed `external_tooling.herdr.min_version` reports
+  `configuration-error` instead of runtime `unavailable`, while strict readiness
+  still fails closed. After upgrading, run `repo-harness init --repo .` in an
+  affected repository to fill missing defaults; explicit malformed values must be
+  corrected deliberately. A global runtime refresh alone does not update
+  repository policy.
+- **Campaign preparation retries when the prior attempt produced no runtime
+  effect.** A preparation record was admitted once and any second call threw
+  `campaign preparation already admitted`, so a worker interrupted between
+  persisting the record and creating the container had no way forward: the record
+  blocked the retry and no container journal existed to reconcile. `prepareChild`
+  now reads the prior record and retries against it for the worker role only (no launch, final, child, verifier preparation, downstream phase record, or
+  attempt reservation), and only on an identical identity whose bound neither
+  replaces nor extends the original deadline, so the immutable effect window is
+  preserved rather than renewed. `assertCampaignPreparationRetryable` is the
+  exclusive fence before the container create request: an existing container
+  journal for either the version probe or the workload identity means the attempt
+  already reached the runtime, and reconciliation is the only exit.
+- **`workflow_write_run_summary` emits the full record on jq-less hosts.** The
+  shell writer in `assets/hooks/lib/workflow-state.sh` produces the same shape as
+  `stop-handler.ts` and is the larger producer by volume, but its jq-less branch
+  emitted 5 of the 11 fields. Now that retention identifies a deletable record by
+  that shape, the short branch would have made every jq-less host's summaries
+  permanently unreclaimable. Both branches now emit the same fields, under tests
+  that prove which branch ran.
+- **`check:reference-configs` is listed with its family in the root required
+  checks.** It is the third member of the `check:hooks` / `check:helpers` family
+  and was missing, which is how a release note authored directly in the
+  `docs/reference-configs/` projection (instead of its `assets/reference-configs/`
+  source) reached CI before the next sync would have deleted it silently.
 
 ## [0.19.0] - 2026-09-10
 

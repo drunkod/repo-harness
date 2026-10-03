@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   OPERATOR_COLLABORATION_PROTOCOL,
   OPERATOR_COLLABORATION_SNAPSHOT_KIND,
-  type OperatorCollaborationSnapshotV1,
+  type OperatorCollaborationSnapshotV4,
 } from '../../src/core/operator/collaboration-snapshot';
 import {
   OperatorCollaborationError,
@@ -13,10 +13,14 @@ import {
   OPERATOR_API_PATH_PREFIX,
   OPERATOR_COLLABORATION_SNAPSHOT_ROUTE,
   OPERATOR_FLEET_SNAPSHOT_PATH,
+  OPERATOR_REPOSITORY_SNAPSHOT_ROUTE,
   OPERATOR_HEALTH_PATH,
   OPERATOR_ROUTES,
   OPERATOR_STATIC_ASSET_PATTERN,
   OPERATOR_TASK_MESSAGE_ROUTE,
+  OPERATOR_TASK_DIFF_ROUTE,
+  OPERATOR_TASK_ACTIVITY_ROUTE,
+  OPERATOR_TASK_CONTEXT_ROUTE,
   type OperatorRouteV1,
 } from '../../src/effects/operator/server';
 
@@ -30,14 +34,18 @@ function writeRouteIds(routes: readonly OperatorRouteV1[]): readonly string[] {
 }
 
 function collaborationSnapshot(
-  overrides: Partial<OperatorCollaborationSnapshotV1> = {},
-): OperatorCollaborationSnapshotV1 {
+  overrides: Partial<OperatorCollaborationSnapshotV4> = {},
+): OperatorCollaborationSnapshotV4 {
   return {
     protocol: OPERATOR_COLLABORATION_PROTOCOL,
     kind: OPERATOR_COLLABORATION_SNAPSHOT_KIND,
-    repository_id: 'repo-a',
+    repository_id: 'repo-a', decision_after: null,
+    planning: { status: 'unavailable', observed_at: '2026-09-22T00:00:00.000Z', code: 'source_unavailable' },
+    decisions: { status: 'unavailable', observed_at: '2026-09-22T00:00:00.000Z', code: 'source_unavailable' },
+    exchange: { status: 'unavailable', observed_at: '2026-09-22T00:00:00.000Z', code: 'source_unavailable' },
+    organization: { status: 'unavailable', observed_at: '2026-09-22T00:00:00.000Z', code: 'source_unavailable' },
     ...overrides,
-  } as OperatorCollaborationSnapshotV1;
+  } as OperatorCollaborationSnapshotV4;
 }
 
 describe('operator structural write boundary', () => {
@@ -58,14 +66,22 @@ describe('operator structural write boundary', () => {
     expect(patterns.size).toBe(OPERATOR_ROUTES.length);
     expect([...patterns.keys()]).toEqual([
       'health',
+      'repository_snapshot',
       'fleet_snapshot',
       'collaboration_snapshot',
+      'task_context',
+      'task_activity',
+      'task_diff',
       'static_asset',
       'task_message',
     ]);
     expect(patterns.get('health')).toBe(OPERATOR_HEALTH_PATH);
+    expect(patterns.get('repository_snapshot')).toBe(OPERATOR_REPOSITORY_SNAPSHOT_ROUTE.source);
     expect(patterns.get('fleet_snapshot')).toBe(OPERATOR_FLEET_SNAPSHOT_PATH);
     expect(patterns.get('collaboration_snapshot')).toBe(OPERATOR_COLLABORATION_SNAPSHOT_ROUTE.source);
+    expect(patterns.get('task_context')).toBe(OPERATOR_TASK_CONTEXT_ROUTE.source);
+    expect(patterns.get('task_activity')).toBe(OPERATOR_TASK_ACTIVITY_ROUTE.source);
+    expect(patterns.get('task_diff')).toBe(OPERATOR_TASK_DIFF_ROUTE.source);
     expect(patterns.get('static_asset')).toBe(OPERATOR_STATIC_ASSET_PATTERN);
     expect(patterns.get('task_message')).toBe(OPERATOR_TASK_MESSAGE_ROUTE.source);
 
@@ -81,7 +97,7 @@ describe('operator structural write boundary', () => {
       [collaborationSnapshot({ repository_id: 'repo-b' }), 'repo-a'],
       [collaborationSnapshot({ protocol: 99 as never }), 'repo-a'],
       [collaborationSnapshot({ kind: 'operator_fleet_snapshot' as never }), 'repo-a'],
-      [{} as OperatorCollaborationSnapshotV1, 'repo-a'],
+      [{} as OperatorCollaborationSnapshotV4, 'repo-a'],
     ] as const) {
       let thrown: unknown;
       try {

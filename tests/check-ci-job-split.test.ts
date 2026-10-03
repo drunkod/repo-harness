@@ -1,77 +1,90 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { selectAffectedTests, selectCoverage } from '../scripts/select-ci-coverage';
 
 const ROOT = resolve(import.meta.dir, '..');
 const workflow = Bun.YAML.parse(readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8')) as any;
+const sha = '1'.repeat(40);
+const input = { eventName: 'pull_request', event: { pull_request: { draft: true, base: { sha } } }, headSha: sha, actualHead: sha };
+const record = `:100644 100644 ${sha} ${sha} M\0src/feature.ts\0`;
 
-function runLane(lane: string, governanceExit: number, testExit: number) {
-  const bin = mkdtempSync(join(tmpdir(), 'rh-ci-lane-'));
-  try {
-    writeFileSync(join(bin, 'bun'), `#!/bin/bash\nif [[ "$1" == test ]]; then echo FUNCTIONAL_TEST_EXECUTED; exit ${testExit}; fi\nexit 0\n`, { mode: 0o755 });
-    writeFileSync(join(bin, 'npm'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
-    writeFileSync(join(bin, 'bash'), `#!/bin/bash\nif [[ "$1" == scripts/check-task-sync.sh ]]; then echo GOVERNANCE_EXECUTED; exit ${governanceExit}; fi\nexit 0\n`, { mode: 0o755 });
-    return spawnSync('/bin/bash', ['scripts/check-ci.sh', lane], {
-      cwd: ROOT, encoding: 'utf8',
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BUN_TEST_ISOLATE_FILES: '0', REPO_HARNESS_DIFF_BASE: 'HEAD' },
-    });
-  } finally {
-    rmSync(bin, { recursive: true, force: true });
-  }
-}
-
-describe('CI independent governance and functional lanes', () => {
-  test('a governance failure does not suppress the separate functional invocation', () => {
-    const governance = runLane('governance', 19, 23);
-    const functional = runLane('functional', 19, 23);
-    expect(governance.status).toBe(19);
-    expect(governance.stdout).not.toContain('FUNCTIONAL_TEST_EXECUTED');
-    expect(functional.stdout).toContain('FUNCTIONAL_TEST_EXECUTED');
-    expect(functional.stdout).not.toContain('GOVERNANCE_EXECUTED');
-    expect(functional.status).toBe(23);
+describe('single affected verification and daily fallback', () => {
+  test('exact complete diff is required, including draft candidates', () => {
+    expect(selectCoverage({ ...input, diffRaw: record })).toEqual({ mode: 'affected', reason: 'complete-diff', paths: ['src/feature.ts'] });
+    for (const diffRaw of [null, '', record.slice(0, -1), record + '\0', record.replace(' M\0', ' R100\0'), record.replace(sha, 'bad'), record.replace('src/feature.ts', 'src/../feature.ts')]) {
+      expect(selectCoverage({ ...input, diffRaw }).mode).toBe('invalid');
+    }
+    expect(selectCoverage({ ...input, actualHead: '2'.repeat(40), diffRaw: record }).mode).toBe('invalid');
+    expect(selectCoverage({ ...input, eventName: 'schedule', diffRaw: null }).mode).toBe('daily');
+    expect(selectCoverage({ ...input, eventName: 'push', event: { before: sha }, diffRaw: record }).mode).toBe('report');
   });
 
-  test('successful functional lane includes package smoke without governance', () => {
-    const result = runLane('functional', 19, 0);
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain('FUNCTIONAL_TEST_EXECUTED');
-    expect(result.stdout).toContain('[ci] package dry-run');
-    expect(result.stdout).not.toContain('GOVERNANCE_EXECUTED');
+  test('real dependency and runtime consumers expand transitively; unknown coverage fails instead of full-suite', () => {
+    const sources = new Map([
+      ['src/core/feature.ts', 'export const feature = 1'],
+      ['src/effects/feature.ts', "import { feature } from '../core/feature'; export const result = feature"],
+      ['tests/unit/feature.test.ts', "import { result } from '../../src/effects/feature';"],
+      ['src/cli/index.ts', "import { result } from '../effects/feature';"],
+      ['tests/cli/consumer.test.ts', "const CLI = join(ROOT, 'src/cli/index.ts'); spawnSync('bun', [CLI]);"],
+      ['tests/unrelated.test.ts', "import { other } from '../src/other';"],
+    ]);
+    expect(selectAffectedTests(['src/core/feature.ts'], sources)).toEqual(['tests/cli/consumer.test.ts', 'tests/unit/feature.test.ts']);
+    expect(selectAffectedTests(['tests/unrelated.test.ts'], sources)).toEqual(['tests/unrelated.test.ts']);
+    expect(selectAffectedTests(['docs/researches/observation.md'], sources)).toEqual([]);
+    expect(() => selectAffectedTests(['unknown/product.conf'], sources)).toThrow('coverage is unknown');
+    expect(selectAffectedTests(['src/core/deleted.ts'], new Map([...sources, ['src/core/deleted.ts', 'export const feature=1'], ['src/effects/feature.ts', "// old imported edge kept for this diff\nimport { feature } from '../core/deleted';"]]))).toEqual(['tests/cli/consumer.test.ts', 'tests/unit/feature.test.ts']);
   });
 
-  test('invalid lane fails before installing or checking anything', () => {
-    const result = runLane('typo', 0, 0);
-    expect(result.status).toBe(2);
-    expect(result.stdout).not.toContain('[ci] install');
-  });
-
-  test('workflow schedules both lanes without dependencies and aggregates every job', () => {
+  test('workflow confines full and matrix jobs to fixed main daily snapshots', () => {
     const { jobs } = workflow;
-    expect(jobs.governance).toBeDefined();
-    for (const id of ['governance', 'test']) {
-      expect(jobs[id].needs).toBeUndefined();
-      expect(jobs[id].if).toBeUndefined();
-      expect(jobs[id]['continue-on-error']).toBeUndefined();
-      const lane = id === 'test' ? 'functional' : 'governance';
-      expect(jobs[id].steps.some((step: any) => step.run === `bash scripts/check-ci.sh ${lane}`)).toBe(true);
-    }
+    expect(workflow.on.schedule).toEqual([{ cron: '0 19 * * *' }]);
     expect(jobs.required.name).toBe('Required / CI');
-    expect(jobs.required.if).toBe('always()');
-    expect([...jobs.required.needs].sort()).toEqual(Object.keys(jobs).filter(id => id !== 'required').sort());
+    expect(jobs.required.needs).toEqual(['selection', 'verify']);
+    expect(jobs.verify.if).toBe("needs.selection.outputs.mode == 'affected'");
+    expect(jobs.verify.steps.some((step: any) => step.run === 'bash scripts/check-ci.sh affected')).toBe(true);
+    for (const id of ['governance', 'test', 'mcp-path-matrix']) {
+      expect(jobs[id].if).toBe("needs.selection.outputs.mode == 'daily'");
+      expect(jobs[id].steps.find((step: any) => step.uses === 'actions/checkout@v4').with.ref).toBe('${{ needs.selection.outputs.sha }}');
+      expect(jobs[id]['continue-on-error']).toBeUndefined();
+      expect(jobs[id]['timeout-minutes']).toBeGreaterThan(0);
+    }
+    const reporter = Bun.YAML.parse(readFileSync(join(ROOT, '.github/workflows/ci-report.yml'), 'utf8')) as any;
+    expect(reporter.on.workflow_run.types).toEqual(['completed']);
+    expect(reporter.jobs.report.if).toContain("head_branch == 'main'");
+    expect(reporter.jobs.report.steps.find((step: any) => step.uses === 'actions/checkout@v4').with.ref).toBe('main');
   });
 
-  test('actual aggregate shell accepts only success for every required dependency', () => {
-    const required = workflow.jobs.required;
-    const statuses = ['success', 'failure', 'cancelled', 'skipped'];
-    expect(required.needs).toContain('governance');
-    for (const governance of statuses) for (const functional of statuses) for (const matrix of statuses) {
-      const results: Record<string, string> = { governance, test: functional, 'mcp-path-matrix': matrix };
-      const command = required.steps[0].run.replace(/\$\{\{\s*needs\.([\w-]+)\.result\s*\}\}/g,
-        (_match: string, id: string) => results[id]);
-      const result = spawnSync('/bin/bash', ['-c', command], { encoding: 'utf8' });
-      expect(result.status === 0).toBe(Object.values(results).every(value => value === 'success'));
+  test('real aggregate shell rejects failure, cancellation, omission and invalid coverage', () => {
+    const command = workflow.jobs.required.steps[0].run;
+    for (const selection of ['success', 'failure', 'cancelled', 'skipped']) {
+      for (const verification of ['success', 'failure', 'cancelled', 'skipped']) {
+        for (const mode of ['affected', 'daily', 'invalid', '']) {
+          const result = spawnSync('/bin/bash', ['-c', command], { encoding: 'utf8', env: { ...process.env, SELECTION_RESULT: selection, COVERAGE_MODE: mode, VERIFY_RESULT: verification } });
+          expect(result.status === 0).toBe(selection === 'success' && verification === 'success' && mode === 'affected');
+        }
+      }
     }
+  });
+
+  test('selector uses actual complete Git PR diff and outputs selected files', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'rh-ci-selection-'));
+    const git = (...args: string[]) => { const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8' }); if (result.status !== 0) throw Error(result.stderr); return result.stdout.trim(); };
+    const write = (path: string, content: string) => { mkdirSync(resolve(repo, path, '..'), { recursive: true }); writeFileSync(join(repo, path), content); };
+    try {
+      git('init', '-q'); git('config', 'user.name', 'CI fixture'); git('config', 'user.email', 'ci@example.invalid'); git('config', 'commit.gpgsign', 'false');
+      write('src/feature.ts', 'export const feature=1;');
+      write('tests/feature.test.ts', "import { feature } from '../src/feature';");
+      git('add', '.'); git('commit', '-qm', 'base'); const base = git('rev-parse', 'HEAD');
+      write('src/feature.ts', 'export const feature=2;'); git('add', '.'); git('commit', '-qm', 'candidate'); const head = git('rev-parse', 'HEAD');
+      const event = join(repo, '.git/event.json'); const output = join(repo, '.git/output');
+      writeFileSync(event, JSON.stringify({ pull_request: { draft: true, base: { sha: base } } })); writeFileSync(output, '');
+      const result = spawnSync(process.execPath, [join(ROOT, 'scripts/select-ci-coverage.ts')], { cwd: repo, encoding: 'utf8', env: { ...process.env, GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: event, GITHUB_OUTPUT: output, GITHUB_SHA: head } });
+      expect(result.status).toBe(0);
+      expect(JSON.parse(readFileSync(join(repo, '.ci-affected-tests.json'), 'utf8'))).toEqual(['tests/feature.test.ts']);
+      expect(readFileSync(output, 'utf8')).toBe(`mode=affected\nsha=${head}\n`);
+    } finally { rmSync(repo, { recursive: true, force: true }); }
   });
 });

@@ -40,6 +40,15 @@ import {
 
 const ROOT = join(import.meta.dir, '..');
 
+// These two cases run `npm pack` over the whole repository and install the
+// resulting tarball into an isolated HOME, so they belong to the release lane
+// (`scripts/check-ci.sh` with no lane argument) rather than the hosted
+// functional lane. The release lane owns this gate variable; generic review domain fixtures need no live provider.
+const releaseLaneOnly = test.skipIf(!process.env.REPO_HARNESS_TEST_EXPENSIVE);
+if (!process.env.REPO_HARNESS_TEST_EXPENSIVE) {
+  console.log('[gate] REPO_HARNESS_TEST_EXPENSIVE unset: skipping the real pack/install cases (release lane only, not a failure).');
+}
+
 describe('No Harness / Lite / Strict benchmark authority', () => {
   test('fixes producer cost at two concurrent arms and a 50 minute absolute budget', () => {
     expect(BENCHMARK_MAX_CONCURRENCY).toBe(2);
@@ -284,7 +293,7 @@ describe('No Harness / Lite / Strict benchmark authority', () => {
     expect(env.PATH?.split(':')[0]).toBe('/tmp/benchmark-host/.bun/bin');
   });
 
-  test('packs exactly one external immutable runtime artifact and rejects mutation', () => {
+  releaseLaneOnly('packs exactly one external immutable runtime artifact and rejects mutation', () => {
     const runRoot = mkdtempSync(join(tmpdir(), 'harness-runtime-artifact-'));
     try {
       const artifact = prepareBenchmarkRuntimeArtifact(ROOT, runRoot);
@@ -322,9 +331,11 @@ describe('No Harness / Lite / Strict benchmark authority', () => {
     } finally {
       rmSync(runRoot, { recursive: true, force: true });
     }
-  }, 30_000);
+    // Packing the self-contained runtime (package plus node_modules) measured
+    // 34 s on macOS bsdtar with no other load.
+  }, 120_000);
 
-  test('reuses one packed artifact across isolated installs without mutating source authority', () => {
+  releaseLaneOnly('reuses one packed artifact across isolated installs without mutating source authority', () => {
     const runRoot = mkdtempSync(join(tmpdir(), 'harness-runtime-install-'));
     const manifest = join(ROOT, 'evals/harness/scenarios.json');
     const seed = resolve(ROOT, 'evals/fixtures/harness-matrix');

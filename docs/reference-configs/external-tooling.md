@@ -97,8 +97,7 @@ Codex/Claude hook adapters, Waza (`think`, `hunt`, `check`, `health`), brain
 root persistence, Mermaid, and CodeGraph CLI/MCP configuration.
 `repo-harness init` remains a compatibility alias for existing automation. The
 bootstrap path must not silently install unrelated toolchains or Claude
-marketplace plugins. The one explicit exception is OpenAI's official
-`codex@openai-codex` plugin for the Codex-host outside-review capability.
+marketplace plugins. User-managed plugins remain outside repo-harness installation.
 
 `repo-harness uninstall --dry-run` previews user-level cleanup without writing
 configuration, locks or receipts. `repo-harness uninstall` applies it; `--json`
@@ -148,24 +147,14 @@ Waza and Mermaid providers remain behind explicit `--with-external-skills`;
 Repo-local workflow refresh stays on `repo-harness init`; `setup check
 --check-updates` remains the read-only advisory surface.
 
-The cross-review skill is **harness-owned** — its routing source lives in
-`assets/skills/repo-harness-cross-review/`. Claude hosts wrap `codex exec` in a
-read-only sandbox. Codex hosts discover and invoke OpenAI's official
-`codex@openai-codex` plugin companion/app-server runtime; they never launch
-Claude as the reviewer and never fall back when the plugin is unavailable.
-Installing that single plugin is therefore a workflow-owned runtime concern,
-not an unrelated toolchain. `repo-harness-cross-review` installs
-host-aware during `repo-harness install`/`init` and explicit external-skill
-refreshes: it installs into **both** `~/.claude/skills` (a Claude session
-asking Codex for an independent review, via its Codex provider mode) and
-`~/.codex/skills` (a Codex session asking Codex through the official plugin,
-via its `codex-plugin` provider mode) for the full profile. Review Gate is not
-enabled. `claude-plan` installs only into
-`~/.codex/skills` (a Codex session using Claude's headless plan mode for a
-plan consult on a mid-execution design fork) and is unaffected by this
-package's host-aware installation. These harness skills ship with the full
-profile (the default for `init`) and provide the peer acceptance gate surface
-for the typed `AcceptanceReceipt`; the review section is projection only.
+The cross-review skill is **harness-owned**; its routing source lives in
+`assets/skills/repo-harness-cross-review/`. Explicit independent review uses
+the persistent fleet deep-reasoner task-agent and existing OAR host in Herdr.
+The full profile installs this Skill on both hosts; generic-review file Result
+and typed Receipt own acceptance. The direct advisory runtime is retired.
+Plugin install/discovery/readiness is not a repo-harness runtime dependency;
+user-managed plugins remain untouched. Plan consultation uses persistent
+task-agent collaborators in Herdr. Review Markdown remains projection only.
 
 Reverse Skill is registered from `zhaoxuya520/reverse-skill` as the recommended
 but explicit-only `reverse-skill-router`. It is not part of either install
@@ -212,6 +201,12 @@ a missing skill as a gap in the `obsidian_runtime_skills` section. The gap is
 advisory for the environment check and fail-closed at skill runtime:
 `obsidian-memory` stops and reports rather than hand-writing its own Markdown
 dialect. This repo does not vendor either skill body.
+
+## Herdr Dispatch
+
+- Suggested model split: when both are available, Claude (deep tier) drafts the architecture and Codex executes against the agreed plan; with only one, that model does both (plan first, then execute).
+- Route all cross-model dispatch and review through herdr panes (OAR runs the worker, herdr owns panes and visibility); never start direct subprocesses or hand-written CLI calls.
+- When a PR changes both test assertions and implementation code, dispatch its read-only review to the other model via herdr when available; otherwise run a read-only self-review in a separate same-model pane.
 
 ## Detect Safely
 
@@ -517,7 +512,7 @@ Minimal manifest shape:
   "run_id": "20260629T023507Z-aibridge-screenshot",
   "provider": {
     "name": "aibridge",
-    "version": "1.5.0"
+    "version": "1.6.1"
   },
   "subject": {
     "task_type": "unity.ui",
@@ -609,7 +604,7 @@ diff -qr ~/.agents/skills/geju ~/.codex/skills/geju
 ### CodeGraph
 
 ```bash
-bun add -g @colbymchenry/codegraph@1.5.0 && codegraph sync . && codegraph status .
+bun add -g @colbymchenry/codegraph@1.6.1 && codegraph sync . && codegraph status .
 ```
 
 ## Agent Fleet
@@ -637,23 +632,26 @@ mapping.
 
 | Source `model` | Codex `model` | Source `effort` | Codex `model_reasoning_effort` |
 |---|---|---|---|
-| `opus` | `gpt-5.6-terra` | `low`, `medium`, `high`, `xhigh`, `max` | same string, unchanged |
-| `sonnet`, `haiku` | `gpt-5.6-luna` | `low`, `medium`, `high`, `xhigh`, `max` | same string, unchanged |
-| `fable` | `gpt-5.6-sol` | `low`, `medium`, `high`, `xhigh`, `max` | same string, unchanged |
+| `opus` | `gpt-6-astra` | `low`, `medium`, `high`, `xhigh`, `max` | same string, unchanged |
+| `sonnet`, `haiku` | `gpt-6-luna` | `low`, `medium`, `high`, `xhigh`, `max` | same string, unchanged |
+| `fable` | `gpt-6.1-sol` | `low`, `medium`, `high`, `xhigh`, `max` | same string, unchanged |
 
-Three per-agent target overrides are applied after tuple validation, on top of
+Seven per-agent target overrides are applied after tuple validation, on top of
 the family row above, and are the only model/effort remaps in the generator:
-`fast-worker` (`opus`/`medium`) targets `gpt-6-astra` at `low` (light) reasoning;
-`deep-worker` (`opus`/`high`) and `gatekeeper` (`opus`/`high`) both target
-`gpt-6-astra` at `medium` reasoning. Every other agent's Codex model and effort follow the family row
-unchanged.
+`explorer` (`sonnet`/`medium`) targets `gpt-6-luna` at `high` reasoning;
+`deep-reasoner` (`opus`/`xhigh`) targets `gpt-6-astra` at `high` reasoning;
+`fast-worker` (`sonnet`/`high`) targets `gpt-6.1-sol` at `medium` reasoning;
+`deep-worker` (`opus`/`high`) targets `gpt-6.1-sol` at `high` reasoning;
+`gatekeeper` (`opus`/`high`) targets `gpt-6-astra` at `medium` reasoning;
+`root-cause-prover` (`opus`/`xhigh`) targets `gpt-6-astra` at `high` reasoning;
+`harness-evaluator` (`opus`/`high`) targets `gpt-6-astra` at `medium` reasoning.
 
 `fast-worker`, `deep-worker`, `root-cause-prover`, and `harness-evaluator`
 receive `sandbox_mode = "workspace-write"`; every other role receives
 `sandbox_mode = "read-only"`. Current assignments are explorer
-(`sonnet/high`), deep-reasoner (`opus/xhigh`), fast-worker (`opus/medium`),
+(`sonnet/medium`), deep-reasoner (`opus/xhigh`), fast-worker (`sonnet/high`),
 deep-worker (`opus/high`), gatekeeper (`opus/high`), root-cause-prover
-(`opus/high`), and harness-evaluator (`opus/high`). Root-cause-prover's prompt further limits
+(`opus/xhigh`), and harness-evaluator (`opus/high`). Root-cause-prover's prompt further limits
 writes to bugfix evidence inside the active contract's allowed paths;
 harness-evaluator runs existing skill/adoption surfaces only when both repo and
 HOME pass the runner's disposable boundary: skills uses `--require-disposable`,
@@ -930,17 +928,51 @@ spawns a daemon or external process. Bun older than 1.3 has no `Bun.YAML`; that
 fails closed with upgrade guidance and only when `capability_source` is
 `archcontext`.
 
-Architecture projection is a separate authority. When
-`architecture.projection_provider=archctx`, repo-harness resolves the exact
-version from the consumer dependency tree, executes only that package's declared
-`bin.archctx`, performs a JSON capability handshake, and rejects PATH-only,
-escaping, or mismatched installations. The advisory
-global-tool detector below does not satisfy projection readiness; use
-`repo-harness architecture-projection status --json`. The provider remains
-disabled by default until the release pin is cut over.
+Architecture projection execution is user-level configuration in
+`~/.repo-harness/config.json#architecture`. `repo-harness install` and
+`repo-harness update` initialize it once with `projection_provider: "archctx"`,
+`projection_apply: "automatic"`, `projection_failure_gate: "advisory"`, and
+`projection_timeout_ms: 120000`. Repeated setup preserves an explicit global
+choice, including disabled. Malformed or partial settings fail closed without
+rewriting the file; unrelated user settings are preserved. The exact provider
+version is owned by the packaged release contract, not a configurable repo pin.
 
-When enabled, PostEdit writes only `change_observed` v2 journal records. Stop
-coalesces all eligible records into one durable projection job, excludes
+`repo-harness init` remains a repository-only transaction. Standard/self-host adoption
+removes retired `architecture.projection_*` execution keys from repo policy and
+reports global provider readiness, without writing user configuration or
+inventing the project's model. Minimal adoption does not author a policy.
+Runtime does not read or merge retired repo execution settings. Capability
+identity, model files, documentation ownership and project freshness gates
+remain repository-local. Missing model/adoption evidence still blocks apply;
+global automatic mode does not authorize ownership adoption or semantic acceptance.
+
+Use `repo-harness architecture-projection policy --json` to inspect the global
+source path, initialization state and effective execution settings without a
+provider process. `repo-harness architecture-projection status --json` adds the
+exact package capability handshake and project apply readiness. The running
+repo-harness package owns the `archctx` executable and exact dependency version;
+its dependency tree is refreshed by the global update transaction. A target
+repository's `node_modules/archctx` never overrides that runtime dependency.
+Source-checkout execution uses that checkout's repo-harness dependencies, and
+candidate verification may explicitly select the candidate package root.
+Missing or mismatching runtime dependencies still fail closed with no target-repo
+fallback. Project model, ownership and snapshot checks remain repository-local.
+
+SessionStart also gives the Agent read-only model coverage guidance under this
+global provider setting; no per-repo execution toggle is needed. It observes empty
+capability models, missing declared module documents, and tracked package roots
+with no capability match or a shared ancestor capability. These are bounded
+inspection prompts, not inferred semantic nodes. The Agent uses the
+`repo-harness-architecture` skill to inspect source evidence and decide boundaries
+within the authorized task, then creates nodes through archctx ChangeSets and
+runs the existing projection. An intentional umbrella is valid. Hooks do not
+write model YAML, and unrelated coverage findings remain advice. The manifest
+inventory is limited to Git-tracked `package.json` paths; this is not a complete
+semantic coverage audit for every language or untracked source tree. Inspection
+errors become SessionStart provider diagnostics instead of invented model facts.
+
+When enabled, Stop observes the Git changed set and coalesces eligible paths
+into one durable projection job, excludes
 ArchContext-owned `docs/architecture/**` and declared agent-context targets,
 and acknowledges the source records only after a typed projection receipt is
 durable. Process, timeout, stale-snapshot, invalid-result, and refresh failures
@@ -973,6 +1005,51 @@ letter into its terminal job receipt, and is byte-idempotent on the same signal
 and approval reference. `status --json` reports unresolved or invalid
 acceptance evidence, and the strict architecture gate fails closed on either;
 the command never chooses or infers an architecture decision.
+
+For accepted apply, acceptance records an exact request intent before invoking
+ArchContext and the original result before running refresh actions. A retry
+with this pending evidence uses the provider's `projection-apply-readback-v1`
+capability. Readback returns the immutable committed receipt, original refresh
+signals, and a freshly verified current fixed point without changing provider
+delivery state. The same candidate, approval reference, request, and snapshot
+must still match. If the provider proves the exact request has no committed
+receipt, only an intent without a recorded result may retry apply; the provider
+checks the receipt again within its writer lock before writing. Errors and
+missing capabilities never authorize another apply.
+
+To recover an older interrupted accept that has no local intent, run
+`repo-harness architecture-projection accept --recover --signal-id <sha256> --approval-reference <original-event-id> --json`.
+This explicit command only resumes a committed apply. It fails if the provider
+has no receipt, and never creates an apply or poisons a fresh candidate with an
+unrecoverable intent. Adoption recovery is unsupported and fails closed; it is
+not converted into apply. Pending evidence remains content-bound local runtime
+state after completion; the final acceptance receipt is the resolution authority.
+The readback capability must be present in both the packaged CLI and its daemon;
+installing a new CLI alone does not upgrade a running daemon.
+
+Managed install/update also verifies `daemon status --json` through the same
+exact package-local CLI and compatible Node runtime after static capabilities.
+A running daemon must prove RPC and product-version compatibility; upstream
+`versionUnsupported` diagnostics (including a replaced entrypoint) fail the
+strict installed-runtime verifier with an explicit user-authorization reminder.
+Install/update reports daemon readiness as pending (`skipped`) separately from
+verified package installation, retaining the candidate so a daemon mismatch
+cannot trigger package rollback and strand newer hoisted dependencies.
+An upstream `staleConnection:true` response is unhealthy, not cleanly stopped. A stopped daemon needs no
+replacement and this check never starts it. Upstream status may recover stale
+control files; the check never upgrades the daemon or creates/clears indexes.
+
+Runtime failures with the typed `AC_RUNTIME_VERSION_UNSUPPORTED` code and
+`upgrade-archctx-runtime` action preserve the reminder beyond the ordinary
+300-character process-error preview, including projection/refactor callers.
+The Agent presents the reported discrepancy and asks for user authorization
+before running `daemon upgrade` through the same managed CLI and Node runtime.
+Explain that replacing a shared daemon interrupts other clients. After authorized
+replacement, verify daemon compatibility and inspect this repository's configured
+CodeGraph index. Request authorization to rebuild only when its authoritative
+status reports it missing or stale; verify readiness before retrying the blocked
+operation. CLI upgrade alone does not prove that an index needs rebuilding.
+Never delete the shared database or all repository indexes as recovery.
 If a candidate's exact reason set is only `verified-flow-proof-changed`, use
 `repo-harness architecture-projection reconcile --signal-id <sha256> --json`
 after refreshing the configured CodeGraph index. Reconciliation runs the same
@@ -1125,3 +1202,37 @@ repo-harness run check-brain-manifest
 repo-harness run sync-brain-docs --all
 repo-harness run sync-brain-docs --check
 ```
+
+
+## Proactive refactor recommendations
+
+`~/.repo-harness/config.json#refactor_recommendations` contains `{ "enabled": true }`
+by default. Global install/update initializes the setting once and preserves an
+explicit disabled choice. Repositories do not need another enable switch.
+
+At normal Stop, repo-harness observes ArchContext structural candidates when a
+project model is present. It uses the packaged exact provider contract and
+existing lifecycle readback; it does not require or change execution activation.
+Only complete, non-truncated code facts with unambiguous ownership produce a
+recommendation. The observer never creates an index or model on the user's behalf.
+
+The Agent receives at most three candidates and is instructed to explain the
+measured evidence, inferred benefit and risk, then ask the user whether to
+proceed, defer or decline. No author, recommendation record/acceptance,
+Work Package, program or code edit is triggered by observation. User approval
+uses the normal approved-plan workflow and its existing execution gates.
+
+Observation gets at most ten seconds within Stop's existing twenty-second
+shared work budget, with a five-minute scan cooldown. A delivery ledger retains up to 4096
+recommendation identity/fingerprint pairs without eviction. At capacity, automatic
+delivery pauses with an explicit diagnostic; existing identities remain suppressed.
+The explicit CLI still permits observation without consuming delivery history. The one-shot
+Stop continuation ends after presenting the choice; waiting for an answer does
+not hold Stop in a loop. State and the last observation are stored in the ignored
+`.ai/harness/runs/refactor-recommendations.json`; they are delivery evidence,
+not user approval or upstream recommendation status.
+
+`repo-harness refactor recommendations --repo <root> --json` explicitly reads
+current opportunities through the same observer, without consuming Stop's
+delivery history or requiring `refactor discover`'s author activation. It returns
+readiness/error status when evidence is unavailable; it never invents a candidate.

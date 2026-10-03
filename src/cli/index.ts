@@ -24,9 +24,8 @@ import { CLI_VERSION, formatStatus, runStatus } from './commands/status';
 import { formatDoctor, runDoctor } from './commands/doctor';
 import { buildInitHookCommand, buildSetupCommand, formatInitHook, runInitHook } from './commands/init-hook';
 import { formatMigratePlan, runMigrate } from './commands/migrate';
-import { formatCrossReviewResult, runCrossReviewCommand } from './commands/cross-review';
-import { buildClaudeReviewCommand } from './commands/claude-review';
-import { CROSS_REVIEW_PROVIDER_MODES, type CrossReviewProviderMode } from '../core/review/cross-review';
+import { buildReviewCommand } from './commands/review';
+import { buildTaskAgentCommand } from './commands/task-agent';
 import { buildToolsCommand } from './commands/tools';
 import { buildBrainCommand } from './commands/brain';
 import { buildCapabilityContextCommand } from './commands/capability-context';
@@ -53,6 +52,7 @@ import { buildExternalSourceCommand } from './commands/external-source';
 import { formatSecurityScan, runSecurityScan } from './commands/security';
 import {
   MIN_BUN_VERSION,
+  agentFleetVerified,
   bunVersionIsSupported,
   runGlobalRuntimeSetup,
   type GlobalRuntimeOptions,
@@ -219,6 +219,7 @@ function runTransactionalProfileProjection(
   commitState: (
     transaction: ReturnType<typeof beginInstallHostTransaction>,
     migrationSource: LegacyInstalledProfileState | null,
+    result: GlobalRuntimeResult,
   ) => InstalledProfileState,
   prepareProjection: () => LegacyInstalledProfileState | null = () => {
     prepareInstallProfileSwitch(profile, options.env);
@@ -242,7 +243,7 @@ function runTransactionalProfileProjection(
       return { result, state: null };
     }
     try {
-      const state = commitState(transaction, migrationSource);
+      const state = commitState(transaction, migrationSource, result);
       captureConfigurationRestores(transaction, transactionEnv);
       commitInstallHostTransaction(transaction);
       return { result, state };
@@ -465,13 +466,14 @@ async function runGlobalRuntimeBootstrap(
     codegraph,
     brainRoot: rawOpts.brainRoot,
     profile,
-  }, (transaction, migrationSource) => (
+  }, (transaction, migrationSource, result) => (
     applyInstallProfile(
       profile,
       process.env,
       new Date(),
       transaction,
       migrationSource ?? undefined,
+      { agentFleetVerified: agentFleetVerified(result) },
     ).state
   ), migrationRequested
     ? () => prepareLegacyInstallProfileMigration(profile)
@@ -586,7 +588,7 @@ export function buildProgram(): Command {
     .option('--sync-codegraph', 'Sync the CodeGraph index after ensure')
     .option('--brain-root <path>', 'Deprecated: user-level brain config belongs to repo-harness update/setup')
     .option('--brain-mode <mode>', 'Deprecated: init does not perform user-level brain sync', 'skip')
-    .option('--interactive', 'Rejected: public init is repo-local and does not configure user-level runtime state')
+    .option('--interactive', 'Rejected: interactive host setup belongs to repo-harness install')
     .option('--json', 'Output JSON instead of human-readable text')
     .action(async (action: string | undefined, rawOpts: {
       repo?: string;
@@ -825,7 +827,10 @@ export function buildProgram(): Command {
     });
 
   program.addCommand(buildInitHookCommand());
-  program.addCommand(buildClaudeReviewCommand());
+  program.addCommand(buildReviewCommand());
+  program.command('claude-review', { hidden: true }).helpOption(false).allowUnknownOption().argument('[args...]')
+    .action(() => { console.error('UPGRADE_REQUIRED: claude-review is retired; use repo-harness review. Drain old sessions with the previous version and archive old receipts.'); process.exitCode = 1; });
+  program.addCommand(buildTaskAgentCommand());
   program.addCommand(buildSetupCommand());
 
   program
@@ -837,30 +842,6 @@ export function buildProgram(): Command {
       const plan = runMigrate({ apply: rawOpts.apply === true });
       console.log(formatMigratePlan(plan, rawOpts.json === true));
       process.exit(0);
-    });
-
-  program
-    .command('cross-review')
-    .description('Deterministic independent review of the current review scope (repo-harness-cross-review)')
-    .requiredOption('--provider <mode>', `Provider to run: ${CROSS_REVIEW_PROVIDER_MODES.join('|')}`)
-    .option('--repo <path>', 'Target repo root (defaults to cwd)')
-    .option('--base <revision>', 'Base revision to diff against (defaults to the review-subject default base)')
-    .option('--timeout-ms <ms>', 'Provider process timeout in milliseconds')
-    .option('--json', 'Output JSON result')
-    .action((rawOpts: { provider: string; repo?: string; base?: string; timeoutMs?: string; json?: boolean }) => {
-      if (!(CROSS_REVIEW_PROVIDER_MODES as readonly string[]).includes(rawOpts.provider)) {
-        console.error(`cross-review: --provider must be one of ${CROSS_REVIEW_PROVIDER_MODES.join('|')}`);
-        process.exit(2);
-      }
-      const result = runCrossReviewCommand({
-        repoRoot: rawOpts.repo,
-        provider: rawOpts.provider as CrossReviewProviderMode,
-        baseRevision: rawOpts.base,
-        timeoutMs: rawOpts.timeoutMs !== undefined ? Number(rawOpts.timeoutMs) : undefined,
-        json: rawOpts.json === true,
-      });
-      console.log(result.output);
-      process.exit(result.exitCode);
     });
 
   const security = program

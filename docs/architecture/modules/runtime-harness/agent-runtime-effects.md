@@ -1,6 +1,6 @@
 # runtime-harness/agent-runtime-effects 架構文檔
 
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-agent-runtime-effects" sourceDigest="sha256:db8da263beff4735f851a015c0616de22f34fe1698e4ea62047644dbed269619" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:4d5538edaea6cbd11f8bb81dfd525c116a0c74264f5adc9c1c10a7cb79afecfb" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-agent-runtime-effects" sourceDigest="sha256:f43a45428ec818b15534e27687867e979db47ca65188d3ea5d200ae41d440150" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:9ff334998eaa1a4873ccfcd1feda8ed8467c2d9d959a79c285f006162bca1a34" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.agent-runtime-effects`(kind `capability`)
 > **Matched Prefixes**:`src/core/engineers/agent-runtime-effect.ts`、`src/effects/engineers/agent-runtime-effect-store.ts`、`src/effects/engineers/agent-runtime-feature.ts`、`src/effects/engineers/agent-runtime-adapters/**`
@@ -47,7 +47,7 @@ flowchart LR
 
 ### 1.3 規模信號
 
-- 規模量級:`5–10` 個文件 / `1000–2000` 行
+- 規模量級:`2–5` 個文件 / `1000–2000` 行
 - 匹配前綴:`src/core/engineers/agent-runtime-effect.ts`、`src/effects/engineers/agent-runtime-effect-store.ts`、`src/effects/engineers/agent-runtime-feature.ts`、`src/effects/engineers/agent-runtime-adapters/**`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
@@ -163,5 +163,7 @@ intent 先寫、ledger 後發佈,兩者之間崩潰時 `created_at` 用的是本
 ledger 用 atomic replace 發布,讀取不取鎖,因此不會反向持有 effect lock 去要 wake lock。
 
 ## 4. 歷史決策記錄(append-only)
+
+- 2026-09-12:漂移卡 `runtime-harness-agent-runtime-effects` 歸檔為 Resolved。觸發事件是 2026-09-09T02:02 對 `src/effects/engineers/agent-runtime-adapters/herdr-cli-agent.ts` 的編輯,該次改動由 `d8c082b1` 落地,同一個 commit 已同步改寫 `capability.runtime-harness.agent-runtime-effects.yaml` 的 summary 與 adapter 責任行、本文檔機器區,以及 `src/core/engineers/{AGENTS,CLAUDE}.md`;`source.include` 前綴、宣告入口與依賴邊界均未變動,因此不需要額外 snapshot。
 
 ## Optimization Backlog

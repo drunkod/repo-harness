@@ -523,24 +523,23 @@ describe("create-project-dirs runtime smoke", () => {
       expect(policy.planning.source_of_truth).toContain("transient host planning bridge");
       expect(policy.sidecar_research.output_dir).toBe("docs/researches");
       expect(policy.sidecar_research.preferred_runners).toEqual([
-        "subagent",
-        "codex exec --json",
+        "task-agent",
         "main-thread trace",
       ]);
       expect(policy.sidecar_research.spawn_decision).toContain("context impact");
       expect(policy.sidecar_research.spawn_decision).toContain("do not ask the user");
       expect(policy.sidecar_research.fallback_runner).toBe("main-thread trace");
       expect(policy.sidecar_research.main_thread_policy).toContain("if spawning is not worthwhile");
-      expect(policy.delegation.preferred_runners).toEqual(["subagent"]);
+      expect(policy.delegation.preferred_runners).toEqual(["task-agent"]);
       expect(policy.delegation.fallback_runner).toBeUndefined();
       expect(policy.delegation.brief_source).toBe("tasks/contracts/<stem>.contract.md");
       expect(policy.delegation.runner_rule).toContain(
-        "Codex uses native spawn_agent with the exact installed agent_type",
+        "Use task-agent in an explicitly addressed Herdr session",
       );
       expect(policy.delegation.runner_rule).toContain(
-        "fails closed without an alternate fleet runner",
+        "fails closed without an alternate agent runner",
       );
-      expect(policy.delegation.runner_rule).toContain("configured_unverified");
+      expect(policy.delegation.runner_rule).toContain("remain unverified");
       expect(policy.documentation.reference_configs).toContain("global-working-rules.md");
       expect(policy.documentation.reference_configs).toContain("minimal-change-hooks.md");
       expect(policy.upgrade.strategy_version).toBe(1);
@@ -1082,12 +1081,11 @@ describe("create-project-dirs runtime smoke", () => {
         expect([source, refactor.stages.scan.provider_version]).toEqual([source, REFACTOR_PROVIDER_VERSION]);
         expect([source, refactor.stages.verify.provider_version]).toEqual([source, REFACTOR_PROVIDER_VERSION]);
 
-        // The seeded architecture block defaults to the disabled provider, whose reader
-        // short-circuits before reading projection_version. Flip it to archctx so the
-        // seeded pin is the value the reader actually resolves.
-        const architecture = { ...seeded.architecture, projection_provider: "archctx", projection_apply: "manual" };
-        const projection = readArchitectureProjectionPolicy({ ...seeded, architecture });
-        expect([source, projection.requiredVersion]).toEqual([source, ARCHCTX_REQUIRED_VERSION]);
+        // Projection execution is global; repository seeders must not author it.
+        for (const key of ['projection_provider', 'projection_apply', 'projection_version', 'projection_failure_gate', 'projection_timeout_ms']) {
+          expect([source, seeded.architecture?.[key]]).toEqual([source, undefined]);
+        }
+        expect(readArchitectureProjectionPolicy({}).requiredVersion).toBe(ARCHCTX_REQUIRED_VERSION);
       }
 
       expect(REFACTOR_PROVIDER_VERSION).toBe(ARCHCTX_REQUIRED_VERSION);

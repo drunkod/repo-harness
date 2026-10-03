@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, lstatSync } from "fs";
 import { join } from "path";
 
 const ROOT = join(import.meta.dir, "..");
@@ -75,13 +75,13 @@ describe("Bootstrap Script Contracts", () => {
     const packageManifest = JSON.parse(read("package.json"));
     expect(packageManifest.files).toContain("agents/");
     const specs: Array<{ name: string; model: string; effort: string; sandboxMode?: string }> = [
-      { name: "explorer", model: "gpt-5.6-luna", effort: "high", sandboxMode: "read-only" },
-      { name: "deep-reasoner", model: "gpt-5.6-terra", effort: "xhigh", sandboxMode: "read-only" },
-      { name: "fast-worker", model: "gpt-6-astra", effort: "low", sandboxMode: "workspace-write" },
-      { name: "deep-worker", model: "gpt-6-astra", effort: "medium", sandboxMode: "workspace-write" },
+      { name: "explorer", model: "gpt-6-luna", effort: "high", sandboxMode: "read-only" },
+      { name: "deep-reasoner", model: "gpt-6-astra", effort: "high", sandboxMode: "read-only" },
+      { name: "fast-worker", model: "gpt-6.1-sol", effort: "medium", sandboxMode: "workspace-write" },
+      { name: "deep-worker", model: "gpt-6.1-sol", effort: "high", sandboxMode: "workspace-write" },
       { name: "gatekeeper", model: "gpt-6-astra", effort: "medium", sandboxMode: "read-only" },
-      { name: "root-cause-prover", model: "gpt-5.6-terra", effort: "high", sandboxMode: "workspace-write" },
-      { name: "harness-evaluator", model: "gpt-5.6-terra", effort: "high", sandboxMode: "workspace-write" },
+      { name: "root-cause-prover", model: "gpt-6-astra", effort: "high", sandboxMode: "workspace-write" },
+      { name: "harness-evaluator", model: "gpt-6-astra", effort: "medium", sandboxMode: "workspace-write" },
     ];
 
     for (const spec of specs) {
@@ -127,9 +127,8 @@ describe("Bootstrap Script Contracts", () => {
     expect(evaluator).toContain("Workspace-write is disposable-only");
 
     const routing = read("docs/reference-configs/agentic-development-flow.md");
-    expect(routing).toContain("host-native Explore");
-    expect(routing).toContain("Formal contract");
-    expect(routing).toContain("prompt inheritance");
+    expect(routing).toContain("Use independent gatekeeper/cross-model review for large changes, security/permissions or model uncertainty");
+    expect(routing).toContain("Ordinary work has no plan/contract/review/notes");
   });
 
   test("repo root should include routing docs and one typed hook implementation", () => {
@@ -148,17 +147,20 @@ describe("Bootstrap Script Contracts", () => {
     const claude = read("CLAUDE.md");
     const agents = read("AGENTS.md");
 
-    expect(claude).toContain("tasks/todos.md");
-    expect(claude).toContain(".ai/hooks/");
-    expect(claude).toContain("agentic-development-flow.md");
-    expect(claude).toContain("external-tooling.md");
-    expect(claude).toContain("geju");
-    expect(claude).not.toContain("gstack");
-    expect(claude).toContain("operations.deploy_sql");
-    expect(agents).toContain("tasks/todos.md");
-    expect(agents).toContain("bash scripts/check-task-workflow.sh --strict");
-    expect(agents).toContain("check-agent-tooling.sh --host both --check-updates");
-    expect(agents).toContain("operations.deploy_sql");
+    for (const file of ["CLAUDE.md", "AGENTS.md"]) {
+      expect(lstatSync(join(ROOT, file)).isFile()).toBe(true);
+      expect(read(file)).not.toMatch(/^@(?:AGENTS|CLAUDE)\.md\s*$/m);
+      for (const section of ["Workflow", "Code Optimization Principles", "Testing", "Handoff"]) {
+        expect(read(file)).toContain(`## ${section}\n`);
+      }
+    }
+    const sharedRules = (content: string) => content.split(/\n## (?:Claude Code|Codex)\n/)[0];
+    expect(sharedRules(claude)).toBe(sharedRules(agents));
+    expect(claude).toContain("## Claude Code");
+    expect(claude).toContain("~/.claude/settings.json");
+    expect(agents).toContain("## Codex");
+    expect(agents).toContain("~/.codex/hooks.json");
+    expect(agents).toContain("~/.codex/skills");
   });
 
   test("repo package should expose workflow verification scripts", () => {
@@ -184,17 +186,17 @@ describe("Bootstrap Script Contracts", () => {
     expect(pkg.scripts["sync:brain-docs"]).toBe("repo-harness run sync-brain-docs --all");
   });
 
-  test("ci gate should refresh handoff current before resume packet", () => {
+  test("ci gate verifies the candidate without creating routine handoff artifacts", () => {
     const ciGate = read("scripts/check-ci.sh");
     const bunfig = read("bunfig.toml");
     const prepare = 'REPO_HARNESS_SKIP_RESUME_REFRESH=1 bash scripts/prepare-handoff.sh "ci gate"';
     const resume = 'bash scripts/codex-handoff-resume.sh --cwd . --reason "ci gate"';
 
     expect(bunfig).toContain("maxConcurrency = 4");
-    expect(ciGate).toContain(prepare);
-    expect(ciGate).toContain(resume);
-    expect(ciGate.indexOf(prepare)).toBeLessThan(ciGate.indexOf(resume));
-    expect(ciGate.indexOf(resume)).toBeLessThan(ciGate.indexOf("bash scripts/check-task-workflow.sh --strict"));
+    expect(ciGate).not.toContain(prepare);
+    expect(ciGate).not.toContain(resume);
+    expect(ciGate).toContain("bun run check:type");
+    expect(ciGate).toContain("run_bun_tests");
   });
 
   test("ci workflow should run MCP path matrix across hosted operating systems", () => {
@@ -490,38 +492,19 @@ describe("Bootstrap Script Contracts", () => {
   // (assets/skills/{claude-review,codex-review}) are deleted; their
   // deterministic scope-capture mechanics (branch/staged/unstaged/untracked
   // diff, exact-base binding) moved to code
-  // (src/effects/review/cross-review-runner.ts#captureCrossReviewScope,
-  // reused via diff-fingerprint.ts's buildReviewSubject) and are covered by
-  // tests/cli/cross-review.test.ts, not by scanning Skill Markdown for
-  // embedded shell variable assignments. This test now checks the one
-  // canonical repo-harness-cross-review package's own prose properties:
-  // read-only provider boundaries, model/timeout budgets, structured plugin
-  // validation, and the no-merge-gate guarantee.
-  test("repo-harness-cross-review documents direct and official-plugin read-only review boundaries", () => {
-    const pluginMode = read("assets/skills/repo-harness-cross-review/references/codex-plugin-mode.md");
-    const codexMode = read("assets/skills/repo-harness-cross-review/references/codex-mode.md");
-
-    expect(pluginMode).toContain("official Claude Code");
-    expect(pluginMode).toContain("claude plugin list --json");
-    expect(pluginMode).toContain("adversarial-review --json");
-    expect(pluginMode).toContain("read-only sandbox");
-    expect(pluginMode).toContain("critical|high -> P1");
-    expect(pluginMode).toContain("repo-harness cross-review --provider codex-plugin");
-    expect(pluginMode).toContain("Review Gate stays disabled");
-    expect(pluginMode).toContain("No merge-gate");
-    expect(pluginMode).toContain("source=codex-plugin");
-
-    expect(codexMode).toContain("read-only reviewer");
-    expect(codexMode).toContain("read-only Bash access");
-    expect(codexMode).toContain("resolved commit SHA");
-    expect(codexMode).toContain('model_reasoning_effort="high"');
-    expect(codexMode).toContain("1800 seconds");
-    expect(codexMode).toContain("Exactly two attempts");
-    expect(codexMode).toContain("`skipped`: advisory and\n  non-blocking (exit 0)");
-    expect(codexMode).toContain("do not re-run the review");
-    expect(codexMode).toContain("repo-harness cross-review --provider codex");
-    expect(codexMode).toContain("No merge-gate");
-    expect(codexMode).toContain("retried against Claude");
+  // Shared subject capture and current generic review remain the runtime owners;
+  // retired advisory code is not reimplemented as Skill Markdown.
+  test("repo-harness-cross-review routes to merged Herdr review and rejects the old direct runtime", () => {
+    const skill = read("assets/skills/repo-harness-cross-review/SKILL.md");
+    const migration = read("assets/skills/repo-harness-cross-review/references/codex-mode.md");
+    const generic = read("assets/skills/repo-harness-cross-review/references/generic-review.md");
+    expect(skill).toContain("references/generic-review.md");
+    expect(skill).toContain("deep-reasoner");
+    expect(migration).toContain("command is retired");
+    expect(migration).toContain("not an\nalias");
+    expect(generic).toContain("repo-harness review round");
+    expect(generic).toContain("generic-review");
+    expect(migration).not.toContain("Exactly two attempts");
   });
 
   test("setup script should delegate to the typed global install path", () => {

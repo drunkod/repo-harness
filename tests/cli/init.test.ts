@@ -1,3 +1,4 @@
+import { recordInstallOwnership } from "../helpers/install-ownership";
 import { describe, expect, test } from "bun:test";
 import {
   existsSync,
@@ -21,6 +22,8 @@ import {
   syncCrossReviewSkills,
   writeGlobalContextFiles,
 } from "../../src/cli/commands/init";
+import { withRuntimeHostTransactionLock } from "../../src/cli/installer/runtime-host-lock";
+import { beginInstallHostTransaction, rollbackInstallHostTransaction } from "../../src/cli/installer/install-profile";
 import { configuredBrainRoot } from "../../src/cli/commands/brain-root";
 import {
   cutoverMarkerPath,
@@ -73,6 +76,7 @@ function writeReadyOfficialCodexPluginCli(fakeBin: string, home: string): string
   makeExecutable(claude, [
     '#!/bin/bash',
     'if [[ "$*" == "plugin list --json" ]]; then',
+    `  touch '${join(home, 'plugin-invoked')}'`,
     `  printf '%s\\n' '${JSON.stringify([{ id: 'codex@openai-codex', version: '1.0.6', enabled: true, installPath: pluginRoot }])}'`,
     '  exit 0',
     'fi',
@@ -175,12 +179,98 @@ function writeFakeCodegraph(fakeBin: string, logFile: string): void {
 }
 
 describe("init command", () => {
+  test("init defaults enable architecture projection and Stop recommendations without overriding user choices", () => {
+    const tmp = join(tmpdir(), `repo-harness-init-architecture-${Date.now()}`);
+    const source = join(tmp, "source");
+    const repo = join(tmp, "repo");
+    const accountHome = join(tmp, "account");
+    const configPath = join(accountHome, ".repo-harness/config.json");
+    try {
+      mkdirSync(source, { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(dirname(configPath), { recursive: true });
+      setupFakeSource(source);
+      writeFileSync(configPath, JSON.stringify({ brainRoot: "/existing/brain" }));
+      const options = {
+        repo, sourceRoot: source, syncSkill: false, hostAdapters: false,
+        externalSkills: false, codegraph: false, verify: false,
+        env: { ...process.env, HOME: accountHome, REPO_HARNESS_HOME: join(accountHome, ".repo-harness") },
+      };
+      const initial = readFileSync(configPath, "utf8");
+      expect(runInit({ ...options, apply: false }).exitCode).toBe(0);
+      expect(readFileSync(configPath, "utf8")).toBe(initial);
+
+      const applied = runInit(options);
+      expect(applied.exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(configPath, "utf8"))).toMatchObject({
+        brainRoot: "/existing/brain",
+        architecture: { projection_provider: "archctx", projection_apply: "automatic" },
+        refactor_recommendations: { enabled: true },
+      });
+      expect(applied.steps.find((step) => step.step === "global architecture projection")?.status).toBe("ok");
+      expect(applied.steps.find((step) => step.step === "global refactor recommendations")?.status).toBe("ok");
+      const disabled = JSON.stringify({
+        architecture: { projection_provider: "disabled", projection_apply: "disabled" },
+        refactor_recommendations: { enabled: false },
+      });
+      writeFileSync(configPath, disabled);
+      expect(runInit(options).exitCode).toBe(0);
+      expect(readFileSync(configPath, "utf8")).toBe(disabled);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 60000);
+
+  test("init cannot write defaults during a host transaction that rolls back", () => {
+    const tmp = join(tmpdir(), `repo-harness-init-host-lock-${Date.now()}`);
+    const source = join(tmp, "source");
+    const repo = join(tmp, "repo");
+    const home = join(tmp, "home");
+    const configPath = join(home, ".repo-harness/config.json");
+    try {
+      mkdirSync(source, { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(dirname(configPath), { recursive: true });
+      setupFakeSource(source);
+      const original = JSON.stringify({ brainRoot: "/existing/brain" });
+      writeFileSync(configPath, original);
+      const env = { ...process.env, HOME: home, REPO_HARNESS_HOME: join(home, ".repo-harness") };
+      const options = {
+        repo, sourceRoot: source, env, syncSkill: false, hostAdapters: false,
+        externalSkills: false, codegraph: false, verify: false,
+      };
+      // Hold the update lock and its real rollback preimage while init attempts
+      // the write. No timing window can let an unprotected writer escape.
+      withRuntimeHostTransactionLock(env, () => {
+        const transaction = beginInstallHostTransaction([configPath], env);
+        try {
+          const result = runInit(options);
+          expect(result.exitCode).toBe(1);
+          expect(result.steps).toContainEqual(expect.objectContaining({
+            step: "global automation defaults", status: "failed",
+          }));
+          expect(readFileSync(configPath, "utf8")).toBe(original);
+        } finally {
+          rollbackInstallHostTransaction(transaction);
+        }
+      });
+      expect(runInit(options).exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(configPath, "utf8"))).toMatchObject({
+        architecture: { projection_apply: "automatic" },
+        refactor_recommendations: { enabled: true },
+      });
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30000);
+
   test("defaults --repo to cwd and applies the existing-repo harness", () => {
     const tmp = join(tmpdir(), `repo-harness-init-${Date.now()}`);
     const source = join(tmp, "source");
     const repo = join(tmp, "repo");
     const previousCwd = process.cwd();
     try {
+      mkdirSync(join(tmp, "home"), { recursive: true });
       mkdirSync(source, { recursive: true });
       mkdirSync(repo, { recursive: true });
       setupFakeSource(source);
@@ -189,6 +279,7 @@ describe("init command", () => {
 
       const result = runInit({
         sourceRoot: source,
+        env: { ...process.env, HOME: join(tmp, "home"), REPO_HARNESS_HOME: join(tmp, "home", ".repo-harness") },
         syncSkill: false,
         hostAdapters: false,
         externalSkills: false,
@@ -248,6 +339,7 @@ describe("init command", () => {
     const repo = join(tmp, "repo");
     const previousCwd = process.cwd();
     try {
+      mkdirSync(join(tmp, "home"), { recursive: true });
       mkdirSync(source, { recursive: true });
       mkdirSync(repo, { recursive: true });
       setupFakeSource(source);
@@ -256,6 +348,7 @@ describe("init command", () => {
 
       const result = runInit({
         sourceRoot: source,
+        env: { ...process.env, HOME: join(tmp, "home"), REPO_HARNESS_HOME: join(tmp, "home", ".repo-harness") },
         syncSkill: false,
         hostAdapters: false,
         externalSkills: false,
@@ -327,7 +420,7 @@ describe("init command", () => {
       // Codex-only (unchanged, R4).
       expect(existsSync(join(home, ".claude", "skills", "repo-harness-cross-review", "SKILL.md"))).toBe(true);
       expect(existsSync(join(home, ".codex", "skills", "repo-harness-cross-review", "SKILL.md"))).toBe(true);
-      expect(existsSync(join(home, ".codex", "skills", "claude-plan", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(home, ".codex", "skills", "claude-plan", "SKILL.md"))).toBe(false);
       expect(existsSync(join(home, ".claude", "skills", "claude-plan", "SKILL.md"))).toBe(false);
       expect(existsSync(join(home, ".claude", "skills", "codex-review", "SKILL.md"))).toBe(false);
       expect(existsSync(join(home, ".codex", "skills", "claude-review", "SKILL.md"))).toBe(false);
@@ -376,20 +469,15 @@ describe("init command", () => {
       mkdirSync(repo, { recursive: true });
       setupFakeSource(source);
 
-      // Explicit env is required here, not decorative: for an npx cache source
-      // initCommandEnv() (src/cli/commands/init.ts) builds `{ ...(env ?? {}),
-      // AGENTIC_DEV_LINK_INSTALLED_COPIES: "0" }`, so passing no env yields a
-      // command env holding only that key. REPO_HARNESS_HOME and HOME are both
-      // dropped and the registry write falls back to homedir() — the operator's
-      // real ~/.repo-harness. Spreading process.env keeps the isolated home
-      // installed by tests/preload-home-isolation.ts.
-      //
-      // The delete keeps this test deterministic: initCommandEnv() only forces
-      // the flag to "0" when it is undefined, so an ambient
-      // AGENTIC_DEV_LINK_INSTALLED_COPIES in the operator's shell would be passed
-      // straight through and the `sync link=0` assertion below would fail for a
-      // reason that has nothing to do with the code under test.
-      const childEnv = { ...process.env };
+      // Init writes account configuration as well as registry state, so both
+      // home authorities must stay inside this fixture. Remove the ambient
+      // link flag to exercise the npx default deterministically.
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        HOME: join(tmp, "home"),
+        REPO_HARNESS_HOME: join(tmp, "home", ".repo-harness"),
+      };
+      mkdirSync(childEnv.HOME!, { recursive: true });
       delete childEnv.AGENTIC_DEV_LINK_INSTALLED_COPIES;
 
       const result = runInit({
@@ -1051,10 +1139,8 @@ describe("init command", () => {
       });
 
       expect(result.exitCode).toBe(0);
-      expect(result.steps.find((step) => step.step === "official Codex plugin")).toMatchObject({
-        status: "ok",
-        detail: expect.stringContaining("version=1.0.6"),
-      });
+      expect(result.steps.find((step) => step.step === "official Codex plugin")).toBeUndefined();
+      expect(existsSync(join(home,'plugin-invoked'))).toBe(false);
       expect(result.steps.find((step) => step.step === "global working rules")?.status).toBe("ok");
       expect(result.steps.find((step) => step.step === "ensure brain root")?.detail).toBe(join(home, "Documents", "brain"));
       expect(readFileSync(join(home, ".codex", "AGENTS.md"), "utf-8")).toContain("Use English to report to user.");
@@ -1142,6 +1228,7 @@ describe("init command", () => {
  */
 describe("init cutover quiescence gate", () => {
   function liveContractWorktreeRepo(tmp: string): { source: string; repo: string } {
+    mkdirSync(join(tmp, "home"), { recursive: true });
     const source = join(tmp, "source");
     const repo = join(tmp, "repo");
     mkdirSync(source, { recursive: true });
@@ -1180,7 +1267,10 @@ describe("init cutover quiescence gate", () => {
       const { source, repo } = liveContractWorktreeRepo(tmp);
       expect(isCutoverInstalled(repo)).toBe(false);
 
-      const result = runInit({ repo, sourceRoot: source, ...initOptions });
+      const result = runInit({
+        repo, sourceRoot: source, ...initOptions,
+        env: { ...process.env, HOME: join(tmp, "home"), REPO_HARNESS_HOME: join(tmp, "home", ".repo-harness") },
+      });
 
       expect(result.exitCode).toBe(1);
       const gate = result.steps.find((step) => step.step === "cutover quiescence");
@@ -1203,7 +1293,10 @@ describe("init cutover quiescence gate", () => {
       // The blockers are still live; the marker is what makes the gate inert.
       expect(inspectCutoverQuiescence(repo).quiescent).toBe(false);
 
-      const result = runInit({ repo, sourceRoot: source, ...initOptions });
+      const result = runInit({
+        repo, sourceRoot: source, ...initOptions,
+        env: { ...process.env, HOME: join(tmp, "home"), REPO_HARNESS_HOME: join(tmp, "home", ".repo-harness") },
+      });
 
       expect(result.exitCode).toBe(0);
       expect(result.steps.find((step) => step.step === "cutover quiescence")).toBeUndefined();
@@ -1247,7 +1340,41 @@ describe("bundled host runtimes", () => {
     );
   }
 
-  test("installs repo-harness-cross-review on both hosts; claude-plan stays Codex-only", () => {
+  test.each(["skill", "reference"])("upgrades owned bundled trees (%s) and rejects user drift", change => {
+    const tmp = join(tmpdir(), `cross-review-owned-${Date.now()}`);
+    const source = join(tmp, "source"), home = join(tmp, "home");
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+    try {
+      makeSource(source);
+      mkdirSync(home, { recursive: true });
+      const fakeBin = join(tmp, "bin");
+      mkdirSync(fakeBin, { recursive: true });
+      env.REPO_HARNESS_CLAUDE_EXECUTABLE = writeReadyOfficialCodexPluginCli(fakeBin, home);
+      const reference = join(source, "assets/skills/repo-harness-cross-review/reference.md");
+      writeFileSync(reference, "old reference");
+      expect(syncCrossReviewSkills(source, "both", env).every(step => step.status === "ok")).toBe(true);
+      const paths = [".claude", ".codex"].map(host => join(home, host, "skills/repo-harness-cross-review"));
+      recordInstallOwnership(paths, env);
+      if (change === "skill") writeFileSync(join(source, "assets/skills/repo-harness-cross-review/SKILL.md"), "---\nname: repo-harness-cross-review\n---\nUpdated instructions\n");
+      rmSync(reference);
+      writeFileSync(join(source, "assets/skills/repo-harness-cross-review/new-reference.md"), "new reference");
+      expect(syncCrossReviewSkills(source, "both", env).every(step => step.status === "ok")).toBe(true);
+      recordInstallOwnership(paths, env);
+      for (const host of [".claude", ".codex"]) {
+        const dest = join(home, host, "skills/repo-harness-cross-review");
+        expect(existsSync(join(dest, "reference.md"))).toBe(false);
+        expect(readFileSync(join(dest, "new-reference.md"), "utf8")).toBe("new reference");
+        writeFileSync(join(dest, "new-reference.md"), "user edit");
+      }
+      const blocked = syncCrossReviewSkills(source, "both", env);
+      expect(blocked.filter(step => step.status === "failed")).toHaveLength(2);
+      for (const host of [".claude", ".codex"]) {
+        expect(readFileSync(join(home, host, "skills/repo-harness-cross-review/new-reference.md"), "utf8")).toBe("user edit");
+      }
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  test("installs cross-review on both hosts without the retired plan skill", () => {
     const tmp = join(tmpdir(), `cross-review-both-${Date.now()}`);
     const source = join(tmp, "source");
     const home = join(tmp, "home");
@@ -1262,84 +1389,16 @@ describe("bundled host runtimes", () => {
       const steps = syncCrossReviewSkills(source, "both", { ...process.env, HOME: home, REPO_HARNESS_CLAUDE_EXECUTABLE: claude });
 
       expect(steps.every((s) => s.status === "ok")).toBe(true);
+      expect(existsSync(join(home,'plugin-invoked'))).toBe(false);
+      expect(existsSync(join(home,'.claude/plugins/cache/openai-codex/codex/1.0.6/.claude-plugin/plugin.json'))).toBe(true);
       expect(existsSync(join(home, ".claude", "skills", "repo-harness-cross-review", "SKILL.md"))).toBe(true);
       expect(existsSync(join(home, ".codex", "skills", "repo-harness-cross-review", "SKILL.md"))).toBe(true);
-      expect(existsSync(join(home, ".codex", "skills", "claude-plan", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(home, ".codex", "skills", "claude-plan", "SKILL.md"))).toBe(false);
       expect(existsSync(join(home, ".claude", "skills", "claude-plan", "SKILL.md"))).toBe(false);
       expect(existsSync(join(home, ".claude", "skills", "merge-gate", "SKILL.md"))).toBe(false);
 
       const again = syncCrossReviewSkills(source, "both", { ...process.env, HOME: home, REPO_HARNESS_CLAUDE_EXECUTABLE: claude });
       expect(again.some((s) => /already present/.test(s.detail ?? ""))).toBe(true);
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("Codex target installs the official OpenAI plugin without enabling Review Gate", () => {
-    const tmp = join(tmpdir(), `cross-review-plugin-install-${Date.now()}`);
-    const source = join(tmp, "source");
-    const home = join(tmp, "home");
-    const fakeBin = join(tmp, "bin");
-    const claude = join(fakeBin, "claude");
-    const installed = join(tmp, "installed");
-    const log = join(tmp, "claude.log");
-    const pluginRoot = join(home, ".claude", "plugins", "cache", "openai-codex", "codex", "1.0.6");
-    try {
-      mkdirSync(source, { recursive: true });
-      mkdirSync(home, { recursive: true });
-      mkdirSync(fakeBin, { recursive: true });
-      writeOfficialCodexPluginFixture(pluginRoot);
-      makeSource(source);
-      makeExecutable(claude, [
-        "#!/bin/bash",
-        "set -euo pipefail",
-        `printf '%s\\n' "$*" >> "${log}"`,
-        'case "$*" in',
-        '  "plugin list --json")',
-        `    if [[ -f "${installed}" ]]; then printf '%s\\n' '${JSON.stringify([{ id: 'codex@openai-codex', version: '1.0.6', enabled: true, installPath: pluginRoot }])}'; else echo '[]'; fi`,
-        '    ;;',
-        '  "plugin marketplace list --json") echo "[]" ;;',
-        '  "plugin marketplace add openai/codex-plugin-cc") ;;',
-        `  "plugin install codex@openai-codex -s user -y") touch "${installed}" ;;`,
-        '  *) exit 9 ;;',
-        'esac',
-        '',
-      ].join("\n"));
-      const steps = syncCrossReviewSkills(source, "codex", {
-        ...process.env,
-        HOME: home,
-        REPO_HARNESS_CLAUDE_EXECUTABLE: claude,
-      });
-      expect(steps.find((step) => step.step === "official Codex plugin")?.status).toBe("ok");
-      const commands = readFileSync(log, "utf-8");
-      expect(commands).toContain("plugin marketplace add openai/codex-plugin-cc");
-      expect(commands).toContain("plugin install codex@openai-codex -s user -y");
-      expect(commands).not.toContain("review-gate");
-      expect(commands).not.toContain("setup");
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
-
-  test("Codex target fails readiness when the enabled official plugin install is incomplete", () => {
-    const tmp = join(tmpdir(), `cross-review-plugin-invalid-${Date.now()}`);
-    const source = join(tmp, "source");
-    const home = join(tmp, "home");
-    const fakeBin = join(tmp, "bin");
-    try {
-      mkdirSync(source, { recursive: true });
-      mkdirSync(fakeBin, { recursive: true });
-      makeSource(source);
-      const claude = writeReadyOfficialCodexPluginCli(fakeBin, home);
-      rmSync(join(home, ".claude", "plugins", "cache", "openai-codex", "codex", "1.0.6", "scripts", "codex-companion.mjs"));
-      const steps = syncCrossReviewSkills(source, "codex", {
-        ...process.env,
-        HOME: home,
-        REPO_HARNESS_CLAUDE_EXECUTABLE: claude,
-      });
-      const plugin = steps.find((step) => step.step === "official Codex plugin");
-      expect(plugin?.status).toBe("failed");
-      expect(plugin?.detail ?? plugin?.stderr).toContain("missing safely-contained companion");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -1357,7 +1416,7 @@ describe("bundled host runtimes", () => {
     }
   });
 
-  test("respects target=claude (repo-harness-cross-review only) and target=codex (repo-harness-cross-review + claude-plan)", () => {
+  test("respects target=claude (repo-harness-cross-review only) and target=codex (repo-harness-cross-review only)", () => {
     const tmp = join(tmpdir(), `cross-review-target-${Date.now()}`);
     const source = join(tmp, "source");
     const claudeHome = join(tmp, "home-claude");
@@ -1379,7 +1438,7 @@ describe("bundled host runtimes", () => {
       const claude = writeReadyOfficialCodexPluginCli(fakeBin, codexHome);
       syncCrossReviewSkills(source, "codex", { ...process.env, HOME: codexHome, REPO_HARNESS_CLAUDE_EXECUTABLE: claude });
       expect(existsSync(join(codexHome, ".codex", "skills", "repo-harness-cross-review", "SKILL.md"))).toBe(true);
-      expect(existsSync(join(codexHome, ".codex", "skills", "claude-plan", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(codexHome, ".codex", "skills", "claude-plan", "SKILL.md"))).toBe(false);
       expect(existsSync(join(codexHome, ".claude", "skills", "repo-harness-cross-review", "SKILL.md"))).toBe(false);
       expect(existsSync(join(codexHome, ".codex", "skills", "merge-gate", "SKILL.md"))).toBe(false);
     } finally {

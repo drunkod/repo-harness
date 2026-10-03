@@ -34,6 +34,7 @@ const TARGET_CANONICAL_PACKAGES = [
 ];
 
 const TARGET_FACADE_KIND_PACKAGES = [
+  "auto-campaign",
   "repo-harness-setup",
   "repo-harness-plan",
   "repo-harness-check",
@@ -43,6 +44,9 @@ const TARGET_FACADE_KIND_PACKAGES = [
   // Post-cutover addition: a repo-owned facade sourced from
   // assets/skills/obsidian-memory, projected to both hosts by every profile.
   "obsidian-memory",
+  // Post-cutover addition: the testing router, sourced from
+  // assets/skills/repo-harness-test, projected to both hosts by full only.
+  "repo-harness-test",
 ];
 
 function readCommand(name: string): string {

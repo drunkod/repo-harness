@@ -1,3 +1,4 @@
+import { loadArchitectureProjectionPolicy } from './projection-config';
 import {
   PROJECTION_REQUEST_VERSION,
   type ArchitectureProjectionPolicy,
@@ -7,7 +8,6 @@ import {
 import {
   architectureProjectionOwnedPaths,
   captureArchitectureProjectionSnapshot,
-  loadArchitectureProjectionPolicy,
   runArchitectureProjection,
   type ArchitectureProjectionProviderDiagnostic,
   type ArchctxProviderOptions,
@@ -51,6 +51,8 @@ export interface ArchitectureProjectionDrainResultV1 {
   error: string | null;
   acknowledgeSourceEvents: boolean;
   queue: ArchitectureProjectionQueueStateV1;
+  /** The host yielded its own shorter budget; the provider attempt may resume outside it. */
+  yieldReason?: 'host-budget';
 }
 
 export interface ArchitectureProjectionOrchestratorOptions extends ArchctxProviderOptions {
@@ -72,7 +74,7 @@ export function drainArchitectureProjectionJobs(
   const observedPaths = events.flatMap((event) => event.changed_paths);
   let policy: ArchitectureProjectionPolicy;
   try {
-    policy = options.policy ?? loadArchitectureProjectionPolicy(root);
+    policy = options.policy ?? loadArchitectureProjectionPolicy(options.env);
   } catch (error) {
     return failPreflight(root, events, observedPaths, now, null, error, options.acceptedChange);
   }
@@ -89,9 +91,8 @@ export function drainArchitectureProjectionJobs(
     return failPreflight(root, events, observedPaths, now, policy.timeoutMs, error, options.acceptedChange);
   }
   const eligible = events.flatMap((event) => event.changed_paths).filter((path) => !isOwned(path, owned));
-  if (events.length > 0 && eligible.length === 0) {
-    return outcome(root, 'idle', null, events.map((event) => event.event_id), null, null, true);
-  }
+  // Owned-only events need no new job, but must not starve an existing retry.
+  const onlyOwnedEvents = events.length > 0 && eligible.length === 0;
   const aggregateId = architectureProjectionJobId(events.map((event) => event.event_id), eligible, options.acceptedChange);
   const aggregateState = architectureProjectionJobState(root, aggregateId);
   if (aggregateState === 'running') return outcome(root, 'idle', aggregateId, events.map((event) => event.event_id), null, null, false);
@@ -99,7 +100,7 @@ export function drainArchitectureProjectionJobs(
   if (aggregateState === 'receipt') return outcome(root, 'idle', aggregateId, events.map((event) => event.event_id), null, null, true);
   enqueueArchitectureProjectionJob(root, eventIds, sourceKeys, eligible, now, options.acceptedChange);
   const job = claimNextArchitectureProjectionJob(root, policy.timeoutMs, now);
-  if (!job) return outcome(root, 'idle', null, events.map((event) => event.event_id), null, null, false);
+  if (!job) return outcome(root, 'idle', null, events.map((event) => event.event_id), null, null, onlyOwnedEvents);
   let completedResultStatus: ProjectionResultV1['status'] | null = null;
   try {
     const request: ProjectionRequestV1 = {
@@ -157,7 +158,7 @@ export function drainArchitectureProjectionJobs(
     if (error instanceof ArchitectureProjectionOwnershipError) return lostOwnership(root, job, error);
     // A host yielding its shorter time slice is not a failed business attempt.
     const classified = options.deadlineMs !== undefined && clock() >= options.deadlineMs
-      ? { kind: 'host-budget' as const, message: 'host architecture projection budget exhausted; job retained for an explicit drain' }
+      ? { kind: 'host-budget' as const, message: 'host architecture projection budget exhausted; job retained for continuation' }
       : classify(error);
     let transition: ReturnType<typeof failArchitectureProjectionJob>;
     try {
@@ -167,7 +168,7 @@ export function drainArchitectureProjectionJobs(
       const transitionMessage = transitionError instanceof Error ? transitionError.message : String(transitionError);
       throw new Error(`${classified.message}; architecture projection failure transition failed: ${transitionMessage}`, { cause: error });
     }
-    return outcome(
+    const result = outcome(
       root,
       transition.state === 'dead-letter' ? 'dead-letter' : 'retry-pending',
       job.jobId,
@@ -176,6 +177,8 @@ export function drainArchitectureProjectionJobs(
       classified.message,
       false,
     );
+    if (classified.kind === 'host-budget') result.yieldReason = 'host-budget';
+    return result;
   }
   return outcome(root, 'succeeded', job.jobId, job.sourceEventIds, completedResultStatus, null, true);
 }

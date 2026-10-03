@@ -9,6 +9,8 @@ import {
   type OperatorFleetSnapshotV1,
 } from '../../src/core/operator/fleet-snapshot';
 
+const serviceEpoch = '00000000-0000-4000-8000-000000000001';
+
 function sourceSnapshot(): FleetBoardSnapshotV1 {
   return projectFleetBoardSnapshot({
     registry_revision: 'sha256:registry',
@@ -33,7 +35,7 @@ function sourceSnapshot(): FleetBoardSnapshotV1 {
             generation: null,
             current_publication: null,
             merge_readiness: null,
-            execution_readiness: 'execution_ready',
+            execution_readiness: 'execution_ready', readiness_blockers: [],
             feedback: { pending_count: 1, no_progress: false, repair_actions: [] },
             inbox: { unread_count: 2, addressed_to_current_claim: false, delivery_state: 'pending', runtime_reachability: 'unknown', effect_sha256: null, delivery_evidence: { candidate_count: 0, latest: null }, failure_class: null },
             snapshot_consistency: 'changed_during_read',
@@ -61,10 +63,11 @@ function sourceSnapshot(): FleetBoardSnapshotV1 {
 describe('OperatorFleetSnapshotV1 browser projection', () => {
   test('UX-local-human-control-board-v1-N1 removes local paths and preserves Fleet facts', () => {
     const source = sourceSnapshot();
-    const projected = projectOperatorFleetSnapshot(source);
+    const projected = projectOperatorFleetSnapshot(source, serviceEpoch);
 
     expect(projected).toMatchObject({
-      protocol: source.protocol,
+      protocol: 7,
+      service_epoch: serviceEpoch,
       kind: 'operator_fleet_snapshot',
       registry_revision: source.registry_revision,
       sequence: source.sequence,
@@ -74,6 +77,7 @@ describe('OperatorFleetSnapshotV1 browser projection', () => {
       source_snapshot_sha256: source.snapshot_sha256,
     });
     expect(projected.repositories[0]?.cards).toEqual(source.repositories[0]?.cards);
+    expect(projected.repositories[0]?.display_name).toBe('repo-a');
     expect(JSON.stringify(projected)).not.toContain('repo_root');
     expect(JSON.stringify(projected)).not.toContain('/private/workspaces');
     expect(JSON.stringify(projected)).not.toContain('provider stderr');
@@ -88,13 +92,13 @@ describe('OperatorFleetSnapshotV1 browser projection', () => {
 
   test('returns an immutable transport view without reclassifying cards or counts', () => {
     const source = sourceSnapshot();
-    const projected = projectOperatorFleetSnapshot(source);
+    const projected = projectOperatorFleetSnapshot(source, serviceEpoch);
     const typed = projected as OperatorFleetSnapshotV1;
 
     expect(Object.isFrozen(typed)).toBe(true);
     expect(Object.isFrozen(typed.repositories)).toBe(true);
     expect(Object.isFrozen(typed.repositories[0])).toBe(true);
-    expect(typed.repositories[0]?.cards[0]?.column).toBe('available');
+    expect(typed.repositories[0]?.cards[0]?.placement).toEqual({ kind: 'column', column: 'available' });
     expect(typed.repositories[0]?.cards[0]).toMatchObject({
       task_label: 'observe one registered repository',
       task_index: 1,
@@ -117,7 +121,7 @@ describe('OperatorFleetSnapshotV1 browser projection', () => {
         : repository),
     } as FleetBoardSnapshotV1;
 
-    const projected = projectOperatorFleetSnapshot(withRuntimeError);
+    const projected = projectOperatorFleetSnapshot(withRuntimeError, serviceEpoch);
     expect(projected.repositories[1]?.error).toEqual({
       code: 'repo_runtime_effect_unreadable',
       message: 'repository Agent Runtime effect store is unavailable',
@@ -149,7 +153,7 @@ describe('OperatorFleetSnapshotV1 browser projection', () => {
             generation: null,
             current_publication: null,
             merge_readiness: null,
-            execution_readiness: 'execution_ready',
+            execution_readiness: 'execution_ready', readiness_blockers: [],
             feedback: { pending_count: 0, no_progress: false, repair_actions: [] },
             inbox: { unread_count: 0, addressed_to_current_claim: false, delivery_state: 'pending', runtime_reachability: 'unknown', effect_sha256: null, delivery_evidence: { candidate_count: 0, latest: null }, failure_class: null },
             snapshot_consistency: 'stable',
@@ -166,7 +170,7 @@ describe('OperatorFleetSnapshotV1 browser projection', () => {
             generation: null,
             current_publication: null,
             merge_readiness: null,
-            execution_readiness: null,
+            execution_readiness: null, readiness_blockers: null,
             feedback: { pending_count: 0, no_progress: false, repair_actions: [] },
             inbox: { unread_count: 0, addressed_to_current_claim: false, delivery_state: 'pending', runtime_reachability: 'unknown', effect_sha256: null, delivery_evidence: null, failure_class: null },
             snapshot_consistency: 'stable',
@@ -177,10 +181,10 @@ describe('OperatorFleetSnapshotV1 browser projection', () => {
       }],
     });
 
-    const projected = projectOperatorFleetSnapshot(source);
+    const projected = projectOperatorFleetSnapshot(source, serviceEpoch);
     expect(projected.counts.unclassified).toBe(1);
     expect(projected.repositories[0]?.cards[1]).toMatchObject({
-      column: null,
+      placement: { kind: 'unclassified', reason: 'observation_failed' },
       error: { code: 'repo_inbox_unreadable', message: 'repository inbox observation is unavailable' },
     });
     expect(projected.repositories[0]?.cards[0]?.error).toBeNull();
@@ -189,7 +193,7 @@ describe('OperatorFleetSnapshotV1 browser projection', () => {
 
   test('rejects an unsupported Fleet protocol before crossing the browser boundary', () => {
     const invalid = { ...sourceSnapshot(), protocol: 99 } as unknown as FleetBoardSnapshotV1;
-    expect(() => projectOperatorFleetSnapshot(invalid)).toThrow('unsupported Fleet snapshot protocol');
+    expect(() => projectOperatorFleetSnapshot(invalid, serviceEpoch)).toThrow('unsupported Fleet snapshot protocol');
   });
 
   test('UX-local-human-control-board-v1-N1 allowlists every DTO level against hostile identity-shaped extras', () => {
@@ -199,12 +203,14 @@ describe('OperatorFleetSnapshotV1 browser projection', () => {
     Object.defineProperty(source, 'future_env', { value: 'REPO_HARNESS_TOKEN=secret', enumerable: true });
     Object.defineProperty(repository, 'repo_root', { value: 'C:\\Users\\operator\\private', enumerable: true });
     Object.defineProperty(repository, 'future_unix_path', { value: '/Users/operator/.ssh/id_rsa', enumerable: true });
+    Object.defineProperty(card.placement, 'future_env', { value: 'PLACEMENT_PRIVATE_CONTROL', enumerable: true });
     Object.defineProperty(card, 'future_control', { value: 'line\u0000break', enumerable: true });
     Object.defineProperty(card, 'future_windows_path', { value: 'C:\\Users\\operator\\token.txt', enumerable: true });
 
-    const projected = projectOperatorFleetSnapshot(source);
+    const projected = projectOperatorFleetSnapshot(source, serviceEpoch);
     const rendered = JSON.stringify(projected);
     expect(rendered).not.toContain('future_env');
+    expect(rendered).not.toContain('PLACEMENT_PRIVATE_CONTROL');
     expect(rendered).not.toContain('REPO_HARNESS_TOKEN=secret');
     expect(rendered).not.toContain('future_unix_path');
     expect(rendered).not.toContain('/Users/operator/.ssh/id_rsa');
@@ -213,16 +219,16 @@ describe('OperatorFleetSnapshotV1 browser projection', () => {
     expect(rendered).not.toContain('C:\\Users\\operator\\token.txt');
     expect(Object.keys(projected).sort()).toEqual([
       'counts', 'kind', 'observed_at', 'protocol', 'registry_revision',
-      'repositories', 'sequence', 'snapshot_consistency', 'source_snapshot_sha256',
+      'repositories', 'sequence', 'service_epoch', 'snapshot_consistency', 'source_snapshot_sha256',
     ]);
     expect(Object.keys(projected.repositories[0] ?? {}).sort()).toEqual([
-      'access_mode', 'cards', 'error', 'repository_id', 'snapshot_consistency', 'status',
+      'access_mode', 'cards', 'display_name', 'error', 'repository_id', 'snapshot_consistency', 'status',
     ]);
     expect(Object.keys(projected.repositories[0]?.cards[0] ?? {}).sort()).toEqual([
-      'attention_owner', 'blocker_codes', 'claim_id', 'column', 'error', 'execution_readiness',
+      'attention_owner', 'blocker_codes', 'claim_id', 'error', 'execution_readiness',
       'feedback', 'generation', 'head_sha', 'inbox', 'lease_state', 'merge_readiness',
-      'publication_id', 'repository_id', 'snapshot_consistency', 'task_id', 'task_index',
-      'task_label', 'task_revision',
+      'placement', 'publication_id', 'readiness_blockers', 'repository_id', 'snapshot_consistency', 'task_id', 'task_index',
+      'task_label', 'task_revision', 'task_state',
     ]);
   });
 });
@@ -236,9 +242,16 @@ test('notification evidence is copied by allowlist without exposing raw runtime 
   const source = { ...baseline, repositories: baseline.repositories.map(repo => ({ ...repo,
     cards: repo.cards.map(card => ({ ...card, inbox: { ...card.inbox, delivery_evidence: { candidate_count: 1, latest } } })),
   })) };
-  const result = projectOperatorFleetSnapshot(source);
+  const result = projectOperatorFleetSnapshot(source, serviceEpoch);
   expect(JSON.stringify(result)).not.toContain('private-endpoint');
   expect(JSON.stringify(result)).not.toContain('private-host');
   expect(result.repositories[0]!.cards[0]!.inbox.delivery_evidence!.latest!.observation_sha256).toBe(latest.observation_sha256);
   expect(Object.isFrozen(result.repositories[0]!.cards[0]!.inbox.delivery_evidence!.latest)).toBe(true);
+});
+
+ test('Fleet projection requires the actual service epoch and never synthesizes one', () => {
+  for (const epoch of [undefined, null, '', 'unknown', '00000000-0000-1000-8000-000000000001']) {
+    expect(() => projectOperatorFleetSnapshot(sourceSnapshot(), epoch as string)).toThrow('invalid operator service epoch');
+  }
+  expect(projectOperatorFleetSnapshot(sourceSnapshot(), serviceEpoch).service_epoch).toBe(serviceEpoch);
 });
