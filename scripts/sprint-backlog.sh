@@ -40,16 +40,17 @@ Usage:
 
 Program-level sprint backlog helper. PRDs live in plans/prds/ as the upper
 planning layer; sprints live in plans/sprints/ as ordered execution backlogs.
-Contract backlog rows are expanded with $think before the existing plan ->
-contract -> worktree flow. Inline rows stay in the sprint backlog or active
-plan Task Breakdown. tasks/todos.md stays the deferred-goal ledger.
+Contract backlog rows capture one slim optional plan reference; --execute starts
+that reference in a linked worktree. Inline rows bind the claim to the current
+worktree without creating plan/contract/review artifacts. tasks/todos.md stays
+the deferred-goal ledger.
 
 start-task claims the named pending backlog row on the shared coordination
 plane before any capture runs. --task is required: preventing duplicate claims
 is not the same as proving two rows are safe to run in parallel, and the
 backlog carries no dependency or parallel-safety column, so there is no
-automatic claim-next. Contract rows can capture a thin plan seed. Inline rows
-should not create plan/contract/review artifacts.
+automatic claim-next. Contract rows use the package capture-plan interface;
+inline rows remain backlog-only execution units.
 --sprint overrides the active-sprint marker (still confined to the sprints
 dir), which finish back-fill uses inside worktrees where the runtime marker
 is absent.
@@ -1092,47 +1093,16 @@ cmd_start_task() {
   fi
   echo "Claimed backlog task '$target_task' (row ${target_index}) as claim ${claim_id}"
 
-  [[ -f "$helper_dir/capture-plan.sh" ]] || {
-    release_backlog_lock
-    rollback_claim "$claim_id"
-    echo "sprint-backlog: packaged capture-plan helper not found" >&2
-    exit 1
-  }
-
-  # Do not hold the backlog lock across capture-plan: with --execute it can
-  # run git worktree setup for minutes and the stale-reclaim would hand the
-  # lock to a second writer.
+  # Do not hold the backlog lock across worktree setup: --execute can run git
+  # worktree setup for minutes and stale-reclaim must never hand the lock to a
+  # second writer while the first claim is still being materialized.
   release_backlog_lock
 
   local body_file capture_output plan_path
-  body_file="$(mktemp)"
   if [[ "$target_mode" == "inline" ]]; then
-    cat > "$body_file" <<BODY_EOF
-# Sprint Row: ${target_task}
-
-## Context
-
-- Sprint: \`${sprint_file}\`
-- Backlog row: ${target_index}
-- Mode: ${target_mode}
-- Keep this as a checklist row in the current active plan; do not promote it to a top-level plan, contract, review, or notes bundle.
-
-## Task Breakdown
-
-- [ ] Complete sprint row \`${target_task}\`: ${target_acceptance}
-BODY_EOF
-
-    capture_output="$(bash "$helper_dir/capture-plan.sh" --artifact-level checklist-row --slug "$target_task" --title "Sprint row: ${target_task}" --source repo-harness-sprint --orchestration-kind sprint-inline --source-ref "sprint:${sprint_file}#${target_task}" --body-file "$body_file" 2>&1)" || {
-      printf '%s\n' "$capture_output" >&2
-      rm -f "$body_file"
-      rollback_claim "$claim_id"
-      echo "sprint-backlog: checklist-row capture failed for inline task '$target_task'" >&2
-      exit 1
-    }
-    rm -f "$body_file"
-    printf '%s\n' "$capture_output"
-    # Inline work executes here, so this tree is the execution worktree and the
-    # bind can happen immediately.
+    # 0.20 package runtime treats inline rows as backlog-only units. There is no
+    # plan/contract/review artifact to manufacture or approve; the current
+    # worktree itself is the execution unit protected by the sprint lease.
     if ! bind_claim "$claim_id" "$(pwd -P)" "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'HEAD')" \
       "inline:${sprint_file}#${target_index}"; then
       rollback_claim "$claim_id"
@@ -1143,66 +1113,85 @@ BODY_EOF
       rollback_claim "$claim_id"
       exit 1
     fi
-    echo "Backlog row ${target_index} ('${target_task}') is inline; appended checklist row(s) to the active plan without plan/contract/review/notes projection."
+    echo "Backlog row ${target_index} ('${target_task}') is inline; claim bound to the current worktree without plan/contract/review artifacts."
     return 0
   fi
 
+  [[ -f "$helper_dir/capture-plan.sh" ]] || {
+    rollback_claim "$claim_id"
+    echo "sprint-backlog: packaged capture-plan helper not found" >&2
+    exit 1
+  }
+
+  body_file="$(mktemp)"
+
   cat > "$body_file" <<BODY_EOF
 # Sprint Task: ${target_task}
-
-## Context
-
-- Sprint: \`${sprint_file}\`
-- Backlog row: ${target_index}
-- Mode: ${target_mode}
-- Read the sprint Source PRD and Architecture Notes before implementation.
-- The sprint row is a long-task waypoint, not a detailed implementation plan.
 
 ## Goal
 
 Deliver backlog task \`${target_task}\` so that the acceptance line holds: ${target_acceptance}
 
-## Planning Expansion
+## Scope
 
-Before editing code, use \`\$think\` to expand this sprint row into a decision-complete implementation plan. The \`\$think\` pass should read the sprint file, preserve the acceptance line, name concrete files or commands, and produce the detailed \`plans/plan-*.md\` body that drives contract execution.
+- Sprint: \`${sprint_file}\`
+- Backlog row: ${target_index}
+- Mode: ${target_mode}
+- Work only on this claimed row; the sprint lease remains the execution authority.
 
-## Task Breakdown
+## Verify
 
-- [ ] Run \`\$think\` for backlog task \`${target_task}\` using sprint \`${sprint_file}\` and acceptance: ${target_acceptance}
-- [ ] Capture the approved \`\$think\` output with \`repo-harness run capture-plan --source waza-think --source-ref sprint:${sprint_file}#${target_task}\`
-- [ ] Verify acceptance: ${target_acceptance}
+- Acceptance: ${target_acceptance}
+
+## Rollback
+
+- Revert the task branch or discard the linked worktree only after the normal ownership/deletion checks.
 BODY_EOF
 
-  local -a capture_args
-  capture_args=(
-    --slug "$target_task"
-    --title "Sprint task: ${target_task}"
-    --status Approved
-    --artifact-level work-package
-    --source repo-harness-sprint
-    --orchestration-kind sprint-task
-    --source-ref "sprint:${sprint_file}#${target_task}"
-    --body-file "$body_file"
-  )
-  if [[ "$execute" -eq 1 ]]; then
-    capture_args+=(--promotion-reason worktree_boundary --execute)
-  fi
-
-  capture_output="$(bash "$helper_dir/capture-plan.sh" "${capture_args[@]}" 2>&1)" || {
-    printf '%s\n' "$capture_output" >&2
+  local plan_slug start_output
+  plan_slug="$(normalize_slug "$target_task")"
+  if [[ -z "$plan_slug" ]]; then
     rm -f "$body_file"
     rollback_claim "$claim_id"
-    echo "sprint-backlog: capture-plan failed for task '$target_task'" >&2
+    echo "sprint-backlog: task name cannot produce a safe plan slug: $target_task" >&2
     exit 1
-  }
+  fi
+  # The task id is stable across title edits/reordering, so it prevents two
+  # same-title rows from colliding under capture-plan's slim plans/<slug>.md form.
+  plan_slug="${plan_slug}-${task_id:0:12}"
+  plan_path="plans/${plan_slug}.md"
+
+  capture_output="$(bash "$helper_dir/capture-plan.sh" \
+    --slug "$plan_slug" \
+    --title "Sprint task: ${target_task}" \
+    --body-file "$body_file" 2>&1)" || {
+      printf '%s\n' "$capture_output" >&2
+      rm -f "$body_file"
+      rollback_claim "$claim_id"
+      echo "sprint-backlog: capture-plan failed for task '$target_task'" >&2
+      exit 1
+    }
   rm -f "$body_file"
   printf '%s\n' "$capture_output"
+  echo "Captured plan: $plan_path"
 
-  plan_path="$(printf '%s\n' "$capture_output" | sed -nE 's/^Captured plan: (.+)$/\1/p' | head -1)"
-  if [[ -z "$plan_path" ]]; then
-    rollback_claim "$claim_id"
-    echo "sprint-backlog: could not resolve captured plan path; the reservation was rolled back" >&2
-    exit 1
+  if [[ "$execute" -eq 1 ]]; then
+    if [[ ! -f "$helper_dir/contract-worktree.sh" ]]; then
+      rollback_claim "$claim_id"
+      echo "sprint-backlog: packaged contract-worktree helper not found" >&2
+      exit 1
+    fi
+    start_output="$(bash "$helper_dir/contract-worktree.sh" start \
+      --plan "$plan_path" --no-plan-to-todo 2>&1)" || {
+        printf '%s\n' "$start_output" >&2
+        rollback_claim "$claim_id"
+        echo "sprint-backlog: contract-worktree start failed for task '$target_task'" >&2
+        exit 1
+      }
+    printf '%s\n' "$start_output"
+    capture_output="${capture_output}"$'\n'"Captured plan: ${plan_path}"$'\n'"${start_output}"
+  else
+    capture_output="${capture_output}"$'\n'"Captured plan: ${plan_path}"
   fi
 
   # Bind the reservation to the execution worktree once it exists. Without

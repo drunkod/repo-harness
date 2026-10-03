@@ -465,6 +465,97 @@ describe("sprint-backlog helper", () => {
     }
   }, 30_000);
 
+  test("package runtime start-task --execute composes slim capture-plan with a linked worktree", () => {
+    const cwd = tmpWorkspace("sprint-backlog-package-runtime");
+    let worktreePath = "";
+    try {
+      const init = run(
+        CLI_WRAPPER,
+        ["init", "--repo", cwd, "--target", "codex", "--mode", "standard", "--no-codegraph", "--no-verify", "--json"],
+        cwd,
+      );
+      expect(init.status, `${init.stdout}\n${init.stderr}`).toBe(0);
+
+      const sprintPath = "plans/sprints/20260610-0000-fixture-sprint.sprint.md";
+      writeActiveSprintFixture(cwd, sprintPath);
+
+      const start = run(
+        CLI_WRAPPER,
+        ["run", "sprint-backlog", "start-task", "--task", "task-a", "--execute", "--sprint", sprintPath],
+        cwd,
+      );
+      expect(start.status, `${start.stdout}\n${start.stderr}`).toBe(0);
+      expect(start.stderr).not.toContain("Unsupported capture argument");
+
+      const planPath = start.stdout.match(/Captured plan: (plans\/[^\s]+\.md)/)?.[1] ?? "";
+      expect(planPath).toMatch(/^plans\/task-a-[0-9a-f]{12}\.md$/);
+
+      worktreePath = start.stdout.match(
+        /^\[ContractWorktree\] (?:Created worktree|Added worktree for existing branch|Reusing existing worktree): (.+)$/m,
+      )?.[1] ?? "";
+      const branch = start.stdout.match(/^\[ContractWorktree\] Branch: (.+)$/m)?.[1] ?? "";
+      expect(worktreePath).not.toBe("");
+      expect(branch).toMatch(/^codex\/task-a-[0-9a-f]{12}$/);
+      expect(existsSync(join(worktreePath, planPath))).toBe(true);
+
+      const plan = readFileSync(join(worktreePath, planPath), "utf-8");
+      expect(plan).toContain("## Goal");
+      expect(plan).toContain("## Verify");
+      expect(plan).not.toContain("**Task Contract**");
+
+      const claimsDir = join(worktreePath, ".ai/harness/sprint/claims");
+      expect(readdirSync(claimsDir).filter((name) => name.endsWith(".claim"))).toHaveLength(1);
+      expect(readFileSync(join(cwd, sprintPath), "utf-8"))
+        .toContain(`| 1 | ${fixtureTaskId("task-a")} | [ ] | task-a | contract | unit tests pass | (pending) |`);
+    } finally {
+      if (worktreePath && existsSync(worktreePath)) {
+        spawnSync("git", ["worktree", "remove", "--force", worktreePath], { cwd, encoding: "utf-8" });
+        rmSync(worktreePath, { recursive: true, force: true });
+      }
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("package runtime inline rows bind and complete without creating a plan artifact", () => {
+    const cwd = tmpWorkspace("sprint-backlog-package-inline");
+    try {
+      const init = run(
+        CLI_WRAPPER,
+        ["init", "--repo", cwd, "--target", "codex", "--mode", "standard", "--no-codegraph", "--no-verify", "--json"],
+        cwd,
+      );
+      expect(init.status, `${init.stdout}\n${init.stderr}`).toBe(0);
+
+      const sprintPath = "plans/sprints/20260610-0000-fixture-sprint.sprint.md";
+      writeActiveSprintFixture(cwd, sprintPath);
+
+      const start = run(
+        CLI_WRAPPER,
+        ["run", "sprint-backlog", "start-task", "--task", "task-b", "--sprint", sprintPath],
+        cwd,
+      );
+      expect(start.status, `${start.stdout}\n${start.stderr}`).toBe(0);
+      expect(start.stdout).toContain("claim bound to the current worktree without plan/contract/review artifacts");
+      expect(start.stdout).not.toContain("Captured plan:");
+      expect(readdirSync(join(cwd, "plans")).filter((name) => name.includes("task-b"))).toHaveLength(0);
+
+      const claimsDir = join(cwd, ".ai/harness/sprint/claims");
+      expect(readdirSync(claimsDir).filter((name) => name.endsWith(".claim"))).toHaveLength(1);
+
+      const complete = run(
+        CLI_WRAPPER,
+        ["run", "sprint-backlog", "complete-task", "--task", "task-b", "--sprint", sprintPath],
+        cwd,
+      );
+      expect(complete.status, `${complete.stdout}\n${complete.stderr}`).toBe(0);
+      expect(readFileSync(join(cwd, sprintPath), "utf-8"))
+        .toContain(`| 2 | ${fixtureTaskId("task-b")} | [x] | task-b | inline | doc section updated | (pending) |`);
+      expect(readdirSync(claimsDir).filter((name) => name.endsWith(".claim"))).toHaveLength(0);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   test("start-task selects an early row in a long backlog without SIGPIPE", () => {
     const cwd = tmpWorkspace("sprint-backlog-start-long");
     try {
