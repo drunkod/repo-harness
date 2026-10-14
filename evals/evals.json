@@ -556,9 +556,9 @@
     },
     {
       "id": 13,
-      "slug": "route-repo-harness-plan",
+      "slug": "route-repo-harness-check",
       "prompt": "Plan how we should change the repo-harness workflow command surface, but do not edit files yet.",
-      "expected_output": "Routes the request to repo-harness-plan, inspects repo state, produces a decision-complete plan, and names the next action command without mutating files.",
+      "expected_output": "Routes the request to repo-harness-check, inspects repo state, produces a decision-complete plan, and names the next action command without mutating files.",
       "files": [
         "evals/fixtures/audit-drift"
       ],
@@ -569,7 +569,7 @@
         "files_contain": [
           {
             "path": "final-response.md",
-            "pattern": "repo-harness-plan"
+            "pattern": "repo-harness-check"
           },
           {
             "path": "final-response.md",
@@ -597,9 +597,9 @@
     },
     {
       "id": 14,
-      "slug": "route-repo-harness-plan-review-mode",
+      "slug": "route-repo-harness-check-review-mode",
       "prompt": "Review this existing repo-harness plan for product, engineering, design, and DevEx issues before implementation.",
-      "expected_output": "Routes the request to repo-harness-plan's review mode, reads the plan, selects review dimensions, reports blocking issues first, and does not implement by default.",
+      "expected_output": "Routes the request to repo-harness-check's review mode, reads the plan, selects review dimensions, reports blocking issues first, and does not implement by default.",
       "files": [
         "evals/fixtures/audit-drift"
       ],
@@ -610,7 +610,7 @@
         "files_contain": [
           {
             "path": "final-response.md",
-            "pattern": "repo-harness-plan"
+            "pattern": "repo-harness-check"
           },
           {
             "path": "final-response.md",
@@ -627,7 +627,7 @@
         ]
       },
       "expectations": [
-        "Treats review as plan-stage critique within repo-harness-plan, not a separate skill.",
+        "Treats review as plan-stage critique within repo-harness-check, not a separate skill.",
         "Covers product, engineering, design, and DevEx when relevant.",
         "Keeps implementation separate from review."
       ]
@@ -709,8 +709,8 @@
     {
       "id": 17,
       "slug": "route-repo-harness-architecture",
-      "prompt": "Resolve the pending architecture drift request and update the architecture diagram if it helps, but do not refresh the whole harness.",
-      "expected_output": "Routes the request to repo-harness-architecture, inspects docs/architecture/index.md and pending requests, uses capability matching when relevant, archives handled requests, and only generates a diagram through diagram-design when useful.",
+      "prompt": "Update the architecture model and module documents for the changed responsibility, and add a diagram if it helps, but do not refresh the whole harness.",
+      "expected_output": "Routes the request to repo-harness-architecture, inspects docs/architecture/index.md and the archctx model, uses capability matching when relevant, writes the model change through an archctx ChangeSet, runs repo-harness architecture-projection apply, and only generates a diagram through diagram-design when useful.",
       "files": [
         "assets/skill-commands/repo-harness-architecture/SKILL.md"
       ],
@@ -725,7 +725,7 @@
           },
           {
             "path": "final-response.md",
-            "pattern": "archive-architecture-request"
+            "pattern": "architecture-projection"
           },
           {
             "path": "final-response.md",
@@ -742,8 +742,8 @@
         ]
       },
       "expectations": [
-        "Treats hooks as architecture request recorders, not prose rewriters.",
-        "Keeps docs/architecture/requests pending-only after handling a request.",
+        "Treats architecture updates as explicit agent work; hooks do not record drift or rewrite prose.",
+        "Commits the model change and the projected documents together.",
         "Does not run a full harness refresh."
       ]
     },
@@ -1044,85 +1044,10 @@
         ]
       },
       "expectations": [
-        "Routes the request to repo-harness-product's sprint mode instead of its PRD or Goal modes, or the separate repo-harness-plan skill.",
+        "Routes the request to repo-harness-product's sprint mode instead of its PRD or Goal modes, or the separate repo-harness-check skill.",
         "Keeps tasks/todos.md as the deferred-goal ledger and places the backlog in plans/sprints/.",
         "Requires a concrete acceptance line per backlog row before Approved status.",
         "Executes each backlog task through the existing plan -> contract -> worktree gates."
-      ]
-    },
-    {
-      "id": 25,
-      "slug": "route-nl-vs-ts",
-      "prompt": "Run the route-nl-vs-ts shadow eval for the loop engine. Locate the mounted repo-harness skill root: use .skill-src when it exists, otherwise use .claude/skills/repo-harness. Create .ai/harness/runs/. Write scenarios with `bun \"$SKILL_ROOT/scripts/route-nl-vs-ts-eval.ts\" --emit-scenarios > .ai/harness/runs/route-nl-vs-ts-scenarios.json`. Read `$SKILL_ROOT/docs/reference-configs/loop-engine-nl-decision-table.md`, then make your own NL decision-table routing choices for every scenario and write `.ai/harness/runs/route-nl-vs-ts-decisions.json` with a top-level `decisions` array of `{scenario_id,intent,action,rationale}` objects. The intent and action fields MUST be exact strings from the scenario pack `allowed_intents` and `allowed_actions` arrays; do not invent synonyms such as enter_done_gate, capture_pending_plan, or scaffold_contract. Do not use `--write-expected-decisions` for the NL arm. Run `bun \"$SKILL_ROOT/scripts/route-nl-vs-ts-eval.ts\" --agent benchmark --decisions .ai/harness/runs/route-nl-vs-ts-decisions.json --out .ai/harness/runs/route-nl-vs-ts-report.json`. Final response must summarize compliance_rate, false_positive_count, false_negative_count, estimated_token_delta_per_prompt, and go/no-go. Do not edit source files.",
-      "expected_output": "A shadow-routing eval run that leaves a route-nl-vs-ts report under .ai/harness/runs/, compares the current TS verdict arm against NL decision-table self-routing, and reports compliance, false positives, false negatives, token delta, and go/no-go without changing runtime prompt-guard behavior.",
-      "files": [
-        "evals/fixtures/route-nl-vs-ts"
-      ],
-      "graders": {
-        "files_exist": [
-          "final-response.md",
-          ".ai/harness/runs/route-nl-vs-ts-report.json"
-        ],
-        "files_contain": [
-          {
-            "path": "final-response.md",
-            "pattern": "route-nl-vs-ts"
-          },
-          {
-            "path": "final-response.md",
-            "pattern": "compliance|合规"
-          },
-          {
-            "path": "final-response.md",
-            "pattern": "false_positive|误报"
-          },
-          {
-            "path": "final-response.md",
-            "pattern": "token_delta|token"
-          },
-          {
-            "path": "final-response.md",
-            "pattern": "go|no-go"
-          },
-          {
-            "path": ".ai/harness/runs/route-nl-vs-ts-report.json",
-            "pattern": "\"protocol\": \"route-nl-vs-ts/report/v1\""
-          },
-          {
-            "path": ".ai/harness/runs/route-nl-vs-ts-report.json",
-            "pattern": "\"compliance_rate\""
-          },
-          {
-            "path": ".ai/harness/runs/route-nl-vs-ts-report.json",
-            "pattern": "\"false_positive_count\""
-          },
-          {
-            "path": ".ai/harness/runs/route-nl-vs-ts-report.json",
-            "pattern": "\"estimated_token_delta_per_prompt\""
-          },
-          {
-            "path": ".ai/harness/runs/route-nl-vs-ts-report.json",
-            "pattern": "\"go_no_go\""
-          }
-        ],
-        "commands_succeed": [
-          "skill_root=.skill-src; if [ ! -e \"$skill_root/scripts/route-nl-vs-ts-eval.ts\" ]; then skill_root=.claude/skills/repo-harness; fi; bun \"$skill_root/scripts/route-nl-vs-ts-eval.ts\" --check-report .ai/harness/runs/route-nl-vs-ts-report.json"
-        ]
-      },
-      "anti_graders": {
-        "files_not_contain": [
-          {
-            "path": "final-response.md",
-            "pattern": "changed runtime prompt-guard|cutover"
-          }
-        ]
-      },
-      "expectations": [
-        "Runs the existing TS prompt-guard verdict as the A arm without changing it.",
-        "Uses the natural-language decision table as the B arm and writes agent-made route decisions.",
-        "Covers historical route regressions from lessons.md and hook runtime tests.",
-        "Reports compliance rate, false positives, false negatives, token delta, and go/no-go in .ai/harness/runs/.",
-        "Keeps classifier cutover out of scope."
       ]
     },
     {

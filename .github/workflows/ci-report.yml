@@ -18,7 +18,7 @@ concurrency:
 jobs:
   report:
     # Never execute PR code in a privileged workflow_run context. Only fixed
-    # main push/daily runs produce tags or repair issues; PR checks remain read-only.
+    # main push/daily runs produce reports or repair issues; PR checks remain read-only.
     if: >-
       github.event.workflow_run.head_branch == 'main' &&
       contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event.workflow_run.event)
@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       actions: read
-      contents: write
+      contents: read
       issues: write
     steps:
       - uses: actions/checkout@v4
@@ -35,8 +35,8 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
-      - name: Read provider facts, recover tags, dispatch failures and write report
+          bun-version: 1.4.3
+      - name: Read provider rollback commits, dispatch failures and write report
         env:
           GH_TOKEN: ${{ github.token }}
         run: bun scripts/report-ci.ts
@@ -45,6 +45,7 @@ jobs:
         with:
           name: daily-report-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
           path: .ci-report/
+          include-hidden-files: true
           if-no-files-found: error
 
   watchdog:
@@ -64,7 +65,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.3
       - name: Detect daily full validation that never started or exceeded its deadline
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,4 +75,5 @@ jobs:
         with:
           name: daily-watchdog-${{ github.run_id }}
           path: .ci-report/
+          include-hidden-files: true
           if-no-files-found: error

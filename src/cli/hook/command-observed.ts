@@ -56,6 +56,23 @@ function outputText(value: unknown): string {
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
+/**
+ * `tool_response` is the only host field for the command result. Claude Code
+ * sends Bash results as `{ stdout, stderr, interrupted, ... }`; the observed
+ * output is both streams, in that order. Codex documents the field only as
+ * the model-facing output, so a string is kept and any other shape is
+ * serialized.
+ */
+function toolResponseOutput(response: unknown): unknown {
+  if (!response || typeof response !== 'object' || Array.isArray(response)) return response;
+  const { stdout, stderr } = response as { stdout?: unknown; stderr?: unknown };
+  if (typeof stdout !== 'string' && typeof stderr !== 'string') return response;
+  const out = typeof stdout === 'string' ? stdout : '';
+  const err = typeof stderr === 'string' ? stderr : '';
+  if (!out || !err) return out || err;
+  return out.endsWith('\n') ? `${out}${err}` : `${out}\n${err}`;
+}
+
 function numberValue(value: unknown, fallback: number): number {
   if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
   if (typeof value === 'string' && /^-?\d+$/u.test(value.trim())) return Number.parseInt(value.trim(), 10);
@@ -166,11 +183,12 @@ export function runCommandObserved(opts: CommandObservedInput): CommandObservedR
   // Hook input parsing is lazy; accessors add warnings on first use.
   const warnings = (): string => parsed.warnings.length > 0 ? `${parsed.warnings.join('\n')}\n` : '';
   const command = parsed.getString('.tool_input.command', '');
-  const rawToolOutput = env.TOOL_OUTPUT ? env.TOOL_OUTPUT : parsed.get('.tool_output', '');
-  const toolOutput = outputText(rawToolOutput);
+  const toolOutput = outputText(toolResponseOutput(parsed.get('.tool_response', '')));
   // post-bash.sh reads the top-level exit_code (its host adapter historically
   // passes this field separately from the trace observer's tool_response).
-  const exitCode = numberValue(parsed.get('.exit_code', env.EXIT_CODE ?? '0'), 0);
+  const piExitCode = (parsed.value as { exit_code?: unknown } | null)?.exit_code;
+  const exitCode = env.HOOK_HOST === 'pi' && (typeof piExitCode !== 'number' || !Number.isSafeInteger(piExitCode))
+    ? null : numberValue(parsed.get('.exit_code', env.EXIT_CODE ?? '0'), 0);
   const lines = outputLineCount(toolOutput);
   const bytes = Buffer.byteLength(toolOutput, 'utf8');
   const broad = broadCommand(command);
@@ -180,7 +198,7 @@ export function runCommandObserved(opts: CommandObservedInput): CommandObservedR
   const longBytes = 32768;
   let verbosity: 'inline' | 'failure' | 'long' = 'inline';
   let suggestedRunner: 'inline' | 'raw' | 'rtk' = 'inline';
-  if (exitCode !== 0) {
+  if (exitCode !== null && exitCode !== 0) {
     verbosity = 'failure';
     suggestedRunner = 'raw';
   } else if (lines >= longLines || bytes >= longBytes) {
@@ -200,7 +218,7 @@ export function runCommandObserved(opts: CommandObservedInput): CommandObservedR
     }
 
     let stdout = '';
-    if (exitCode !== 0 && failed) {
+    if (exitCode !== null && exitCode !== 0 && failed) {
       const circuit = circuitFailure(opts.repoRoot, env, fsApi, command, deps);
       if (circuit.denied) return { exitCode: 2, stdout: '', stderr: `${warnings()}${circuit.stderr}`, reason: 'repair-circuit-tripped' };
       stdout += '[PostBash] Tests failed. Reminder: failure = rewrite module, not patching.\n';
@@ -212,7 +230,7 @@ export function runCommandObserved(opts: CommandObservedInput): CommandObservedR
       source: 'post-bash',
       command,
       exit_code: exitCode,
-      status: exitCode === 0 ? 'pass' : 'fail',
+      status: exitCode === null ? 'unknown' : exitCode === 0 ? 'pass' : 'fail',
       broad_command: broad,
       output_line_count: lines,
       verbosity_class: verbosity,
@@ -249,16 +267,18 @@ export function runCommandObserved(opts: CommandObservedInput): CommandObservedR
       { session_id: parsed.get('.session_id'), run_id: parsed.get('.run_id') },
       env,
     );
-    const importResult = importPostBashObservation({
-      repoRoot: opts.repoRoot,
-      command,
-      exitCode,
-      durationMs,
-      rawOutputPath: rawPath,
-      correlationRunId: runIdentity.runId ?? undefined,
-    });
-    if (!importResult.ok) {
-      throw new Error(`ledger import failed (${importResult.reason}): ${importResult.message}`);
+    if (exitCode !== null) {
+      const importResult = importPostBashObservation({
+        repoRoot: opts.repoRoot,
+        command,
+        exitCode,
+        durationMs,
+        rawOutputPath: rawPath,
+        correlationRunId: runIdentity.runId ?? undefined,
+      });
+      if (!importResult.ok) {
+        throw new Error(`ledger import failed (${importResult.reason}): ${importResult.message}`);
+      }
     }
 
     return { exitCode: 0, stdout, stderr: warnings(), reason: 'ok' };

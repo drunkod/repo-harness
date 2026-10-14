@@ -4,10 +4,10 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { PROJECTION_REQUEST_VERSION, type ProjectionRequestV1 } from '../src/core/architecture/projection';
+import { PROJECTION_REQUEST_SCHEMA_VERSION, type ProjectionRequestV1 } from 'archctx-contracts';
 import { archctxCapabilities, captureArchitectureProjectionSnapshot, runArchitectureProjection } from '../src/effects/architecture/archctx-provider';
 
-const VERSION = '0.6.1';
+const VERSION = '0.7.2';
 const repoRoot = resolve(import.meta.dir, '..');
 const archContextRoot = resolve(flag('--arch-context-root') ?? join(repoRoot, '..', 'arch-context'));
 const revision = flag('--revision') ?? git(archContextRoot, ['rev-parse', 'HEAD']);
@@ -122,7 +122,7 @@ extensions:
   daemonRoot = fixtureRepo;
   run(installedBinary, ['daemon', 'upgrade'], fixtureRepo, { ...offlineEnv, PATH: `${conflictDir}:${process.env.PATH ?? ''}` });
   const request: ProjectionRequestV1 = {
-    schemaVersion: PROJECTION_REQUEST_VERSION,
+    schemaVersion: PROJECTION_REQUEST_SCHEMA_VERSION,
     requestId: 'repo-harness.axr5-clean-room',
     profile: 'repo-harness/v1',
     mode: 'plan',
@@ -192,6 +192,8 @@ function linkBuildDependencies(checkout: string): void {
   // an undeclared global package.
   const koffiTarget = join(targetModules, 'koffi');
   if (!existsSync(koffiTarget)) symlinkSync(join(repoRoot, 'node_modules', 'koffi'), koffiTarget, 'dir');
+  const yamlTarget = join(targetModules, 'yaml');
+  if (!existsSync(yamlTarget)) symlinkSync(realpathSync(join(archContextRoot, 'packages', 'core', 'node_modules', 'yaml')), yamlTarget, 'dir');
   const targetScope = join(targetModules, '@archcontext');
   mkdirSync(targetScope, { recursive: true });
   const workspaces = (JSON.parse(readFileSync(join(checkout, 'package.json'), 'utf8')) as { workspaces?: unknown }).workspaces;

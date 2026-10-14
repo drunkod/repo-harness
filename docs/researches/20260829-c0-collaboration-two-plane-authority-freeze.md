@@ -1,5 +1,7 @@
 # C0 — Collaboration / Delivery Two-Plane Authority Freeze
 
+> Historical record. Campaign execution moved to the existing Bot skills on 2026-10-04. Use [repo-harness](../../SKILL.md) to dispatch and collect work through Herdr/OAR. Use [repo-harness-product](../../assets/skills/repo-harness-product/SKILL.md) for planning and [repo-harness-check](../../assets/skill-commands/repo-harness-check/SKILL.md) for scope and verification. repo-harness has no campaign runtime.
+
 > **Last Updated**: 2026-08-30
 > **Scope**: `capability.runtime-harness.collaboration` boundary against the existing Task / Lease / Publication / Acceptance delivery authorities
 > **Baseline**: `main@a490a5ef76b439228a4b3282934c29ba15090cdf`
@@ -97,6 +99,8 @@ the historical `main@a490a5ef` count:
 | `src/core/refactor/board.ts` | C-1, C-2 | Refactor read model: projects Program, provider lifecycle, execution, and resolution authorities for display; no delivery-plane admission or ownership decision reads the board bytes |
 | `src/core/refactor/activation.ts` | C-1, C-2 | Refactor rollout-control plane: canary receipts gate mode activation but grant no Task/Claim, move no Lease generation, and publish or accept no delivery-plane fact |
 | `src/core/fleet/task-reply.ts` | C-1, C-2 | Messaging reply provenance plane: pure intent/commit validators relate existing message, ACK, mapping and actor snapshots. AKN-03b Task Inbox and restricted Engineer MCP consume these records only for message disposition; structural completeness grants no Task/Claim, Lease, Publication, Acceptance or Delegation authority. The delivery-plane inventory and frozen identities remain unchanged. |
+| `src/core/messages/document-handoff.ts` | C-1, C-2 | Untrusted document content protocol. Pure validation, canonical rendering, and caller-supplied reference comparison own no delivery-plane identity. There is no production consumer or store. Sender claims authenticate nobody, and no admission or ownership decision reads the payload. Its bytes grant no Task/Claim, Lease, Publication, Acceptance, or Delegation authority. The delivery-plane inventory and frozen digest remain unchanged. |
+| `src/core/operator/runtime-capture.ts` | C-1 | Native runtime observation plane. Capture writes a derived session or terminal status cache. The native reader projects it into the read-only runtime HTTP route. The protocol owns no Task/Claim, Lease, Publication, Acceptance or Delegation wire identity. This exclusion relies on C-1, not the absence of a store or a machine-readable surface. The delivery-plane inventory and frozen digest remain unchanged. |
 
 **`project-board.ts` vs `fleet/board.ts`.** Both are Task/Lease-plane read
 models, and both are inventoried; the earlier split between them had no stated
@@ -671,3 +675,89 @@ The protocol change and this explicit amendment are verified by
 ## AKN-04a Fleet protocol revision (2026-09-22)
 
 The placement cutover changes the existing Fleet board wire protocol from 4 to 5; its authority membership and store ownership remain unchanged. The earlier inventory digest `sha256:e7b3dce11c70ddd47b7dbd6cbd96f54b92de24863d373426e01adf8be595e787` above records the prior freeze. The current inventory, differing in that protocol value, is `sha256:1b8694114cc2a95e7730522623f6f6e1ffb84b237e6de5ad7857637bd5974162`. The closed inventory regression remains required; this explicit revision does not retroactively change any earlier acceptance or establish a new delivery authority.
+
+
+## PR #523 publication version amendment (2026-10-05)
+
+The owner-approved checks report retirement changes the publication receipt to
+protocol 2. It replaces the two retired evidence fields with
+`candidate_diff_fingerprint`. The publication ID hash basis stays at version 1.
+Create intent and prepare stay at protocol 1. Their durable bytes stay unchanged.
+This amendment supersedes the earlier publication inventory row. Earlier digest
+records remain history. It does not change collaboration inclusion rules.
+
+| Domain | Protocol | Wire kind | Independent store root |
+|---|---|---|---|
+| Publication receipt | 2 | `repo-harness-publication-receipt` | `repo-harness/publications/v1` |
+| Publication identity | 1 | None; ID hash basis only | None |
+| Publication create intent | 1 | `repo-harness-publication-create-intent` | None; embedded in the existing ship journal |
+| Publication prepare | 1 | `repo-harness-publication-prepare` | None; operation hand-off envelope |
+
+The receipt keeps its existing store root so an old same-ID receipt is refused.
+No store is moved or migrated. The identity domain emits no separate wire kind.
+Each existing wire kind belongs to exactly one inventory entry. The source
+module owns all four entries. Its protocol value multiset is `[1, 1, 1, 2]`.
+Publication lineage and integration observation keep protocol 1.
+All other inventory entries and versions stay unchanged.
+
+The previous inventory digest was
+`sha256:1b8694114cc2a95e7730522623f6f6e1ffb84b237e6de5ad7857637bd5974162`.
+The amended inventory digest is
+`sha256:5b8c7a3b3f996a41873fe11e7a242dbd4accc47f5c1a0e42a4ef0f0f9da87fcb`.
+The machine guard keeps the exact protocol map, source export completeness,
+unique wire kinds, store-root convention and delegation invariants.
+No assertion is removed or relaxed.
+
+These source-byte digests were read at PR #523 revision `c2e17d18`.
+The receipt module owns the version split. Lifecycle and readiness use the V2
+receipt type. Their own protocol constants do not change.
+
+| File | sha256 |
+|---|---|
+| `src/core/publication/publication-receipt.ts` | `sha256:34da4c2d2243c03ac33c7060fc8ae32748d0ea12e69f64f0fbd7423c84c2b7d4` |
+| `src/core/publication/publication-lifecycle.ts` | `sha256:16dff3283f0afa0decfbf83e20300aed30177bd873eb781168e7b3d3426905a5` |
+| `src/core/publication/merge-readiness.ts` | `sha256:ababf458eeb1a79145749347e47296acf798db24344934cae18211a2e5b5823c` |
+
+
+## Audit F05-01 publication version amendment (2026-10-05)
+
+Audit F05-01 found a circular prerequisite. Managed Draft publication wrote a
+receipt that required a host merge seal. Only `merge-gate run` writes that seal,
+and it requires a merge-ready PR. A Draft PR is not merge ready.
+
+This amendment changes the publication receipt to protocol 3. It removes the
+`merge_seal_sha256` field. The receipt now records publication identity only:
+the PR, the head, the tree, the base, and the native candidate diff. Merge
+readiness keeps its live gate. It compares the live provider base and head with
+the receipt and blocks a moved base. Protocols 1 and 2 are retired. Their cache
+and marker bytes fail closed. No store is moved or migrated.
+
+| Domain | Protocol | Wire kind | Independent store root |
+|---|---|---|---|
+| Publication receipt | 3 | `repo-harness-publication-receipt` | `repo-harness/publications/v1` |
+| Publication identity | 1 | None; ID hash basis only | None |
+| Publication create intent | 1 | `repo-harness-publication-create-intent` | None; embedded in the existing ship journal |
+| Publication prepare | 1 | `repo-harness-publication-prepare` | None; operation hand-off envelope |
+
+The publication ID hash basis stays at version 1. The source module still owns
+all four entries. Its protocol value multiset is `[1, 1, 1, 3]`. Publication
+lineage and integration observation keep protocol 1. All other inventory entries
+and versions stay unchanged. This amendment needs owner approval before merge.
+
+The previous inventory digest was
+`sha256:5b8c7a3b3f996a41873fe11e7a242dbd4accc47f5c1a0e42a4ef0f0f9da87fcb`.
+The amended inventory digest is
+`sha256:d4a165e3c89e6327c06d57f0f6197ecd13d9af0b63dcb9835808e0961af47c5b`.
+The machine guard keeps the exact protocol map, source export completeness,
+unique wire kinds, store-root convention and delegation invariants.
+No assertion is removed or relaxed.
+
+These source-byte digests were read from the amended working tree. Lifecycle
+and readiness use the V3 receipt type. Their own protocol constants do not
+change.
+
+| File | sha256 |
+|---|---|
+| `src/core/publication/publication-receipt.ts` | `sha256:e14ccfc74de6971809d20758e17f943967418dbbbc55fb53ba1427f9f1b83405` |
+| `src/core/publication/publication-lifecycle.ts` | `sha256:56f037f32f240803a9f248bbb9fe1849fe9f6374b8863a9d6bcecd7f3228a601` |
+| `src/core/publication/merge-readiness.ts` | `sha256:397c565de6b20177a69fb0200cbfdc69febf0585bc1b78a44999a42dddf2c0df` |

@@ -2,13 +2,8 @@
  * Mutation guard — HRD-03 in-process decision handler for `PreToolUse.edit`.
  *
  * Preserves path/private boundaries; workflow stages are advisory.
- * Historical implementation ported the decision surface of the retired
- * `assets/hooks/worktree-guard.sh` and `assets/hooks/pre-edit-guard.sh`
- * scripts into one in-process handler consuming the HRD-02 collector, with
- * byte-identical decisions, reason tokens, message text, exit codes,
- * host-visible output shape, and durable write set. See
- * `tasks/notes/20260720-0419-hrd-03-pre-edit-one-decision-cutover.notes.md`
- * for the guard-port order and observable quirks reproduced deliberately.
+ * Uses the typed collector for host input and applies private/path boundaries
+ * in process. See the historical guard-port notes for the original decisions.
  *
  * Reads as a decision pipeline: `runMutationGuard()` orchestrates one
  * worktree check plus one pass of `runPerPathGuards()` per target path
@@ -25,8 +20,10 @@ import type { EffectiveState } from '../../core/state/types';
 import type { WorkflowProfile } from '../../core/workflow/profile';
 import { recordCircuitAttempt, type CircuitAttempt } from './circuit-breaker';
 import {
+  canonicalExternalPath,
   canonicalRepoRelativePath,
   fileExists,
+  isForeignDriveAbsolutePath,
   readText,
   safeRealpath,
 } from '../../effects/state/collect-state-inputs';
@@ -428,7 +425,14 @@ function runPerPathGuards(
   allTargetPaths: readonly string[],
   _writePayload: string,
 ): void {
-  if (isRepoScopedPath(filePath) && canonicalRepoRelativePath(ctx.repoRoot, filePath) !== filePath) {
+  // normalizeFilePath leaves an absolute path raw both for a verified external
+  // target and for input it could not resolve (e.g. `/repo/src/../_ops/x`);
+  // only the first, or a foreign Win32 drive path, may skip the repository
+  // boundary checks below.
+  if (isRepoScopedPath(filePath)
+    ? canonicalRepoRelativePath(ctx.repoRoot, filePath) !== filePath
+    : canonicalExternalPath(ctx.repoRoot, filePath) === null
+      && !isForeignDriveAbsolutePath(ctx.repoRoot, filePath)) {
     out(ctx, `[RepoScopeGuard] Unsafe or out-of-repository target: ${filePath}`);
     structuredError(
       ctx,
@@ -440,7 +444,7 @@ function runPerPathGuards(
     exit(2);
   }
 
-  if (filePath.startsWith('_ref/')) {
+  if (isUnderRepoDir(filePath, '_ref')) {
     out(ctx, `[ExternalReferenceGuard] ${filePath} is under _ref/.`);
     structuredError(
       ctx,
@@ -452,7 +456,7 @@ function runPerPathGuards(
     exit(2);
   }
 
-  if (filePath.startsWith('_ops/')) {
+  if (isUnderRepoDir(filePath, '_ops')) {
     out(ctx, `[OpsPrivateGuard] ${filePath} is under ignored private operations state.`);
     structuredError(
       ctx,
@@ -576,6 +580,11 @@ function tddCandidateExists(repoRoot: string, filePath: string): boolean {
 // Path classification helpers
 // ---------------------------------------------------------------------------
 
+/** The directory itself or any path below it; a target named `_ops` is as private as `_ops/x`. */
+function isUnderRepoDir(filePath: string, dir: string): boolean {
+  return filePath === dir || filePath.startsWith(`${dir}/`);
+}
+
 function isRepoScopedPath(filePath: string): boolean {
   return filePath.length > 0 && !isAbsolutePathInAnyGrammar(filePath);
 }
@@ -594,8 +603,14 @@ function normalizeFilePath(repoRoot: string, raw: string): string {
 // apply_patch parsing (hook_get_apply_patch_paths port)
 // ---------------------------------------------------------------------------
 
-const APPLY_PATCH_FILE_LINE = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/;
-const APPLY_PATCH_MOVE_LINE = /^\*\*\* Move to: (.+)$/;
+// Matches what codex-cli 0.160.0 applies. It trims a file hunk header with
+// Rust `str::trim` before it matches the marker, so leading and trailing
+// Unicode White_Space is allowed there. That set includes U+0085 and excludes
+// U+FEFF, so JS `\s` does not fit. `*** Move to: ` must start at column 0;
+// only its trailing whitespace is trimmed. Inner path whitespace is kept.
+const PATCH_WS = '[\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]';
+const APPLY_PATCH_FILE_LINE = new RegExp(`^${PATCH_WS}*\\*\\*\\* (?:Add|Update|Delete) File: (.+?)${PATCH_WS}*$`, 's');
+const APPLY_PATCH_MOVE_LINE = new RegExp(`^\\*\\*\\* Move to: (.+?)${PATCH_WS}*$`, 's');
 
 function extractApplyPatchPaths(repoRoot: string, command: string): readonly string[] {
   const paths: string[] = [];
@@ -775,9 +790,17 @@ function structuredError(
     || guard.includes('Secret')
     || guard.includes('Destructive');
 
+  // The cache and the failure log are diagnostics. Their I/O errors must not
+  // escape: runtime.ts maps a throw to exit 1, which the host reads as
+  // non-blocking, so a failed write would turn this guard's deny into an allow.
   let profile = ctx.resolvedProfileHint ?? '';
   let progressToken = 'unknown';
-  const cache = readEffectiveStateCache(ctx.repoRoot);
+  let cache: Record<string, unknown> | null = null;
+  try {
+    cache = readEffectiveStateCache(ctx.repoRoot);
+  } catch (error) {
+    err(ctx, `[${guard}] Effective state cache unreadable: ${describeError(error)}`);
+  }
   if (cache) {
     progressToken = typeof cache.progress_token === 'string' ? cache.progress_token : 'unknown';
     if (!profile && typeof cache.workflow_profile === 'string') profile = cache.workflow_profile;
@@ -806,7 +829,11 @@ function structuredError(
     // A circuit-record failure must never itself block (mirrors bash's `|| true`).
   }
 
-  appendFailureRecord(ctx.repoRoot, guard, action, reason, fix, failureClass, runId);
+  try {
+    appendFailureRecord(ctx.repoRoot, guard, action, reason, fix, failureClass, runId);
+  } catch (error) {
+    err(ctx, `[${guard}] Failure log not written: ${describeError(error)}`);
+  }
 
   if (circuitOutput?.tripped) {
     outRaw(ctx, `${JSON.stringify(circuitOutput)}\n`);

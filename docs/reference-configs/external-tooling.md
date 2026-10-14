@@ -147,6 +147,37 @@ Waza and Mermaid providers remain behind explicit `--with-external-skills`;
 Repo-local workflow refresh stays on `repo-harness init`; `setup check
 --check-updates` remains the read-only advisory surface.
 
+`repo-harness upgrade` checks retired files in the current Git repository and
+home. It writes nothing by default. `--json` lists each item with ownership and
+proof. `--scope project|global|all` limits the check. Check exits 1 when it finds
+leftovers. `setup check`, `update --check`, and a successful `update` print one
+count and the upgrade command. Update does not run cleanup.
+
+`upgrade --apply` also refreshes old owned copies of still-shipped skills from
+this package. It refreshes the contract template only when an old ownership
+hash matches. It keeps changed copies. It preserves legacy workflow-state
+libraries.
+Update continues to report counts only. This puts destructive changes and copy
+replacement under the same explicit, backed-up transaction.
+
+Old merge-gate state, v0.10.0 archives, and older backups are report-only by
+default. Use `upgrade --apply --include-state-artifacts` to select these artifacts
+for removal. This flag still requires ownership proof. Unknown artifacts stay.
+The third-party `codex@openai-codex` Claude plugin and user rule lines in
+`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` are always report-only.
+
+`upgrade --apply` backs up eligible targets and checks ownership again before
+removal. It keeps current global typed adapters, sibling user hooks, changed
+files, and files without proof. Apply exits 1 on failure and restores its target
+snapshots. Backup manifests list original paths. Project transactions use
+`repo-harness init rollback`; global backups require manual target replacement from each snapshot.
+Do not overlay directory contents. Restore symlinks verbatim.
+
+Global upgrade backups stay in `~/.repo-harness/transactions/install-*`.
+The upgrade transaction uses `beginInstallHostTransaction(..., { retainBackup: true })`.
+It keeps these backups after success or rollback. The tool never deletes these
+retained backups. The user must remove old backups when they are no longer needed.
+
 The cross-review skill is **harness-owned**; its routing source lives in
 `assets/skills/repo-harness-cross-review/`. Explicit independent review uses
 the persistent fleet deep-reasoner task-agent and existing OAR host in Herdr.
@@ -204,9 +235,40 @@ dialect. This repo does not vendor either skill body.
 
 ## Herdr Dispatch
 
+For Bot and human notification setup, see [Herdr notify](herdr-notify.md).
+
+- Default task worktrees use `/tmp/<repo>-wt-<slug>` on POSIX. Native Windows uses `os.tmpdir()` as the root. The stored default is `{{system_tmp}}/{{repo}}-wt-{{slug}}`. Runtime code resolves the temp token. Explicit stored templates stay unchanged. Commit or push work before a reboot or age-based tmp cleanup, such as `systemd-tmpfiles`. These cleaners can remove checkouts. Missing entries are pruned. The sweep saves missing registration identities before global prune. Later batches finish deferred branch cleanup. Unmerged branches remain.
+- Closeout removes a merged, clean checkout and its branch. It releases only that checkout's own canonical marker after merge proof under the topology lock. The sweep keeps dirty, locked, marked or leased worktrees. It keeps branch reflogs without a commit-creation message and missing or unreadable reflogs. Fast-forward, target-only automatic merges, reset and rebase-finish messages do not count. Dispatch must establish an unmerged commit or keep the worktree dirty, marked or leased. A merged, clean, unowned branch with its own commits can be swept.
+- `start` recovers only a real target directory registered by this clone on the expected branch, under the topology lock, with no lock or other owner. Recovery requires a current-user-owned checkout directory without group or other write access, a regular owned Git pointer, its matching admin backpointer, and the original directory identity saved by start. Git metadata can be group-writable but must not be other-writable. Start still creates a checkout when uid is unavailable; recovery then refuses. Exact removal retires the identity after Git readback. Missing identity or a replacement directory blocks recovery. Files, symlinks, unregistered paths and other branches are refused. Cleanup refuses a registered worktree whose branch is missing. MCP cleanup also refuses active markers and retained native verification evidence. Sweep reports name processed paths. Deferred entries are reported as counts. `kept` excludes deferred entries. A command timeout sends SIGTERM to the direct child only. A grandchild can briefly extend the deadline. No detached cleanup process starts. Herdr notifications accept registered default task worktrees and paths inside them. Other temporary paths and `rh-herdr-` labels stay filtered.
+
+- GitHub operations (PRs, reviews, merges, labels, releases, comments) go only through the gh/git CLI or the GitHub API. Never use simulated browser clicks on github.com: the account can be banned.
 - Suggested model split: when both are available, Claude (deep tier) drafts the architecture and Codex executes against the agreed plan; with only one, that model does both (plan first, then execute).
 - Route all cross-model dispatch and review through herdr panes (OAR runs the worker, herdr owns panes and visibility); never start direct subprocesses or hand-written CLI calls.
+- Exception: in the Claude desktop app, operator-attended acceptance review can use `repo-harness review round --launch app-terminal`. The CLI prints the fixed OAR host command. Claude runs that exact command once in an app Terminal tab, then repeats the same round. The same OAR host, Seatbelt profile and Receipt apply. Do not hand-write a Codex CLI call.
 - When a PR changes both test assertions and implementation code, dispatch its read-only review to the other model via herdr when available; otherwise run a read-only self-review in a separate same-model pane.
+- Pane layout: put at most 3 panes side by side in one tab. Do not stack panes vertically. When the tab is full, open a new tab.
+
+### Test and Review Rules
+
+- Write a plan before cross-module changes, architecture changes, and dependency upgrades. Small changes do not need a plan.
+- Rebase before the final full test run.
+- The merge gate is typecheck plus affected tests. Run `bash scripts/check-ci.sh affected --base origin/main` locally.
+- Run the full suite for dependency changes in `bun.lock` or `package.json`, large changes across modules, releases, and the daily run.
+- Run `bun run test:full` once on the final rebased head when full coverage is required.
+- `test:core` excludes the slow integration files. `test:integration` runs those files. `test:full` runs their complete union.
+- Full runs use eight isolated file workers. Run files with shared ports or shared HOME writes in the serial tail.
+- Tests with port 0 and an isolated HOME can run in parallel.
+- For a baseline comparison, run only the test files that failed.
+- Run long tasks in the background.
+- Wait for the completion notice, or check at intervals of 5 to 10 minutes.
+- Do not report each check.
+- Use one cross-reviewer for each artifact.
+- Limit each artifact to two review rounds.
+- Ask the user to decide before a third review round.
+- Before commit, remove debug writes to `/tmp` and other debug instrumentation.
+- Get one cross-model read-only review when tests and implementation change together. The reviewer checks that assertions still test the required behavior.
+
+Known flaky test: `tests/herdr-task-lifecycle.test.ts`, "MCP goals use visible persistent Herdr peers, redact history and clean success and timeout panes", can fail with `task_agent_ambiguous_launch`. Record this failure as known flaky. Do not skip the test or weaken its assertions. Do not treat this signature as a new failure.
 
 ## Detect Safely
 
@@ -304,7 +366,7 @@ diff -qr ~/.agents/skills/geju ~/.codex/skills/geju
 `CodeGraph` is required readiness for agent code navigation. It speeds up
 Codex and Claude exploration for indexed TypeScript and other supported languages, but it
 does not replace `.ai/context/capabilities.json`, workflow checks, tests,
-architecture drift events, or shell-script review.
+the architecture model, or shell-script review.
 
 This self-host repo vendors CodeGraph as a dev dependency so `bun install`
 materializes `node_modules/.bin/codegraph`; its source-only
@@ -335,6 +397,12 @@ installs. Install herdr through its official installer or platform package manag
 and verify `herdr --version` reports at least that pinned `min_version`.
 `check-agent-tooling.sh --strict-readiness` reads the same key and fails if herdr is
 missing, unusable, or older than the pin; `setup check` projects `runtime.herdr`. Repo-harness does not install it or edit user Herdr config.
+The root `repo-harness` skill requires the `herdr` skill on Codex and Claude.
+`repo-harness install` and `repo-harness update` copy the release-matched
+skill text from `herdr --skill` into each selected host skill root. They refuse
+to replace a user-edited or unowned copy. Strict readiness compares each
+installed copy with `herdr --skill` and fails when a copy is absent or differs.
+The skill only controls Herdr from a real Herdr pane with `HERDR_ENV=1`.
 The persistent reviewer still requires POSIX process groups: use macOS/Linux or
 WSL. Native Windows review lifecycle support is not implied by Herdr support.
 Drain old tmux reviewers with the previous repo-harness version before upgrading.
@@ -660,7 +728,7 @@ validated repo/HOME into inspector and init dry-run. Guarded skills overrides
 the ordinary sibling workspace default with a repo-internal workspace, and both
 profiles scrub inherited repo-harness source/helper overrides. The guard rejects source
 checkout and real HOME in either argument position; the role returns BLOCKED
-when the guard fails and must not access the independent `evals/bdd2/**` authority. The opus
+when the guard fails and must fail closed on requests for the retired `evals/bdd2/**` corpus. The opus
 family projects to Terra by default with effort carried through unchanged; the only effort
 remaps are the three explicit per-agent overrides above, and any unmapped model/effort
 combination remains a hard error.
@@ -922,18 +990,26 @@ directory is never consulted. Under `archcontext` the JSON registry is not
 writable, so `repo-harness run capability-config add` refuses and points at the
 node files.
 
-Capability authority does not require the `archctx` CLI: node files are read
-directly with Bun's native YAML parser, so selecting `capability_source` never
-spawns a daemon or external process. Bun older than 1.3 has no `Bun.YAML`; that
+Capability metadata comes from the node files, which Bun's native YAML parser
+reads directly. Path ownership under `archcontext` comes only from the
+package-local `archctx resolve --paths-from`. One process resolves one batch of
+paths. It reads no daemon state and no CodeGraph index. The pre-edit hook,
+Effective State, `capability-resolver match` and `capability-context` all use
+this route. If archctx fails, the resolution is invalid, and Effective State
+reports the `capability_registry:invalid` blocker. The standalone helper copy
+in `assets/templates/helpers/` has no package-local archctx, so its `match`
+fails closed under `archcontext`. Bun older than 1.3 has no `Bun.YAML`; that
 fails closed with upgrade guidance and only when `capability_source` is
 `archcontext`.
 
 Architecture projection execution is user-level configuration in
 `~/.repo-harness/config.json#architecture`. `repo-harness install` and
 `repo-harness update` initialize it once with `projection_provider: "archctx"`,
-`projection_apply: "automatic"`, `projection_failure_gate: "advisory"`, and
-`projection_timeout_ms: 120000`. Repeated setup preserves an explicit global
-choice, including disabled. Malformed or partial settings fail closed without
+`projection_apply: "manual"`, and `projection_timeout_ms: 120000`. Repeated
+setup preserves an explicit global choice, including disabled. Setup migrates a
+section from the retired automatic queue once: `automatic` becomes `manual` and
+`projection_failure_gate` is removed. Until then, readers refuse that section
+and name the migration command. Malformed or partial settings fail closed without
 rewriting the file; unrelated user settings are preserved. The exact provider
 version is owned by the packaged release contract, not a configurable repo pin.
 
@@ -944,7 +1020,7 @@ inventing the project's model. Minimal adoption does not author a policy.
 Runtime does not read or merge retired repo execution settings. Capability
 identity, model files, documentation ownership and project freshness gates
 remain repository-local. Missing model/adoption evidence still blocks apply;
-global automatic mode does not authorize ownership adoption or semantic acceptance.
+the global apply mode does not authorize ownership adoption or semantic acceptance.
 
 Use `repo-harness architecture-projection policy --json` to inspect the global
 source path, initialization state and effective execution settings without a
@@ -956,76 +1032,26 @@ repository's `node_modules/archctx` never overrides that runtime dependency.
 Source-checkout execution uses that checkout's repo-harness dependencies, and
 candidate verification may explicitly select the candidate package root.
 Missing or mismatching runtime dependencies still fail closed with no target-repo
-fallback. Project model, ownership and snapshot checks remain repository-local.
+fallback. repo-harness captures the expected worktree snapshot. ArchContext
+checks it and owns the result contract. repo-harness decodes each result with
+the published `archctx-contracts` schema and invariants and keeps no local copy
+of the wire contract. The exact archctx version pin is the compatibility check.
 
-SessionStart also gives the Agent read-only model coverage guidance under this
-global provider setting; no per-repo execution toggle is needed. It observes empty
-capability models, missing declared module documents, and tracked package roots
-with no capability match or a shared ancestor capability. These are bounded
-inspection prompts, not inferred semantic nodes. The Agent uses the
-`repo-harness-architecture` skill to inspect source evidence and decide boundaries
-within the authorized task, then creates nodes through archctx ChangeSets and
-runs the existing projection. An intentional umbrella is valid. Hooks do not
-write model YAML, and unrelated coverage findings remain advice. The manifest
-inventory is limited to Git-tracked `package.json` paths; this is not a complete
-semantic coverage audit for every language or untracked source tree. Inspection
-errors become SessionStart provider diagnostics instead of invented model facts.
+No hook runs architecture projection or records architecture drift. The pull
+request is the update unit. When a change alters a capability's
+responsibilities, entrypoints, relations or flows, the Agent uses the
+`repo-harness-architecture` skill, writes the model change through an archctx
+ChangeSet, and runs `repo-harness architecture-projection apply --json` in the
+same branch. `check` and `plan` show the effect without writes. The projected
+`docs/architecture/` files are committed with the change.
 
-When enabled, Stop observes the Git changed set and coalesces eligible paths
-into one durable projection job, excludes
-ArchContext-owned `docs/architecture/**` and declared agent-context targets,
-and acknowledges the source records only after a typed projection receipt is
-durable. Process, timeout, stale-snapshot, invalid-result, and refresh failures
-remain pending for three attempts before an explicit dead-letter transition.
-Preflight failures are jobs too. Each pending journal slot has a stable source
-key while its delivery event id rotates on every coalesced edit; a dead letter
-blocks aggregate jobs containing that source key, so later edits cannot reset
-its attempt budget. Store transitions and queue/dead-letter read models share
-one repository lock. One repository has at most one claimed provider process.
-If the Stop owner disappears, its running claim remains quarantined for 150
-seconds—longer than the 120-second provider bound—before recovery can start a
-new attempt; an abandoned third attempt then transitions directly to dead-letter.
-Before a retry is claimed, the job refreshes delivery ids for its existing
-stable source keys, so edits incorporated before the new snapshot can be
-acknowledged while edits arriving during projection remain pending.
-`ArchitectureRefreshSignalV1` is the only major-change refresh authority; the
-consumer does not infer impact from path names, diff size, or queue-helper
-stdout. A typed refresh-required signal runs the canonical architecture,
-context-contract, and capability-context writers even when the legacy queue
-helper creates no drift card. SessionStart and
-`repo-harness architecture-projection drain --json` expose queue state.
-An unresolved-major signal is persisted as an exact acceptance candidate. A
-human approval is applied only through
-`repo-harness architecture-projection accept --signal-id <sha256> --approval-reference <event-id> --json`:
-the command copies reason codes and affected node ids from that signal, keeps
-the supplied approval event identity unchanged, and refuses if repository,
-workspace, HEAD, or worktree digest has moved. A successful accepted apply
-writes a content-bound acceptance receipt, projects an automatic-drain dead
-letter into its terminal job receipt, and is byte-idempotent on the same signal
-and approval reference. `status --json` reports unresolved or invalid
-acceptance evidence, and the strict architecture gate fails closed on either;
-the command never chooses or infers an architecture decision.
-
-For accepted apply, acceptance records an exact request intent before invoking
-ArchContext and the original result before running refresh actions. A retry
-with this pending evidence uses the provider's `projection-apply-readback-v1`
-capability. Readback returns the immutable committed receipt, original refresh
-signals, and a freshly verified current fixed point without changing provider
-delivery state. The same candidate, approval reference, request, and snapshot
-must still match. If the provider proves the exact request has no committed
-receipt, only an intent without a recorded result may retry apply; the provider
-checks the receipt again within its writer lock before writing. Errors and
-missing capabilities never authorize another apply.
-
-To recover an older interrupted accept that has no local intent, run
-`repo-harness architecture-projection accept --recover --signal-id <sha256> --approval-reference <original-event-id> --json`.
-This explicit command only resumes a committed apply. It fails if the provider
-has no receipt, and never creates an apply or poisons a fresh candidate with an
-unrecoverable intent. Adoption recovery is unsupported and fails closed; it is
-not converted into apply. Pending evidence remains content-bound local runtime
-state after completion; the final acceptance receipt is the resolution authority.
-The readback capability must be present in both the packaged CLI and its daemon;
-installing a new CLI alone does not upgrade a running daemon.
+`apply` accepts a major change in the same call. When ArchContext returns an
+unresolved-major signal, `apply` copies its reason codes and affected node ids
+into `acceptedChange` and applies again. The Agent that runs `apply` owns the
+decision; the pull request review is the human gate. If the provider response
+of a committed accepted apply is lost, `apply` reads the committed result back
+through `projection-apply-readback-v1` and does not apply twice. No local
+candidate, receipt or approval store exists.
 
 Managed install/update also verifies `daemon status --json` through the same
 exact package-local CLI and compatible Node runtime after static capabilities.
@@ -1050,60 +1076,35 @@ CodeGraph index. Request authorization to rebuild only when its authoritative
 status reports it missing or stale; verify readiness before retrying the blocked
 operation. CLI upgrade alone does not prove that an index needs rebuilding.
 Never delete the shared database or all repository indexes as recovery.
-If a candidate's exact reason set is only `verified-flow-proof-changed`, use
-`repo-harness architecture-projection reconcile --signal-id <sha256> --json`
-after refreshing the configured CodeGraph index. Reconciliation runs the same
-provider in check mode without `acceptedChange`, requires CodeGraph-ready
-input/output snapshots and an empty `noop`, and writes a separate content-bound
-receipt. Semantic reasons, unavailable proof, affected nodes, files, human
-actions, refresh signals, and apply receipts all fail closed; human approval is
-never treated as missing proof. Resolution is serialized per acceptance store,
-so acceptance and reconciliation cannot both execute for one candidate. When
-the candidate came from the automatic drain, a successful reconciliation also
-projects the exact dead letter into a terminal job receipt.
-Each successful canonical refresh action is checkpointed by action key before
-the next action runs, so a partial failure resumes without replaying completed
-writers. Missing or stale CLI authority remains a typed refresh failure; it is
-not silently skipped.
-
-Projection delivery failures use the independent
-`architecture.projection_failure_gate` (`advisory` by default); the existing
-`architecture.freshness_gate` retains its merge/drift meaning. A strict
-projection failure can be recovered without deleting runtime evidence via
-`repo-harness architecture-projection retry-dead-letter --job-id <job> --json`.
-An unreadable policy with no active projection queue remains an advisory
-configuration error; it cannot silently promote the default gate to strict.
 The runtime snapshot excludes `.ai/harness/**`, so concurrent harness receipts
 and traces cannot invalidate a provider snapshot.
 
-Managed host adapters give only `Stop.default` 150 seconds so the configured
-120-second provider bound has control-plane margin. Every other managed route
-remains at 30 seconds, and installer refresh replaces only repo-harness-owned
-entries while preserving sibling user hooks.
+Managed host adapters give only `Stop.default` 150 seconds for its bounded
+deferred work. Every other managed route remains at 30 seconds, and installer
+refresh replaces only repo-harness-owned entries while preserving sibling user
+hooks.
 
-Before rolling back to a runtime that only understands journal v1, disable the
-projection provider with the current runtime, run
-`repo-harness architecture-projection drain --json`, and verify the pending
-journal count reported as `sourceJournalPending` is zero. The manual drain owns
-the same selective source acknowledgement as Stop. Downgrading with v2
-observations still pending is not a supported rollback state.
+### `source.include` anchors
 
-### `source.include` grammar
+ArchContext validation owns the `source.include` and `source.exclude` grammar.
+repo-harness does not check include shapes and does not interpret globs for
+ownership. Each include gives one literal anchor: the leading path segments
+before the first segment with a glob character. Anchors are for display and
+directory discovery only.
 
-Upstream matches an include glob against the whole repo-relative path, so a
-wildcard-free literal addresses one file, not a directory subtree. To keep the
-two authorities from disagreeing about what a boundary covers, only two shapes
-are accepted:
-
-| Include | Capability prefix |
+| Include | Anchor |
 |---|---|
 | `src/core/adoption/**` | `src/core/adoption` |
-| `AGENTS.md` (wildcard-free, not an existing directory) | `AGENTS.md` |
+| `AGENTS.md` | `AGENTS.md` |
+| `src/core/state/coordination-*.ts` | `src/core/state` |
+| `**/*.md` | none |
 
-Everything else fails closed. A wildcard-free literal that names an existing
-directory is rejected as ambiguous with guidance to write `<dir>/**`.
-`source.exclude` is not supported, because capability prefixes have no exclusion
-form. Include order is preserved as prefix order.
+A capability needs at least one include with an anchor. Two capabilities can
+share an anchor. Include order is preserved as anchor order, without
+duplicates. `capability-resolver match` reports the owner's first anchor as
+`matched_prefix`, because ArchContext does not report which include matched. An
+existing directory is resolved as `<dir>/`, which asks ArchContext who owns its
+contents.
 
 ### Required node fields
 
@@ -1116,7 +1117,7 @@ form. Include order is preserved as prefix order.
 | `id` | derived | `<domain>-<name>` |
 | `architecture_module` | derived | `docs/architecture/modules/<domain>/<name>.md` |
 | `workstream_dir` | derived | `tasks/workstreams/<domain>/<name>` |
-| `prefixes` | `source.include` | include grammar above |
+| `prefixes` | `source.include` | include anchors above; never used for ownership |
 | `contract_files` | `extensions.contractFiles.agents` / `.claude` | declared, never derived: root-facing capabilities deliberately do not follow their prefix |
 | `lsp_profile` | `extensions.lspProfile` | required |
 | `verification_hints` | `extensions.verification` | required array; explicit `[]` is allowed |
@@ -1145,8 +1146,8 @@ Node-shape failures surface as `ARCHCONTEXT_*` registry diagnostics and make
 `capability-resolver validate` exit `1` with no stdout; missing/empty node/v2
 `name`, `summary`, or `responsibilities` is a structural error and never yields a
 partial registry. Derived registries then go through the same
-validation as the JSON registry, so duplicate ids, duplicate prefixes, and
-invalid paths keep their existing diagnostic codes.
+validation as the JSON registry, so duplicate ids and invalid paths keep their
+existing diagnostic codes. Shared anchors are not duplicates.
 
 ### Node/v2 export round-trip
 
@@ -1203,36 +1204,26 @@ repo-harness run sync-brain-docs --all
 repo-harness run sync-brain-docs --check
 ```
 
+## Refactor recommendations
 
-## Proactive refactor recommendations
+repo-harness supplies refactor evidence on demand. No hook scans for it and no
+setting enables it. The Bot reads the evidence and decides whether to schedule
+work or ask the user. Incomplete code facts return `proof_required` with a
+`codegraph init` hint. The command never creates an index, a model, a plan or a
+code edit.
 
-`~/.repo-harness/config.json#refactor_recommendations` contains `{ "enabled": true }`
-by default. Global install/update initializes the setting once and preserves an
-explicit disabled choice. Repositories do not need another enable switch.
+Read evidence and record a decision with:
 
-At normal Stop, repo-harness observes ArchContext structural candidates when a
-project model is present. It uses the packaged exact provider contract and
-existing lifecycle readback; it does not require or change execution activation.
-Only complete, non-truncated code facts with unambiguous ownership produce a
-recommendation. The observer never creates an index or model on the user's behalf.
+```bash
+repo-harness refactor recommendations [--json]
+repo-harness refactor decide <recommendation-id> accept|defer|reject --reason "<text>"
+```
 
-The Agent receives at most three candidates and is instructed to explain the
-measured evidence, inferred benefit and risk, then ask the user whether to
-proceed, defer or decline. No author, recommendation record/acceptance,
-Work Package, program or code edit is triggered by observation. User approval
-uses the normal approved-plan workflow and its existing execution gates.
-
-Observation gets at most ten seconds within Stop's existing twenty-second
-shared work budget, with a five-minute scan cooldown. A delivery ledger retains up to 4096
-recommendation identity/fingerprint pairs without eviction. At capacity, automatic
-delivery pauses with an explicit diagnostic; existing identities remain suppressed.
-The explicit CLI still permits observation without consuming delivery history. The one-shot
-Stop continuation ends after presenting the choice; waiting for an answer does
-not hold Stop in a loop. State and the last observation are stored in the ignored
-`.ai/harness/runs/refactor-recommendations.json`; they are delivery evidence,
-not user approval or upstream recommendation status.
-
-`repo-harness refactor recommendations --repo <root> --json` explicitly reads
-current opportunities through the same observer, without consuming Stop's
-delivery history or requiring `refactor discover`'s author activation. It returns
-readiness/error status when evidence is unavailable; it never invents a candidate.
+`recommendations` shows each open suggestion with its explanation, the metrics
+of its observation and the statistics of every affected module (files, lines,
+fan-in, fan-out, cycles, instability, direction violations, test files,
+unresolved imports). `decide` records the scan in ArchContext when needed and
+then stores the decision. Suggestions with a recorded decision are not shown
+again. repo-harness keeps no local delivery state; ArchContext owns the
+recommendation lifecycle. Execution of an accepted suggestion uses the normal
+plan and pull request workflow.

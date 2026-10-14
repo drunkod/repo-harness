@@ -4,7 +4,7 @@
 > **协议**:`repo-harness-lease-owner` v1、`repo-harness-board` v1
 > **权威**:`src/core/state/coordination-identity.ts`、`src/effects/state/coordination-lease-store.ts`、`src/core/state/project-board.ts`
 > **CLI**:`repo-harness sprint <identify|claim|bind|begin-completion|abort-completion|release|steal|reconcile>`、`repo-harness state board --json`
-> **设计来源**:`docs/researches/20260819-GPT-kanban.md` §3-§12
+> **设计来源**:[20260819-GPT-kanban.md](https://github.com/Ancienttwo/repo-harness/blob/archive/docs-researches-20261004/docs/researches/20260819-GPT-kanban.md) §3-§12
 
 本文是人工撰写的跨模块契约文档,不是 ArchContext capability 投影,所以它住在
 `docs/architecture/` 根目录、与 `effective-state-authority.md`、
@@ -12,10 +12,32 @@
 `docs/architecture/modules/` 下。后者是 capability 派生的封闭集合:路径由
 capability 的 domain 与 name 算出(`scripts/capability-config.ts`),不属于任何
 capability 的 `.md` 会被 `scripts/capability-resolver.ts` 判为 orphan,数量与
-生成形状还被 `tests/architecture-projection-e2e.test.ts` 钉死。共享协调面横跨
-`src/core/state/`、`src/effects/state/`、`src/effects/git/`、`src/cli/commands/`
-四个顶层区域,不是单一 longest-prefix 边界,因此也不该为它 mint 一个 capability
-node。
+生成形状还被 `tests/architecture-projection-e2e.test.ts` 钉死。
+
+### 架构模型归属(2026-10-11 决定,取代旧记录)
+
+旧记录:共享协调面横跨 `src/core/state/`、`src/effects/state/`、`src/effects/git/`、
+`src/cli/commands/` 四个顶层区域,不是单一 longest-prefix 边界,因此不为它 mint
+capability node。
+
+新决定:共享协调面是 `capability.workflow-engine.workflow-state` 的组件
+`component.workflow-state.coordination-plane`。它不是独立 capability。协议文本仍以
+本文为准,模块页是 [`modules/workflow-engine/workflow-state.md`](modules/workflow-engine/workflow-state.md)。
+
+理由:
+
+- 旧理由的前提已不成立。capability 节点可以声明多条 include(例如
+  `capability.runtime-harness.collaboration` 有三条),组件 footprint 还可以用文件名
+  通配符(`src/effects/state/coordination-*.ts`)。跨目录不再妨碍建模。
+- 协调面依赖 Effective State 的工件读取与只读解析:`collect-board-inputs.ts` 调用
+  `resolveEffectiveStateReadOnly`,多个协调文件复用 `collect-state-inputs.ts`。两者也共用
+  一个纯核心门禁(`scripts/check-state-boundaries.ts:36-40`)。独立成 capability 会把这些
+  内部调用变成跨 capability 依赖。
+- 用户在 2026-10-11 的架构建模工作中确认了这个方向。
+
+边界:`src/effects/git/worktree-topology.ts` 与 `src/effects/git/common-directory.ts` 归
+`capability.workflow-engine.execution-primitives`,不归本组件。本组件通过关系调用它们。
+`src/cli/hook/board-slice-context.ts` 与 `src/cli/hook/mutation-guard.ts` 仍归 hook-adapters。
 
 > **事实优先级**:源码 > 本文。冲突时以源码为准,并提一次 architecture drift request。
 
@@ -96,6 +118,9 @@ completing --abort-completion--> bound
   无 publication 的 lease 永久锁在 `completing`。
 - `released` 先durably 写盘再删目录,所以 release 中途崩溃留下的是一个具名可
   reconcile 的状态,而不是一个歧义状态。
+- 删目录是一次 rename:lease 目录整个移到 `coordination/v1/retired-leases/`,再清理。
+  live 路径只有两种状态:带 owner record 的目录,或者不存在。崩溃或残留的临时
+  owner 文件都不会在 `leases/` 下留下无 owner record 的 `unknown` 目录。
 
 fencing 是 `claim_id` + `generation`。`claim_id` 说现在谁拥有;`generation` 说
 之前有过几个拥有者 —— 这是抢占链需要的,也是陈旧读者无法靠重新 mint 一个 uuid
@@ -213,7 +238,7 @@ receipt 是无害的:它只会清掉一次停滞计数。
 | slice 渲染与两个 host 挂载 | `src/cli/hook/board-slice-context.ts` |
 | PreEdit lease gate | `src/cli/hook/mutation-guard.ts`(`LeaseOwnershipGuard`) |
 | CLI 动词 | `src/cli/commands/state.ts`(`state board --json`) |
-| 设计来源 | `docs/researches/20260819-GPT-kanban.md` §3-§13 |
+| 设计来源 | [20260819-GPT-kanban.md](https://github.com/Ancienttwo/repo-harness/blob/archive/docs-researches-20261004/docs/researches/20260819-GPT-kanban.md) §3-§13 |
 
 ## 9. Hook 层:board slice 与 PreEdit lease gate(WP3)
 

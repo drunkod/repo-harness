@@ -1,9 +1,10 @@
+import { syncCrossReviewSkills } from '../src/cli/commands/init';
 import { describe, expect, test } from 'bun:test';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
-import { spawnSync } from 'child_process';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { spawnSync, type SpawnSyncReturns } from 'child_process';
 import { createHash } from 'crypto';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { basename, dirname, join } from 'path';
 import {
   applyInstallProfile,
   assertInstallProfile,
@@ -11,7 +12,10 @@ import {
   commitInstallHostTransaction,
   INSTALL_PROFILES,
   installProfileHostMutationPaths,
+  installProfileTransactionPaths,
+  effectiveSkillRoots,
   installedProfileStatus,
+  hashManagedTree,
   planInstallProfile,
   PROFILE_COMPONENTS,
   profileEnablesCodegraph,
@@ -20,11 +24,14 @@ import {
   readLegacyInstalledProfileForMigration,
   readInstalledProfile,
   recordVerifiedAgentFleetOwnership,
+  recordRefreshedInstallOwnership,
   rollbackInstallHostTransaction,
   rollbackInstallProfile,
 } from '../src/cli/installer/install-profile';
 import { buildManagedHooks } from '../src/cli/installer/managed-entries';
+import { runUserUninstall } from '../src/cli/installer/uninstall';
 import { parseSkillSurfaceCatalog, probeExpectations } from '../src/core/skill-surface/catalog';
+import { copyUpgradeFixture } from './helpers/upgrade-fixtures';
 
 const ROOT = join(import.meta.dir, '..');
 const CLI = join(ROOT, 'src/cli/index.ts');
@@ -67,6 +74,40 @@ function writeMarkedFacade(dest: string, skillMdContent: string): void {
     surface: 'command-facade',
     content_hash: `sha256:${hash.digest('hex')}`,
   }));
+}
+
+// The skill sync writer resolves its catalog adapter from the source root.
+function seedSyncRuntime(source: string): void {
+  mkdirSync(join(source, 'scripts'), { recursive: true });
+  cpSync(join(ROOT, 'scripts', 'skill-surface-select.ts'), join(source, 'scripts', 'skill-surface-select.ts'));
+  cpSync(join(ROOT, 'src'), join(source, 'src'), { recursive: true });
+  mkdirSync(join(source, 'assets', 'skill-commands'), { recursive: true });
+  cpSync(join(ROOT, 'assets', 'skill-commands', 'manifest.json'), join(source, 'assets', 'skill-commands', 'manifest.json'));
+}
+
+function runSkillSync(env: NodeJS.ProcessEnv, extra: Record<string, string>): SpawnSyncReturns<string> {
+  return spawnSync('bash', [join(ROOT, 'scripts', 'sync-codex-installed-copies.sh')], {
+    cwd: ROOT, encoding: 'utf-8', env: { ...env, ...extra },
+  });
+}
+
+// The shell reports each skill root it syncs. This is the drift check for effectiveSkillRoots.
+function syncedSkillRoots(stdout: string): string[] {
+  return [...stdout.matchAll(/^\[sync-installed\] command facades \(\w+\): \d+ into (.+)$/gm)].map((match) => match[1]!);
+}
+
+function treeSnapshot(root: string): Record<string, string> {
+  const entries: Record<string, string> = {};
+  const visit = (path: string, relative: string): void => {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) entries[relative] = `link:${readlinkSync(path)}`;
+    else if (stat.isDirectory()) {
+      entries[relative] = 'dir';
+      for (const name of readdirSync(path).sort()) visit(join(path, name), relative ? `${relative}/${name}` : name);
+    } else entries[relative] = `file:${readFileSync(path, 'utf-8')}`;
+  };
+  if (existsSync(root)) visit(root, '');
+  return entries;
 }
 
 function writeManagedHostSurfaces(
@@ -112,6 +153,80 @@ function writeManagedHostSurfaces(
 }
 
 describe('install profiles', () => {
+  test('one managed tree hash matches the actual copy projection with embedded Git metadata', () => withHome((env) => {
+    const source = join(env.HOME!, 'release-skill');
+    const copied = join(env.HOME!, 'copied-skill');
+    copyUpgradeFixture('upgrade-v0.19.5-home', '.codex/skills/repo-harness-cross-review', source);
+    expect(spawnSync('git', ['init', '-q', source], { env }).status).toBe(0);
+    const result = spawnSync('bash', [join(ROOT, 'scripts/sync-codex-installed-copies.sh'),
+      '--stage-owned-copy', source, copied, 'canonical-skill'], {
+      env: { ...env, AGENTIC_DEV_SOURCE_ROOT: ROOT, BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0' }, encoding: 'utf8',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(join(source, '.git'))).toBe(true);
+    expect(existsSync(join(copied, '.git'))).toBe(false);
+    const marker = JSON.parse(readFileSync(join(copied, '.repo-harness-owner.json'), 'utf8'));
+    const excludes: string[] = JSON.parse(readFileSync(join(ROOT, 'assets/workflow-contract.v1.json'), 'utf8')).installedCopyExcludes;
+    expect(hashManagedTree(source, { excludes })).toBe(marker.content_hash);
+    expect(hashManagedTree(copied)).toBe(marker.content_hash);
+    expect(hashManagedTree(source)).not.toBe(marker.content_hash);
+  }));
+
+  test('stage-owned-copy refuses an existing destination without changing it', () => {
+    const home = mkdtempSync('/tmp/repo-harness-stage-existing-');
+    try {
+      const source = join(home, 'source');
+      const dest = join(home, 'destination');
+      writePath(join(source, 'SKILL.md'), 'source bytes\n');
+      writePath(join(dest, 'SKILL.md'), 'user bytes\n');
+      const result = spawnSync('bash', [join(ROOT, 'scripts/sync-codex-installed-copies.sh'),
+        '--stage-owned-copy', source, dest, 'canonical-skill'], {
+        env: { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), AGENTIC_DEV_SOURCE_ROOT: ROOT }, encoding: 'utf8',
+      });
+      expect(result.status, result.stderr).toBe(2);
+      expect(readFileSync(join(dest, 'SKILL.md'), 'utf8')).toBe('user bytes\n');
+      expect(existsSync(join(dest, '.repo-harness-owner.json'))).toBe(false);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  test('stage-owned-copy refuses a dangling symlink destination without changing it', () => {
+    const home = mkdtempSync('/tmp/repo-harness-stage-symlink-');
+    try {
+      const source = join(home, 'source');
+      const dest = join(home, 'destination');
+      const target = join(home, 'missing-target');
+      writePath(join(source, 'SKILL.md'), 'source bytes\n');
+      symlinkSync(target, dest);
+      const result = spawnSync('bash', [join(ROOT, 'scripts/sync-codex-installed-copies.sh'),
+        '--stage-owned-copy', source, dest, 'canonical-skill'], {
+        env: { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), AGENTIC_DEV_SOURCE_ROOT: ROOT }, encoding: 'utf8',
+      });
+      expect(result.status, result.stderr).toBe(2);
+      expect(readlinkSync(dest)).toBe(target);
+      expect(existsSync(target)).toBe(false);
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  test('refresh retains a markerless owned directory receipt with no selected components', () => withHome((env) => {
+    const path = join(env.HOME!, '.codex/skills/repo-harness-cross-review');
+    copyUpgradeFixture('upgrade-v0.19.5-home', '.codex/skills/repo-harness-cross-review', path);
+    const previousHash = hashManagedTree(path);
+    writePath(join(env.HOME!, '.repo-harness/install-state.json'), JSON.stringify({
+      protocol: 2, profile: 'full', components: PROFILE_COMPONENTS.full,
+      transaction_id: 'owned-before-refresh', applied_at: '2026-09-30T00:00:00Z', previous: null,
+      ownership_manifest: [{ components: [], authority: 'repo-harness-install-transaction', removal: 'managed-surfaces-only',
+        path, type: 'directory-copy', content_hash: previousHash, managed_marker: 'transaction-created-directory', symlink_target: null }],
+    }));
+    rmSync(path, { recursive: true });
+    cpSync(join(ROOT, 'assets/skills/repo-harness-cross-review'), path, { recursive: true });
+    expect(existsSync(join(path, '.repo-harness-owner.json'))).toBe(false);
+    expect(() => recordRefreshedInstallOwnership([path], env)).not.toThrow();
+    const refreshed = readInstalledProfile(env)!.ownership_manifest.find((surface) => surface.path === path)!;
+    expect(refreshed.components).toEqual([]);
+    expect(refreshed.content_hash).toBe(hashManagedTree(path));
+    expect(refreshed.content_hash).not.toBe(previousHash);
+    expect(refreshed.managed_marker).toBe('transaction-created-directory');
+  }));
   test('steady-state vocabulary is minimal/full with protocol 2 and exact 8/12 hook projections', () => withHome((env) => {
     expect(INSTALL_PROFILES).toEqual(['minimal', 'full']);
     expect(Object.keys(PROFILE_COMPONENTS)).toEqual(['minimal', 'full']);
@@ -424,11 +539,11 @@ describe('install profiles', () => {
     const { source } = writeManagedHostSurfaces(env, 'minimal');
     const codexSkills = join(env.HOME!, '.codex', 'skills');
 
-    // Canonical control: repo-harness-plan is still shipped by the package
+    // Canonical control: repo-harness-check is still shipped by the package
     // (source gets it here, at its post-cutover assets/skills/ location), so
-    // it keeps the existing adaptive-workflow bucket.
-    writePath(join(source, 'assets', 'skills', 'repo-harness-plan', 'SKILL.md'), '# managed\n');
-    writeMarkedFacade(join(codexSkills, 'repo-harness-plan'), '# managed\n');
+    // it keeps the existing scope-worktree-check-guards bucket.
+    writePath(join(source, 'assets', 'skill-commands', 'repo-harness-check', 'SKILL.md'), '# managed\n');
+    writeMarkedFacade(join(codexSkills, 'repo-harness-check'), '# managed\n');
 
     // Retired: physically present on host (e.g. left over from a broader
     // sync), but the package no longer ships its source directory at all.
@@ -436,13 +551,173 @@ describe('install profiles', () => {
     writeMarkedFacade(retiredDest, '---\nname: repo-harness-retired-demo\n---\n');
 
     const applied = applyInstallProfile('minimal', env, new Date('2026-01-01T00:00:00Z'));
-    const planSurface = applied.state.ownership_manifest.find(({ path }) => path === join(codexSkills, 'repo-harness-plan'));
+    const planSurface = applied.state.ownership_manifest.find(({ path }) => path === join(codexSkills, 'repo-harness-check'));
     const retiredSurface = applied.state.ownership_manifest.find(({ path }) => path === retiredDest);
-    expect(planSurface?.components).toEqual(['adaptive-workflow']);
+    expect(planSurface?.components).toEqual(['scope-worktree-check-guards']);
     expect(retiredSurface).toBeDefined();
     expect(retiredSurface?.components).toEqual([]);
     expect(installedProfileStatus(applied.state, env).drift.status).toBe('consistent');
+    expect(readInstalledProfile(env)?.ownership_manifest).toEqual(applied.state.ownership_manifest);
   }));
+
+  test('state keeps a formerly managed facade receipt readable after its catalog retirement', () => withHome((env) => {
+    writeManagedHostSurfaces(env, 'minimal');
+    const retired = join(env.HOME!, '.claude', 'skills', 'repo-harness-handoff');
+    const oldSource = join(env.HOME!, 'old-package', 'assets', 'skill-commands', 'repo-harness-handoff');
+    writePath(join(oldSource, 'SKILL.md'), '# old\n');
+    mkdirSync(join(retired, '..'), { recursive: true });
+    symlinkSync(oldSource, retired);
+    const receipt = {
+      components: [],
+      authority: 'repo-harness-install-transaction',
+      removal: 'managed-surfaces-only',
+      path: retired,
+      type: 'symlink',
+      content_hash: null,
+      managed_marker: null,
+      symlink_target: oldSource,
+    } as const;
+    const statePath = join(env.HOME!, '.repo-harness', 'install-state.json');
+    const state = {
+      protocol: 2,
+      profile: 'minimal',
+      components: PROFILE_COMPONENTS.minimal,
+      transaction_id: 'older-package',
+      applied_at: '2026-01-01T00:00:00.000Z',
+      ownership_manifest: [receipt],
+      previous: null,
+    };
+    writePath(statePath, `${JSON.stringify(state)}\n`);
+    expect(readInstalledProfile(env)?.ownership_manifest).toEqual([receipt]);
+
+    const applied = applyInstallProfile('minimal', env, new Date('2026-01-02T00:00:00Z'));
+    expect(applied.state.ownership_manifest).toContainEqual(receipt);
+    expect(readInstalledProfile(env)?.ownership_manifest).toEqual(applied.state.ownership_manifest);
+
+    for (const path of [join(env.HOME!, 'elsewhere', 'repo-harness-handoff'), join(env.HOME!, '.claude', 'skills', 'foreign-skill')]) {
+      writePath(statePath, `${JSON.stringify({ ...state, ownership_manifest: [{ ...receipt, path }] })}\n`);
+      expect(() => readInstalledProfile(env)).toThrow('invalid ownership surface');
+    }
+  }));
+
+  for (const profile of ['minimal', 'full'] as const) {
+    for (const mode of ['0', '1'] as const) {
+      test(`${profile} sync projects windows-python-first to both hosts in ${mode === '0' ? 'copy' : 'link'} mode`, () => withHome((env) => {
+        const { source } = writeManagedHostSurfaces(env, profile);
+        seedSyncRuntime(source);
+        const skillSource = join(source, 'assets', 'skills', 'windows-python-first');
+        cpSync(join(ROOT, 'assets', 'skills', 'windows-python-first'), skillSource, { recursive: true });
+        const sync = runSkillSync(env, {
+          AGENTIC_DEV_SOURCE_ROOT: source,
+          AGENTIC_DEV_LINK_INSTALLED_COPIES: mode,
+          REPO_HARNESS_INSTALL_PROFILE: profile,
+        });
+        expect(sync.status, sync.stderr).toBe(0);
+        for (const host of ['.codex', '.claude']) {
+          const destination = join(env.HOME!, host, 'skills', 'windows-python-first');
+          for (const file of ['SKILL.md', 'agents/openai.yaml']) {
+            expect(readFileSync(join(destination, file))).toEqual(readFileSync(join(skillSource, file)));
+          }
+          expect(lstatSync(destination).isSymbolicLink()).toBe(mode === '1');
+          if (mode === '1') {
+            expect(readlinkSync(destination)).toBe(skillSource);
+          } else {
+            expect(JSON.parse(readFileSync(join(destination, '.repo-harness-owner.json'), 'utf-8'))).toMatchObject({
+              owner: 'repo-harness', surface: 'command-facade',
+            });
+          }
+        }
+      }));
+    }
+  }
+
+  test('copy-mode sync gives a non-prefixed profile facade an ownership receipt that uninstall honors', () => withHome((env) => {
+    const { source } = writeManagedHostSurfaces(env, 'minimal');
+    seedSyncRuntime(source);
+    cpSync(join(ROOT, 'assets', 'skills', 'obsidian-memory'), join(source, 'assets', 'skills', 'obsidian-memory'), { recursive: true });
+    const sync = runSkillSync(env, { AGENTIC_DEV_SOURCE_ROOT: source, AGENTIC_DEV_LINK_INSTALLED_COPIES: '0', REPO_HARNESS_INSTALL_PROFILE: 'minimal' });
+    expect(sync.status, sync.stderr).toBe(0);
+    const copies = ['.codex', '.claude'].map((host) => join(env.HOME!, host, 'skills', 'obsidian-memory'));
+    for (const copy of copies) expect(existsSync(join(copy, '.repo-harness-owner.json'))).toBe(true);
+
+    const applied = applyInstallProfile('minimal', env, new Date('2026-01-01T00:00:00Z'));
+    for (const copy of copies) {
+      expect(applied.state.ownership_manifest.find(({ path }) => path === copy)).toMatchObject({
+        components: ['adaptive-workflow'],
+        type: 'directory-copy',
+        managed_marker: '.repo-harness-owner.json:owner=repo-harness;surface=command-facade',
+      });
+    }
+    expect(readInstalledProfile(env)?.ownership_manifest).toEqual(applied.state.ownership_manifest);
+
+    const [unchanged, edited] = copies;
+    writeFileSync(join(edited!, 'SKILL.md'), '# user edit\n');
+    const uninstall = runUserUninstall({ target: 'both', env });
+    expect(uninstall.status).toBe('partial');
+    expect(existsSync(unchanged!)).toBe(false);
+    expect(readFileSync(join(edited!, 'SKILL.md'), 'utf-8')).toBe('# user edit\n');
+    expect(readInstalledProfile(env)?.ownership_manifest.some(({ path }) => path === edited)).toBe(true);
+  }));
+
+  for (const linkedRoot of [false, true]) {
+    test(`host transaction rollback restores a retired facade that skill sync removed${linkedRoot ? ' through a symlinked skill root' : ''}`, () => withHome((env) => {
+      const source = join(env.HOME!, 'package-source');
+      seedSyncRuntime(source);
+      writePath(join(source, 'SKILL.md'), '# managed\n');
+      const roots = ['.codex', '.claude'].map((host) => join(env.HOME!, host, 'skills'));
+      // A dotfiles setup can link a host skill root. The sync writer follows that link.
+      const realRoots = linkedRoot ? roots.map((root) => join(env.HOME!, 'dotfiles', basename(dirname(root)))) : roots;
+      for (const [index, root] of roots.entries()) {
+        mkdirSync(realRoots[index]!, { recursive: true });
+        if (linkedRoot) {
+          mkdirSync(dirname(root), { recursive: true });
+          symlinkSync(realRoots[index]!, root);
+        }
+        writeMarkedFacade(join(root, 'repo-harness-retired-demo'), '# retired\n');
+      }
+      const before = realRoots.map(treeSnapshot);
+
+      const transaction = beginInstallHostTransaction(installProfileTransactionPaths(env), env);
+      const sync = runSkillSync(env, { AGENTIC_DEV_SOURCE_ROOT: source, AGENTIC_DEV_LINK_INSTALLED_COPIES: '1', REPO_HARNESS_INSTALL_PROFILE: 'minimal' });
+      expect(sync.status, sync.stderr).toBe(0);
+      expect(syncedSkillRoots(sync.stdout)).toEqual([...effectiveSkillRoots(env)]);
+      for (const root of roots) expect(existsSync(join(root, 'repo-harness-retired-demo'))).toBe(false);
+      rollbackInstallHostTransaction(transaction);
+
+      expect(realRoots.map(treeSnapshot)).toEqual(before);
+    }));
+  }
+
+  for (const claudeOverride of [true, false]) {
+    test(`host transaction rollback restores effective custom skill roots${claudeOverride ? '' : ' when only CODEX_SKILLS_ROOT is set'}`, () => withHome((env) => {
+      const source = join(env.HOME!, 'package-source');
+      seedSyncRuntime(source);
+      writePath(join(source, 'SKILL.md'), '# managed\n');
+      writePath(join(source, 'assets', 'skill-commands', 'repo-harness-check', 'SKILL.md'), '# check\n');
+      const codexRoot = join(env.HOME!, 'custom', 'codex-skills');
+      const claudeRoot = claudeOverride ? join(env.HOME!, 'custom', 'claude-skills') : join(env.HOME!, '.claude', 'skills');
+      const { CLAUDE_SKILLS_ROOT: _claude, ...base } = env;
+      const custom = { ...base, CODEX_SKILLS_ROOT: codexRoot, ...(claudeOverride ? { CLAUDE_SKILLS_ROOT: claudeRoot } : {}) };
+      writeMarkedFacade(join(claudeOverride ? claudeRoot : codexRoot, 'repo-harness-retired-demo'), '# retired\n');
+      writePath(join(codexRoot, 'user-skill', 'SKILL.md'), '# user\n');
+      if (!claudeOverride) writeMarkedFacade(join(claudeRoot, 'repo-harness-retired-demo'), '# not synced\n');
+      const before = [codexRoot, claudeRoot].map(treeSnapshot);
+
+      const transaction = beginInstallHostTransaction(installProfileTransactionPaths(custom), custom);
+      const sync = runSkillSync(custom, { AGENTIC_DEV_SOURCE_ROOT: source, AGENTIC_DEV_LINK_INSTALLED_COPIES: '1', REPO_HARNESS_INSTALL_PROFILE: 'minimal' });
+      expect(sync.status, sync.stderr).toBe(0);
+      expect(syncedSkillRoots(sync.stdout)).toEqual([...effectiveSkillRoots(custom)]);
+      expect(readlinkSync(join(codexRoot, 'repo-harness'))).toBe(source);
+      if (claudeOverride) {
+        expect(readlinkSync(join(claudeRoot, 'repo-harness-check'))).toBe(join(source, 'assets', 'skill-commands', 'repo-harness-check'));
+      } else {
+        expect(existsSync(join(claudeRoot, 'repo-harness-check'))).toBe(false);
+      }
+      rollbackInstallHostTransaction(transaction);
+
+      expect([codexRoot, claudeRoot].map(treeSnapshot)).toEqual(before);
+    }));
+  }
 
   test('status detects actual managed host surface drift', () => withHome((env) => {
     const { canonical } = writeManagedHostSurfaces(env);
@@ -548,7 +823,7 @@ describe('install profiles', () => {
   test('mutation-path rollback coverage includes all four profile-gated facades on both hosts', () => withHome((env) => {
     const paths = installProfileHostMutationPaths(env);
     for (const host of ['.codex', '.claude']) {
-      for (const facade of ['repo-harness-plan', 'repo-harness-check', 'repo-harness-product', 'repo-harness-ship']) {
+      for (const facade of ['repo-harness-check', 'repo-harness-product', 'repo-harness-ship']) {
         expect(paths).toContain(join(env.HOME!, host, 'skills', facade));
       }
       expect(paths).toContain(join(env.HOME!, host, 'skills', 'reverse-skill-router'));
@@ -634,7 +909,7 @@ describe('install profiles', () => {
     writeFileSync(adapter, '{"partially":"mutated"}\n');
     writeFileSync(statePath, '{"next":"state"}\n');
     writeFileSync(lockPath, '{"next":"lock"}\n');
-    const created = join(env.HOME!, '.codex', 'skills', 'repo-harness-plan');
+    const created = join(env.HOME!, '.codex', 'skills', 'repo-harness-check');
     mkdirSync(created, { recursive: true });
     writeFileSync(join(created, 'SKILL.md'), '# partial\n');
     rollbackInstallHostTransaction(transaction);
@@ -947,4 +1222,187 @@ describe('install profiles', () => {
     expect(state.status).toBe(0);
     expect(JSON.parse(state.stdout).profile).toBe('minimal');
   }), 30_000);
+});
+
+describe('skill projection ownership', () => {
+  function packageAt(home: string, source: string): string {
+    const packageRoot = join(home, '.bun/install/global/node_modules/repo-harness');
+    cpSync(source, packageRoot, { recursive: true });
+    writePath(join(packageRoot, 'package.json'), JSON.stringify({ name: 'repo-harness', version: '0.20.0' }));
+    mkdirSync(join(packageRoot, 'assets/skill-commands'), { recursive: true });
+    cpSync(join(ROOT, 'assets/skill-commands/manifest.json'), join(packageRoot, 'assets/skill-commands/manifest.json'));
+    cpSync(join(ROOT, 'assets/skills/repo-harness-cross-review'), join(packageRoot, 'assets/skills/repo-harness-cross-review'), { recursive: true });
+    return packageRoot;
+  }
+
+  for (const mode of ['global', 'global-alias', 'checkout', 'npx', 'explicit-copy'] as const) {
+    test(`${mode} provider projection records the on-disk type`, () => withHome(env => {
+      const { canonical, source } = writeManagedHostSurfaces(env, 'full');
+      const packageRoot = packageAt(env.HOME!, source);
+      let selectedSource = packageRoot;
+      if (mode === 'checkout' || mode === 'npx') {
+        selectedSource = join(env.HOME!, mode === 'npx' ? '_npx/cache/node_modules/repo-harness' : 'checkout');
+        cpSync(packageRoot, selectedSource, { recursive: true });
+      }
+      if (mode === 'global-alias') {
+        selectedSource = join(env.HOME!, 'source-alias');
+        symlinkSync(packageRoot, selectedSource);
+      }
+      const linked = mode === 'global' || mode === 'global-alias';
+      const activeEnv = { ...env, AGENTIC_DEV_LINK_INSTALLED_COPIES: mode === 'explicit-copy' ? '0' : '1' };
+      rmSync(canonical); symlinkSync(packageRoot, canonical);
+      const paths = ['.claude', '.codex'].map(host => join(env.HOME!, host, 'skills/repo-harness-cross-review'));
+      for (const dest of paths) rmSync(dest, { recursive: true, force: true });
+      const transaction = beginInstallHostTransaction(paths, activeEnv);
+      try {
+        expect(syncCrossReviewSkills(selectedSource, 'both', activeEnv).every(step => step.status === 'ok')).toBe(true);
+        const state = applyInstallProfile('full', activeEnv, new Date(), transaction).state;
+        for (const dest of paths) {
+          const record = state.ownership_manifest.find(surface => surface.path === dest);
+          expect(record?.type).toBe(linked ? 'symlink' : 'directory-copy');
+          expect(lstatSync(dest).isSymbolicLink()).toBe(linked);
+          if (linked) expect(readlinkSync(dest)).toBe(join(packageRoot, 'assets/skills/repo-harness-cross-review'));
+          expect(readFileSync(join(dest, 'SKILL.md'), 'utf8')).toBe(readFileSync(join(packageRoot, 'assets/skills/repo-harness-cross-review/SKILL.md'), 'utf8'));
+        }
+        expect(installedProfileStatus(state, activeEnv).drift.surface_drift).toEqual([]);
+        expect(readInstalledProfile(activeEnv)?.ownership_manifest).toEqual(state.ownership_manifest);
+      } finally { commitInstallHostTransaction(transaction); }
+    }));
+  }
+
+  test('global projection is idempotent and keeps current link ownership', () => withHome(env => {
+    const { canonical, source } = writeManagedHostSurfaces(env, 'full');
+    const packageRoot = packageAt(env.HOME!, source);
+    rmSync(canonical); symlinkSync(packageRoot, canonical);
+    const paths = ['.claude', '.codex'].map(host => join(env.HOME!, host, 'skills/repo-harness-cross-review'));
+    for (const dest of paths) rmSync(dest, { recursive: true, force: true });
+    expect(syncCrossReviewSkills(packageRoot, 'both', env).every(step => step.status === 'ok')).toBe(true);
+    const first = applyInstallProfile('full', env).state;
+    const links = paths.map(dest => ({ inode: lstatSync(dest).ino, target: readlinkSync(dest) }));
+    const steps = syncCrossReviewSkills(packageRoot, 'both', env);
+    expect(steps).toHaveLength(2);
+    expect(steps.every(step => step.status === 'ok' && step.detail === 'already present')).toBe(true);
+    const second = applyInstallProfile('full', env).state;
+    for (const [index, dest] of paths.entries()) {
+      expect(lstatSync(dest).ino).toBe(links[index]!.inode);
+      expect(readlinkSync(dest)).toBe(links[index]!.target);
+      expect(second.ownership_manifest.find(surface => surface.path === dest)?.type).toBe('symlink');
+    }
+    expect(second.transaction_id).toBe(first.transaction_id);
+    expect(installedProfileStatus(second, env).drift.surface_drift).toEqual([]);
+  }));
+
+  test('review regression: existing checkout links stay user-owned and accepted', () => withHome(env => {
+    const { source } = writeManagedHostSurfaces(env, 'full');
+    mkdirSync(join(source, 'assets/skill-commands'), { recursive: true });
+    cpSync(join(ROOT, 'assets/skill-commands/manifest.json'), join(source, 'assets/skill-commands/manifest.json'));
+    const bundled = join(source, 'assets/skills/repo-harness-cross-review');
+    cpSync(join(ROOT, 'assets/skills/repo-harness-cross-review'), bundled, { recursive: true });
+    const paths = ['.claude', '.codex'].map(host => join(env.HOME!, host, 'skills/repo-harness-cross-review'));
+    for (const dest of paths) {
+      rmSync(dest, { recursive: true, force: true });
+      mkdirSync(join(dest, '..'), { recursive: true });
+      symlinkSync(bundled, dest);
+    }
+    const transaction = beginInstallHostTransaction(paths, env);
+    try {
+      const steps = syncCrossReviewSkills(source, 'both', env);
+      expect(steps).toHaveLength(2);
+      expect(steps.every(step => step.status === 'ok' && step.detail === 'already present')).toBe(true);
+      const state = applyInstallProfile('full', env, new Date(), transaction).state;
+      expect(state.ownership_manifest.filter(surface => paths.includes(surface.path))).toEqual([]);
+      for (const dest of paths) expect(readlinkSync(dest)).toBe(bundled);
+    } finally { commitInstallHostTransaction(transaction); }
+  }));
+
+  for (const acquisition of ['discovered', 'transaction-created', 'recorded-as-adaptive'] as const) {
+    test(`review regression: ${acquisition} Waza links retire on full to minimal`, () => withHome(env => {
+      writeManagedHostSurfaces(env, 'full');
+      const names = ['think', 'hunt', 'check', 'health'];
+      const paths = ['.codex', '.claude'].flatMap(host => names.map(name => join(env.HOME!, host, 'skills', name)));
+      for (const dest of paths) rmSync(dest, { recursive: true, force: true });
+      const transaction = acquisition === 'transaction-created' ? beginInstallHostTransaction(paths, env) : undefined;
+      try {
+        for (const name of names) {
+          const source = join(env.HOME!, '.agents/skills', name);
+          writePath(join(source, 'SKILL.md'), `# user-staged ${name}\n`);
+          for (const host of ['.codex', '.claude']) {
+            const dest = join(env.HOME!, host, 'skills', name);
+            mkdirSync(join(dest, '..'), { recursive: true });
+            symlinkSync(source, dest);
+          }
+        }
+        const state = applyInstallProfile('full', env, new Date(), transaction).state;
+        for (const dest of paths) {
+          expect(state.ownership_manifest.find(surface => surface.path === dest)?.components).toEqual(['planning-integrations']);
+        }
+        if (acquisition === 'recorded-as-adaptive') {
+          const ledgerPath = join(env.HOME!, '.repo-harness/install-state.json');
+          const legacy = JSON.parse(readFileSync(ledgerPath, 'utf8'));
+          for (const surface of legacy.ownership_manifest) {
+            if (paths.includes(surface.path)) surface.components = ['adaptive-workflow'];
+          }
+          writeFileSync(ledgerPath, JSON.stringify(legacy));
+          const refreshed = applyInstallProfile('full', env).state;
+          for (const dest of paths) {
+            expect(refreshed.ownership_manifest.find(surface => surface.path === dest)?.components).toEqual(['planning-integrations']);
+          }
+        }
+        const removed = prepareInstallProfileSwitch('minimal', env);
+        const minimal = applyInstallProfile('minimal', env).state;
+        for (const dest of paths) {
+          expect(removed).toContain(dest);
+          expect(existsSync(dest)).toBe(false);
+          expect(minimal.ownership_manifest.some(surface => surface.path === dest)).toBe(false);
+        }
+        for (const name of names) {
+          expect(readFileSync(join(env.HOME!, '.agents/skills', name, 'SKILL.md'), 'utf8')).toBe(`# user-staged ${name}\n`);
+        }
+      } finally { if (transaction) commitInstallHostTransaction(transaction); }
+    }));
+  }
+
+  test('correct pre-existing package links repair stale ledger ownership and work from a checkout', () => withHome(env => {
+    const { canonical, source } = writeManagedHostSurfaces(env, 'full');
+    const packageRoot = packageAt(env.HOME!, source);
+    rmSync(canonical); symlinkSync(packageRoot, canonical);
+    const paths = ['.claude', '.codex'].map(host => join(env.HOME!, host, 'skills/repo-harness-cross-review'));
+    for (const dest of paths) rmSync(dest, { recursive: true, force: true });
+    // Record the real copied tree, then reproduce the audit's hand-made conversion.
+    const transaction = beginInstallHostTransaction(paths, env);
+    for (const dest of paths) cpSync(join(packageRoot, 'assets/skills/repo-harness-cross-review'), dest, { recursive: true });
+    const previous = applyInstallProfile('full', env, new Date(), transaction).state;
+    commitInstallHostTransaction(transaction);
+    for (const dest of paths) { rmSync(dest, { recursive: true }); symlinkSync(join(packageRoot, 'assets/skills/repo-harness-cross-review'), dest); }
+    expect(installedProfileStatus(previous, env).drift.surface_drift).toEqual(expect.arrayContaining(paths));
+    expect(syncCrossReviewSkills(ROOT, 'both', env).every(step => step.status === 'ok')).toBe(true);
+    const state = applyInstallProfile('full', env).state;
+    for (const dest of paths) expect(state.ownership_manifest.find(surface => surface.path === dest)?.type).toBe('symlink');
+    expect(state.ownership_manifest.find(surface => surface.path === canonical)?.type).toBe('symlink');
+    expect(installedProfileStatus(state, env).drift.surface_drift).toEqual([]);
+  }));
+
+  test('correct Codex relative Waza links gain ownership; unrelated links do not', () => withHome(env => {
+    writeManagedHostSurfaces(env, 'full');
+    for (const name of ['think', 'hunt', 'check', 'health']) {
+      const stage = join(env.HOME!, '.agents/skills', name);
+      writePath(join(stage, 'SKILL.md'), `# ${name}\n`);
+      const dest = join(env.HOME!, '.codex/skills', name);
+      rmSync(dest, { recursive: true });
+      symlinkSync(`../../.agents/skills/${name}`, dest);
+    }
+    const state = applyInstallProfile('full', env).state;
+    for (const name of ['think', 'hunt', 'check', 'health']) {
+      const record = state.ownership_manifest.find(surface => surface.path === join(env.HOME!, '.codex/skills', name));
+      expect(record?.type).toBe('symlink');
+      expect(record?.symlink_target).toBe(`../../.agents/skills/${name}`);
+    }
+    expect(installedProfileStatus(state, env).drift.surface_drift).toEqual([]);
+    const dest = join(env.HOME!, '.codex/skills/think');
+    rmSync(dest); symlinkSync(join(env.HOME!, '.codex/skills/mermaid'), dest);
+    expect(installedProfileStatus(state, env).drift.surface_drift).toContain(dest);
+    const refreshed = applyInstallProfile('full', env).state;
+    expect(refreshed.ownership_manifest.some(surface => surface.path === dest)).toBe(false);
+    expect(readlinkSync(dest)).toBe(join(env.HOME!, '.codex/skills/mermaid'));
+  }));
 });

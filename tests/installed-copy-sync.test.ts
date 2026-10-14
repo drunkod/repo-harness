@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { dirname, join } from "path";
+import { dirname, join, relative } from "path";
 import { spawnSync } from "child_process";
+import { removeOwnedDanglingSkillLinks } from "../src/effects/skill-tree-integrity";
 
 const ROOT = join(import.meta.dir, "..");
 /**
@@ -43,6 +44,101 @@ function writeExecutable(filePath: string, content: string) {
 }
 
 describe("Codex installed copy sync", () => {
+  test("removes retired package dangling links and same-folder backups on both hosts", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "repo-harness-dangling-owned-"));
+    const source = join(tmp, "source");
+    const roots = [join(tmp, "codex-skills"), join(tmp, "claude-skills")];
+    try {
+      seedSkillSurfaceRuntime(source);
+      const retired = join(source, "assets", "skill-commands", "repo-harness-plan");
+      const foreign = join(tmp, "Waza");
+      symlinkSync(join(tmp, "missing-volume"), foreign);
+      mkdirSync(retired, { recursive: true });
+      writeFileSync(join(retired, "SKILL.md"), "old skill\n");
+      for (const root of roots) {
+        mkdirSync(root);
+        symlinkSync(retired, join(root, "repo-harness-plan"));
+        symlinkSync(relative(root, retired), join(root, "repo-harness-plan.bak"));
+        symlinkSync(join(foreign, "think"), join(root, "think"));
+        symlinkSync("foreign-loop", join(root, "foreign-loop"));
+      }
+      rmSync(retired, { recursive: true });
+      const result = spawnSync("bash", [join(ROOT, "scripts", "sync-codex-installed-copies.sh")], {
+        cwd: ROOT, encoding: "utf-8",
+        env: { ...process.env, AGENTIC_DEV_SOURCE_ROOT: source, AGENTIC_DEV_LINK_INSTALLED_COPIES: "1",
+          REPO_HARNESS_INSTALL_PROFILE: "minimal", CODEX_SKILLS_ROOT: roots[0], CLAUDE_SKILLS_ROOT: roots[1] },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      for (const root of roots) {
+        for (const name of ["repo-harness-plan", "repo-harness-plan.bak"]) {
+          const link = join(root, name);
+          expect(() => lstatSync(link)).toThrow();
+          expect(result.stdout).toContain(`removed dangling skill symlink: ${link}`);
+        }
+        expect(readlinkSync(join(root, "repo-harness"))).toBe(source);
+        expect(readlinkSync(join(root, "think"))).toBe(join(foreign, "think"));
+        expect(readlinkSync(join(root, "foreign-loop"))).toBe("foreign-loop");
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  for (const live of [false, true]) {
+    test(`refuses foreign ${live ? "live" : "dangling"} facade links without changing either host`, () => {
+      const tmp = mkdtempSync(join(tmpdir(), "repo-harness-dangling-foreign-"));
+      const source = join(tmp, "source");
+      const roots = [join(tmp, "codex-skills"), join(tmp, "claude-skills")];
+      // A shared prefix must not prove package ownership.
+      const foreign = join(`${source}-foreign`, "repo-harness-plan");
+      try {
+        seedSkillSurfaceRuntime(source);
+        if (live) {
+          mkdirSync(foreign, { recursive: true });
+          writeFileSync(join(foreign, "SKILL.md"), "foreign skill\n");
+        }
+        for (const root of roots) {
+          mkdirSync(root);
+          symlinkSync(foreign, join(root, "repo-harness-plan"));
+          symlinkSync(foreign, join(root, "think"));
+        }
+        const result = spawnSync("bash", [join(ROOT, "scripts", "sync-codex-installed-copies.sh")], {
+          cwd: ROOT, encoding: "utf-8",
+          env: { ...process.env, AGENTIC_DEV_SOURCE_ROOT: source, AGENTIC_DEV_LINK_INSTALLED_COPIES: "1",
+            REPO_HARNESS_INSTALL_PROFILE: "minimal", CODEX_SKILLS_ROOT: roots[0], CLAUDE_SKILLS_ROOT: roots[1] },
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("symlink target is not the expected package source");
+        for (const root of roots) {
+          expect(readlinkSync(join(root, "repo-harness-plan"))).toBe(foreign);
+          expect(readlinkSync(join(root, "think"))).toBe(foreign);
+          expect(existsSync(join(root, "repo-harness"))).toBe(false);
+        }
+        if (live) expect(readFileSync(join(foreign, "SKILL.md"), "utf-8")).toBe("foreign skill\n");
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    }, 30_000);
+  }
+
+  test("does not delete a dangling link through a package ancestor that points outside", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "repo-harness-dangling-escape-"));
+    try {
+      const source = join(tmp, "source");
+      const root = join(tmp, "skills");
+      const foreign = join(tmp, "foreign");
+      mkdirSync(source); mkdirSync(root); mkdirSync(foreign);
+      symlinkSync(foreign, join(source, "escape"));
+      const target = join(source, "escape", "missing");
+      const link = join(root, "repo-harness-plan");
+      symlinkSync(target, link);
+      expect(removeOwnedDanglingSkillLinks(source, [root])).toEqual([]);
+      expect(readlinkSync(link)).toBe(target);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   test("registers each command facade as a standalone skill in copy mode", () => {
     const tmp = join(tmpdir(), `repo-harness-installed-sync-${Date.now()}`);
     const source = join(tmp, "source");
@@ -51,19 +147,18 @@ describe("Codex installed copy sync", () => {
 
     try {
       seedSkillSurfaceRuntime(source);
-      mkdirSync(join(source, "assets", "skills", "repo-harness-plan"), { recursive: true });
+      mkdirSync(join(source, "assets", "skill-commands", "repo-harness-check"), { recursive: true });
       mkdirSync(join(source, "evals"), { recursive: true });
       mkdirSync(codexSkills, { recursive: true });
       mkdirSync(claudeSkills, { recursive: true });
 
       writeFileSync(join(source, "SKILL.md"), "---\nname: repo-harness\n---\n");
-      writeFileSync(join(source, "assets", "skills", "repo-harness-plan", "SKILL.md"), "---\nname: repo-harness-plan\n---\n");
+      writeFileSync(join(source, "assets", "skill-commands", "repo-harness-check", "SKILL.md"), "---\nname: repo-harness-check\n---\n");
       writeFileSync(join(source, "assets", "skill-version.json"), "{\"version\":\"test\"}\n");
       writeFileSync(join(source, "evals", "benchmark.md"), "local benchmark output\n");
       mkdirSync(join(source, ".ai", "harness", "checks"), { recursive: true });
       mkdirSync(join(source, ".claude"), { recursive: true });
       mkdirSync(join(source, ".codex"), { recursive: true });
-      writeFileSync(join(source, ".ai", "harness", "checks", "latest.json"), "{}\n");
       writeFileSync(join(source, ".ai", "harness", "checks", "minimal-change.latest.json"), "{}\n");
       writeFileSync(join(source, ".ai", "harness", "checks", "minimal-change.latest.md"), "# local\n");
       writeFileSync(join(source, ".claude", ".trace.jsonl"), "{\"local\":true}\n");
@@ -83,23 +178,21 @@ describe("Codex installed copy sync", () => {
 
       expect(result.status).toBe(0);
       expect(existsSync(join(codexSkills, "repo-harness", "SKILL.md"))).toBe(true);
-      expect(existsSync(join(codexSkills, "repo-harness", "assets", "skills", "repo-harness-plan", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(codexSkills, "repo-harness", "assets", "skill-commands", "repo-harness-check", "SKILL.md"))).toBe(true);
       expect(existsSync(join(codexSkills, "repo-harness", "evals", "benchmark.md"))).toBe(false);
-      expect(existsSync(join(codexSkills, "repo-harness", ".ai", "harness", "checks", "latest.json"))).toBe(false);
       expect(existsSync(join(codexSkills, "repo-harness", ".ai", "harness", "checks", "minimal-change.latest.json"))).toBe(false);
       expect(existsSync(join(codexSkills, "repo-harness", ".ai", "harness", "checks", "minimal-change.latest.md"))).toBe(false);
       expect(existsSync(join(codexSkills, "repo-harness", ".claude", ".trace.jsonl"))).toBe(false);
       expect(existsSync(join(codexSkills, "repo-harness", ".codex", "hooks.json"))).toBe(false);
 
       expect(existsSync(join(claudeSkills, "repo-harness", "SKILL.md"))).toBe(true);
-      expect(existsSync(join(claudeSkills, "repo-harness", ".ai", "harness", "checks", "latest.json"))).toBe(false);
       expect(existsSync(join(claudeSkills, "repo-harness", ".ai", "harness", "checks", "minimal-change.latest.json"))).toBe(false);
       expect(existsSync(join(claudeSkills, "repo-harness", ".ai", "harness", "checks", "minimal-change.latest.md"))).toBe(false);
       expect(existsSync(join(claudeSkills, "repo-harness", ".claude", ".trace.jsonl"))).toBe(false);
       expect(existsSync(join(claudeSkills, "repo-harness", ".codex", "hooks.json"))).toBe(false);
       // Each facade is also registered as its own host skill (copy mode).
-      expect(existsSync(join(codexSkills, "repo-harness-plan", "SKILL.md"))).toBe(true);
-      expect(existsSync(join(claudeSkills, "repo-harness-plan", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(codexSkills, "repo-harness-check", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(claudeSkills, "repo-harness-check", "SKILL.md"))).toBe(true);
       expect(result.stdout).toContain("command facades (copy)");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -114,12 +207,12 @@ describe("Codex installed copy sync", () => {
 
     try {
       seedSkillSurfaceRuntime(source);
-      mkdirSync(join(source, "assets", "skills", "repo-harness-plan"), { recursive: true });
+      mkdirSync(join(source, "assets", "skill-commands", "repo-harness-check"), { recursive: true });
       mkdirSync(codexSkills, { recursive: true });
       mkdirSync(claudeSkills, { recursive: true });
 
       writeFileSync(join(source, "SKILL.md"), "---\nname: repo-harness\n---\n");
-      writeFileSync(join(source, "assets", "skills", "repo-harness-plan", "SKILL.md"), "---\nname: repo-harness-plan\n---\n");
+      writeFileSync(join(source, "assets", "skill-commands", "repo-harness-check", "SKILL.md"), "---\nname: repo-harness-check\n---\n");
       writeFileSync(join(source, "assets", "skill-version.json"), "{\"version\":\"test\"}\n");
       writeFileSync(join(source, "README.md"), "source-backed runtime alias\n");
 
@@ -142,9 +235,9 @@ describe("Codex installed copy sync", () => {
       expect(existsSync(join(source, "SKILL.md"))).toBe(true);
 
       // Each facade is registered as its own source-backed symlink (link mode).
-      expect(lstatSync(join(codexSkills, "repo-harness-plan")).isSymbolicLink()).toBe(true);
-      expect(lstatSync(join(claudeSkills, "repo-harness-plan")).isSymbolicLink()).toBe(true);
-      expect(existsSync(join(codexSkills, "repo-harness-plan", "SKILL.md"))).toBe(true);
+      expect(lstatSync(join(codexSkills, "repo-harness-check")).isSymbolicLink()).toBe(true);
+      expect(lstatSync(join(claudeSkills, "repo-harness-check")).isSymbolicLink()).toBe(true);
+      expect(existsSync(join(codexSkills, "repo-harness-check", "SKILL.md"))).toBe(true);
       expect(result.stdout).toContain("command facades (link)");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -237,10 +330,10 @@ describe("Codex installed copy sync", () => {
     const custom = join(codexSkills, "repo-harness-custom");
     try {
       seedSkillSurfaceRuntime(source);
-      mkdirSync(join(source, "assets", "skills", "repo-harness-plan"), { recursive: true });
+      mkdirSync(join(source, "assets", "skill-commands", "repo-harness-check"), { recursive: true });
       mkdirSync(custom, { recursive: true });
       writeFileSync(join(source, "SKILL.md"), "source\n");
-      writeFileSync(join(source, "assets", "skills", "repo-harness-plan", "SKILL.md"), "plan\n");
+      writeFileSync(join(source, "assets", "skill-commands", "repo-harness-check", "SKILL.md"), "plan\n");
       writeFileSync(join(custom, "SKILL.md"), "user-authored\n");
 
       const result = spawnSync("bash", [join(ROOT, "scripts", "sync-codex-installed-copies.sh")], {
@@ -315,7 +408,7 @@ describe("Codex installed copy sync", () => {
         mkdirSync(join(source, "assets", "skill-commands", name), { recursive: true });
         writeFileSync(join(source, "assets", "skill-commands", name, "SKILL.md"), `---\nname: ${name}\n---\n`);
       }
-      for (const name of ["repo-harness-plan", "repo-harness-product"]) {
+      for (const name of ["repo-harness-check", "repo-harness-product"]) {
         mkdirSync(join(source, "assets", "skills", name), { recursive: true });
         writeFileSync(join(source, "assets", "skills", name, "SKILL.md"), `---\nname: ${name}\n---\n`);
       }
@@ -339,7 +432,7 @@ describe("Codex installed copy sync", () => {
           },
         });
         expect(result.status).toBe(0);
-        expect(existsSync(join(codexSkills, "repo-harness-plan", "SKILL.md"))).toBe(expectCoreFacades);
+        expect(existsSync(join(codexSkills, "repo-harness-check", "SKILL.md"))).toBe(expectCoreFacades);
         expect(existsSync(join(codexSkills, "repo-harness-product", "SKILL.md"))).toBe(expectProduct);
         expect(existsSync(join(codexSkills, "repo-harness-ship", "SKILL.md"))).toBe(expectShip);
       }
@@ -347,6 +440,41 @@ describe("Codex installed copy sync", () => {
       rmSync(tmp, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test("copy sync installs a selected facade when the profile projection exceeds pipe capacity", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "repo-harness-profile-pipe-"));
+    const source = join(tmp, "source");
+    const roots = [join(tmp, "codex-skills"), join(tmp, "claude-skills")];
+    try {
+      seedSkillSurfaceRuntime(source);
+      const manifestPath = join(source, "assets/skill-commands/manifest.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      const product = manifest.packages.find((entry: any) => entry.name === "repo-harness-product");
+      // Valid sparse package fixtures may declare facades that are not shipped.
+      // Enough trailing selection data makes grep's early pipe close observable.
+      for (let index = 0; index < 512; index++) {
+        const name = `repo-harness-tail-${index}-${"x".repeat(220)}`;
+        manifest.packages.push({ ...product, name, source: `assets/skills/tail-${index}` });
+        manifest.expectedProjections.facadesByProfile.full.push(name);
+      }
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+      writeFileSync(join(source, "SKILL.md"), "---\nname: repo-harness\n---\n");
+      const productSource = join(source, product.source);
+      mkdirSync(productSource, { recursive: true });
+      writeFileSync(join(productSource, "SKILL.md"), "---\nname: repo-harness-product\n---\n");
+      const result = spawnSync("bash", [join(ROOT, "scripts/sync-codex-installed-copies.sh")], {
+        cwd: ROOT, encoding: "utf8", timeout: 60000,
+        env: { ...process.env, AGENTIC_DEV_SOURCE_ROOT: source, AGENTIC_DEV_LINK_INSTALLED_COPIES: "0",
+          REPO_HARNESS_INSTALL_PROFILE: "full", CODEX_SKILLS_ROOT: roots[0], CLAUDE_SKILLS_ROOT: roots[1] },
+      });
+      expect(result.status, result.stderr + result.stdout).toBe(0);
+      for (const root of roots) {
+        const dest = join(root, "repo-harness-product");
+        expect(existsSync(join(dest, ".repo-harness-owner.json")), result.stdout).toBe(true);
+        expect(readFileSync(join(dest, "SKILL.md"), "utf8")).toBe(readFileSync(join(productSource, "SKILL.md"), "utf8"));
+      }
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  }, 60000);
 
   test("retires an owner-marked facade once its canonical source and profile selection are both gone", () => {
     const tmp = join(tmpdir(), `repo-harness-installed-retire-${Date.now()}`);
@@ -358,8 +486,8 @@ describe("Codex installed copy sync", () => {
       seedSkillSurfaceRuntime(source);
       mkdirSync(join(source, "assets", "skill-commands", "repo-harness-check"), { recursive: true });
       writeFileSync(join(source, "assets", "skill-commands", "repo-harness-check", "SKILL.md"), "---\nname: repo-harness-check\n---\n");
-      mkdirSync(join(source, "assets", "skills", "repo-harness-plan"), { recursive: true });
-      writeFileSync(join(source, "assets", "skills", "repo-harness-plan", "SKILL.md"), "---\nname: repo-harness-plan\n---\n");
+      mkdirSync(join(source, "assets", "skill-commands", "repo-harness-check"), { recursive: true });
+      writeFileSync(join(source, "assets", "skill-commands", "repo-harness-check", "SKILL.md"), "---\nname: repo-harness-check\n---\n");
       mkdirSync(productSource, { recursive: true });
       mkdirSync(codexSkills, { recursive: true });
       mkdirSync(claudeSkills, { recursive: true });
@@ -394,7 +522,7 @@ describe("Codex installed copy sync", () => {
       expect(retire.stdout).toContain("retiring");
       expect(retire.stdout).toContain(productDest);
       // Selected, still-canonical facades on the same host are untouched.
-      expect(existsSync(join(codexSkills, "repo-harness-plan", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(codexSkills, "repo-harness-check", "SKILL.md"))).toBe(true);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -410,8 +538,8 @@ describe("Codex installed copy sync", () => {
       seedSkillSurfaceRuntime(source);
       mkdirSync(join(source, "assets", "skill-commands", "repo-harness-check"), { recursive: true });
       writeFileSync(join(source, "assets", "skill-commands", "repo-harness-check", "SKILL.md"), "---\nname: repo-harness-check\n---\n");
-      mkdirSync(join(source, "assets", "skills", "repo-harness-plan"), { recursive: true });
-      writeFileSync(join(source, "assets", "skills", "repo-harness-plan", "SKILL.md"), "---\nname: repo-harness-plan\n---\n");
+      mkdirSync(join(source, "assets", "skill-commands", "repo-harness-check"), { recursive: true });
+      writeFileSync(join(source, "assets", "skill-commands", "repo-harness-check", "SKILL.md"), "---\nname: repo-harness-check\n---\n");
       mkdirSync(productSource, { recursive: true });
       mkdirSync(codexSkills, { recursive: true });
       mkdirSync(claudeSkills, { recursive: true });
@@ -439,8 +567,11 @@ describe("Codex installed copy sync", () => {
         cwd: ROOT, encoding: "utf-8", env: { ...baseEnv, REPO_HARNESS_INSTALL_PROFILE: "minimal" },
       });
 
-      expect(retry.status).toBe(1);
+      // A retired conflict stays visible without blocking selected runtime sync.
+      expect(retry.status).toBe(0);
       expect(retry.stderr).toContain("managed copy content has drifted");
+      expect(retry.stderr).toContain("preserving retired facade");
+      expect(existsSync(join(codexSkills, "repo-harness-check", "SKILL.md"))).toBe(true);
       expect(existsSync(productDest)).toBe(true);
       expect(readFileSync(join(productDest, "SKILL.md"), "utf-8")).toContain("user edit");
     } finally {
@@ -628,4 +759,199 @@ root="$1"
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+});
+
+describe('minimal provider ownership boundary', () => {
+  for (const link of [true, false]) {
+    test(`minimal sync preserves an unselected provider ${link ? 'link' : 'copy'}`, () => {
+      const tmp = mkdtempSync('/tmp/rh-minimal-provider-');
+      try {
+        const source = join(tmp, 'source');
+        seedSkillSurfaceRuntime(source);
+        const provider = join(source, 'assets/skills/repo-harness-cross-review');
+        mkdirSync(provider, { recursive: true });
+        cpSync(join(ROOT, 'assets/skills/repo-harness-cross-review'), provider, { recursive: true });
+        const roots = ['.codex', '.claude'].map(host => join(tmp, 'home', host, 'skills'));
+        for (const root of roots) {
+          mkdirSync(root, { recursive: true });
+          const dest = join(root, 'repo-harness-cross-review');
+          if (link) symlinkSync(provider, dest); else cpSync(provider, dest, { recursive: true });
+        }
+        const result = spawnSync('bash', [join(ROOT, 'scripts/sync-codex-installed-copies.sh')], {
+          env: { ...process.env, HOME: join(tmp, 'home'), BUN_INSTALL: join(tmp, 'home/.bun'),
+            AGENTIC_DEV_SOURCE_ROOT: source, AGENTIC_DEV_LINK_INSTALLED_COPIES: '1', REPO_HARNESS_INSTALL_PROFILE: 'minimal' }, encoding: 'utf8',
+        });
+        expect(result.status, result.stderr).toBe(0);
+        for (const root of roots) {
+          expect(readlinkSync(join(root, 'repo-harness'))).toBe(source);
+          const dest = join(root, 'repo-harness-cross-review');
+          expect(lstatSync(dest).isSymbolicLink()).toBe(link);
+          if (link) expect(readlinkSync(dest)).toBe(provider);
+          expect(readFileSync(join(dest, 'SKILL.md'), 'utf8')).toBe(readFileSync(join(provider, 'SKILL.md'), 'utf8'));
+        }
+      } finally { rmSync(tmp, { recursive: true, force: true }); }
+    }, 30000);
+  }
+});
+
+describe('separately installed integration ownership boundary', () => {
+  for (const profile of ['minimal', 'full'] as const) {
+    for (const link of [true, false]) {
+      test(`${profile} ${link ? 'link' : 'copy'} sync keeps an installed ChatGPT skill link`, async () => {
+        const { runChatgptSkillProjection } = await import('../src/cli/chatgpt-skill/installer');
+        const tmp = mkdtempSync('/tmp/rh-integration-boundary-');
+        try {
+          const home = join(tmp, 'home');
+          const source = join(tmp, 'source');
+          seedSkillSurfaceRuntime(source);
+          writeFileSync(join(source, 'SKILL.md'), '---\nname: repo-harness\n---\n');
+          const installed = runChatgptSkillProjection({ action: 'install', home });
+          const links = ['.codex', '.claude'].map(host => join(home, host, 'skills', 'repo-harness-chatgpt'));
+          expect([...installed.changed].sort()).toEqual([...links].sort());
+          const result = spawnSync('bash', [join(ROOT, 'scripts/sync-codex-installed-copies.sh')], {
+            env: { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun'), AGENTIC_DEV_SOURCE_ROOT: source,
+              AGENTIC_DEV_LINK_INSTALLED_COPIES: link ? '1' : '0', REPO_HARNESS_INSTALL_PROFILE: profile }, encoding: 'utf8',
+          });
+          expect(result.status, result.stderr).toBe(0);
+          for (const dest of links) expect(readlinkSync(dest)).toBe(installed.source);
+          expect(lstatSync(join(home, '.codex', 'skills', 'repo-harness')).isSymbolicLink()).toBe(link);
+        } finally { rmSync(tmp, { recursive: true, force: true }); }
+      }, 30000);
+    }
+  }
+});
+
+describe('installed copy file projection', () => {
+  test('installer and upgrade staging copy exactly the shared canonical and facade file lists', async () => {
+    const { hashManagedTree, installedCopyTreeOptions, managedTreeEntries } = await import('../src/cli/installer/install-profile');
+    const { hashUpgradeSource } = await import('../src/core/upgrade/legacy-inventory');
+    const contract = JSON.parse(readFileSync(join(ROOT, 'assets/workflow-contract.v1.json'), 'utf8'));
+    const shippedFiles: string[] = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).files;
+    expect(contract.installedCopyIncludes.filter((path: string) => path.startsWith('dist/')).sort())
+      .toEqual(shippedFiles.filter(path => path.startsWith('dist/')).sort());
+    const tmp = mkdtempSync('/tmp/rh-copy-projection-');
+    try {
+      const source = join(tmp, 'source');
+      seedSkillSurfaceRuntime(source);
+      const facade = join(source, 'assets/skill-commands/repo-harness-check');
+      const put = (path: string, bytes: string) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, bytes); };
+      put(join(source, 'SKILL.md'), 'router\n');
+      put(join(source, 'LICENSE'), readFileSync(join(ROOT, 'LICENSE'), 'utf8'));
+      put(join(source, 'references/space and\nnewline.md'), 'reference\n');
+      symlinkSync('space and\nnewline.md', join(source, 'references/link.md'));
+      put(join(facade, 'SKILL.md'), 'facade\n');
+      put(join(facade, 'references/guide.md'), 'guide\n');
+      for (const path of ['dist/hook-entry.js', 'dist/oar-review-host.js', 'dist/operator-ui/index.html']) {
+        put(join(source, path), `shipped runtime ${path}\n`);
+      }
+      const residues = ['.ai/harness/state/effective.json', '.ai/harness/security/scan.json',
+        '.ai/harness/evidence/events/log.jsonl', '.ai/harness/delegation/active.json',
+        'dist/unshipped-build.js', 'plans/untracked.md', 'assets/node_modules/private.txt',
+        'assets/.ai/harness/state/effective.json', 'assets/.ai/harness/security/scan.json',
+        'assets/.ai/harness/evidence/events/log.jsonl', 'assets/.ai/harness/delegation/active.json',
+        'assets/.ai/harness/backups/snapshot.json'];
+      for (const path of residues) put(join(source, path), 'private residue\n');
+      put(join(facade, 'references/retired.md'), 'old shipped guide\n');
+      const env = { ...process.env, HOME: tmp, BUN_INSTALL: join(tmp, '.bun'), AGENTIC_DEV_SOURCE_ROOT: source,
+        CODEX_SKILLS_ROOT: join(tmp, 'codex'), CLAUDE_SKILLS_ROOT: join(tmp, 'claude'),
+        AGENTIC_DEV_LINK_INSTALLED_COPIES: '0', REPO_HARNESS_INSTALL_PROFILE: 'minimal' };
+      const installed = spawnSync('bash', [join(ROOT, 'scripts/sync-codex-installed-copies.sh')], { env, encoding: 'utf8' });
+      expect(installed.status, installed.stdout + installed.stderr).toBe(0);
+      rmSync(join(facade, 'references/retired.md'));
+      const refreshed = spawnSync('bash', [join(ROOT, 'scripts/sync-codex-installed-copies.sh')], { env, encoding: 'utf8' });
+      expect(refreshed.status, refreshed.stdout + refreshed.stderr).toBe(0);
+      for (const host of ['codex', 'claude']) {
+        expect(existsSync(join(tmp, host, 'repo-harness-check/references/retired.md'))).toBe(false);
+        expect(existsSync(join(tmp, host, 'repo-harness/assets/skill-commands/repo-harness-check/references/retired.md'))).toBe(false);
+      }
+      for (const [surface, root, name] of [
+        ['canonical-skill', source, 'repo-harness'], ['command-facade', facade, 'repo-harness-check'],
+      ] as const) {
+        const expected = managedTreeEntries(root, installedCopyTreeOptions(surface, contract));
+        expect(expected.length).toBeGreaterThan(0);
+        const staging = join(tmp, `staged-${name}`);
+        const staged = spawnSync('bash', [join(ROOT, 'scripts/sync-codex-installed-copies.sh'), '--stage-owned-copy', root, staging, surface], { env, encoding: 'utf8' });
+        expect(staged.status, staged.stdout + staged.stderr).toBe(0);
+        for (const copy of [staging, join(tmp, 'codex', name), join(tmp, 'claude', name)]) {
+          expect(managedTreeEntries(copy)).toEqual(expected);
+          expect(hashUpgradeSource(root, source, surface)).toBe(hashManagedTree(copy));
+          for (const entry of expected) {
+            if (entry.type === 'symlink') expect(readlinkSync(join(copy, entry.path))).toBe(readlinkSync(join(root, entry.path)));
+            else expect(readFileSync(join(copy, entry.path))).toEqual(readFileSync(join(root, entry.path)));
+          }
+        }
+      }
+      for (const path of residues) expect(existsSync(join(tmp, 'codex/repo-harness', path))).toBe(false);
+      expect(readFileSync(join(tmp, 'codex/repo-harness/LICENSE'))).toEqual(readFileSync(join(ROOT, 'LICENSE')));
+      expect(existsSync(join(tmp, 'codex/repo-harness/references/link.md'))).toBe(true);
+      for (const path of ['dist/hook-entry.js', 'dist/oar-review-host.js', 'dist/operator-ui/index.html']) {
+        expect(existsSync(join(tmp, 'codex/repo-harness', path))).toBe(true);
+      }
+      expect(() => installedCopyTreeOptions('canonical-skill', { installedCopyExcludes: [] })).toThrow('includes');
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  }, 60000);
+});
+
+test('a missing canonical projection fails before changing existing owned copies or links', async () => {
+  const { hashManagedTree } = await import('../src/cli/installer/install-profile');
+  const tmp = mkdtempSync('/tmp/rh-copy-invalid-contract-');
+  try {
+    const source = join(tmp, 'source');
+    seedSkillSurfaceRuntime(source);
+    const writer = join(source, 'scripts/sync-codex-installed-copies.sh');
+    cpSync(join(ROOT, 'scripts/sync-codex-installed-copies.sh'), writer);
+    const contractPath = join(source, 'assets/workflow-contract.v1.json');
+    cpSync(join(ROOT, 'assets/workflow-contract.v1.json'), contractPath);
+    writeFileSync(join(source, 'SKILL.md'), 'router\n');
+    const facade = join(source, 'assets/skill-commands/repo-harness-check');
+    mkdirSync(facade, { recursive: true });
+    writeFileSync(join(facade, 'SKILL.md'), 'facade\n');
+    const env = { ...process.env, HOME: tmp, BUN_INSTALL: join(tmp, '.bun'), AGENTIC_DEV_SOURCE_ROOT: source,
+      CODEX_SKILLS_ROOT: join(tmp, 'codex'), CLAUDE_SKILLS_ROOT: join(tmp, 'claude'), REPO_HARNESS_INSTALL_PROFILE: 'minimal' };
+    const installed = spawnSync('bash', [writer], { env: { ...env, AGENTIC_DEV_LINK_INSTALLED_COPIES: '0' }, encoding: 'utf8' });
+    expect(installed.status, installed.stdout + installed.stderr).toBe(0);
+    const targets = ['codex/repo-harness', 'claude/repo-harness', 'codex/repo-harness-check', 'claude/repo-harness-check'].map(path => join(tmp, path));
+    const before = targets.map(path => hashManagedTree(path));
+    const contract = JSON.parse(readFileSync(contractPath, 'utf8'));
+    delete contract.installedCopyIncludes;
+    writeFileSync(contractPath, JSON.stringify(contract));
+    for (const mode of ['0', '1']) {
+      const rejected = spawnSync('bash', [writer], { env: { ...env, AGENTIC_DEV_LINK_INSTALLED_COPIES: mode }, encoding: 'utf8' });
+      expect(rejected.status).toBe(1);
+      expect(rejected.stderr).toContain('installed copy includes are missing or invalid');
+      expect(targets.map(path => hashManagedTree(path))).toEqual(before);
+      for (const path of targets) expect(lstatSync(path).isDirectory()).toBe(true);
+    }
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+}, 60000);
+
+test('canonical projection keeps every tracked include file and every existing declared package file', async () => {
+  const { managedTreeEntries, installedCopyTreeOptions } = await import('../src/cli/installer/install-profile');
+  const { readdirSync } = await import('fs');
+  const contract = JSON.parse(readFileSync(join(ROOT, 'assets/workflow-contract.v1.json'), 'utf8'));
+  const includes: string[] = contract.installedCopyIncludes;
+  const packageFiles: string[] = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).files;
+  const projected = new Set(managedTreeEntries(ROOT, installedCopyTreeOptions('canonical-skill', contract)).map(entry => entry.path));
+  const tracked = spawnSync('git', ['ls-files', '-z'], { cwd: ROOT, encoding: 'utf8' });
+  expect(tracked.status, tracked.stderr).toBe(0);
+  const trackedIncludes = tracked.stdout.split('\0').filter(file => file && includes.some(root =>
+    root.endsWith('/') ? file.startsWith(root) : file === root));
+  expect(trackedIncludes.length).toBeGreaterThan(0);
+  expect(trackedIncludes.filter(file => !projected.has(file))).toEqual([]);
+
+  const existingPackageFiles: string[] = [];
+  const visit = (file: string): void => {
+    const absolute = join(ROOT, file);
+    const entry = lstatSync(absolute);
+    if (entry.isDirectory()) {
+      for (const name of readdirSync(absolute)) visit(`${file.replace(/\/$/, '')}/${name}`);
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
+      existingPackageFiles.push(file);
+    }
+  };
+  for (const file of packageFiles) {
+    if (existsSync(join(ROOT, file))) visit(file);
+  }
+  expect(existingPackageFiles.length).toBeGreaterThan(0);
+  expect(existingPackageFiles.filter(file => !projected.has(file))).toEqual([]);
 });

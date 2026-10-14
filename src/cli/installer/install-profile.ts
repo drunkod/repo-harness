@@ -1,3 +1,4 @@
+import { bunGlobalPackageRoot, expectedSkillProjections, skillLinkMatches } from './skill-projection';
 import { configurationReceiptPath } from './configuration-ownership';
 import { createHash, randomUUID } from 'crypto';
 import {
@@ -11,10 +12,11 @@ import {
   readlinkSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'fs';
 import { homedir } from 'os';
-import { delimiter, dirname, join } from 'path';
+import { basename, delimiter, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import {
   canonicalManagedHookProjection,
@@ -81,6 +83,8 @@ export { PROFILE_COMPONENTS };
 
 export interface InstalledProfileState {
   readonly protocol: 2;
+  /** Older protocol-2 records did not include the package version. */
+  readonly package_version?: string;
   readonly profile: InstallProfile;
   readonly components: readonly InstallComponent[];
   readonly transaction_id: string;
@@ -258,20 +262,64 @@ function adapterHasRequiredProjection(path: string, host: HookHost, profile: Ins
   }
 }
 
-export function hashManagedTree(root: string): string {
+export interface ManagedTreeOptions {
+  readonly excludes?: readonly string[];
+  readonly includes?: readonly string[];
+}
+
+/** The contract owns the source projection. Target ownership hashes stay complete. */
+export function installedCopyTreeOptions(
+  surface: 'canonical-skill' | 'command-facade',
+  contract: { readonly installedCopyExcludes?: unknown; readonly installedCopyIncludes?: unknown },
+): ManagedTreeOptions {
+  const excludes = contract.installedCopyExcludes;
+  if (!Array.isArray(excludes) || !excludes.every((value) => typeof value === 'string' && !value.includes('\n'))) {
+    throw new Error('installed copy exclusions are missing or invalid');
+  }
+  if (surface === 'command-facade') return { excludes };
+  const includes = contract.installedCopyIncludes;
+  if (!Array.isArray(includes) || includes.length === 0 || !includes.every((value) =>
+    typeof value === 'string' && value.length > 0 && !value.includes('\\') && !value.includes('\n')
+    && value.replace(/\/$/, '').split('/').every((part: string) => part !== '' && part !== '.' && part !== '..'))) {
+    throw new Error('installed copy includes are missing or invalid');
+  }
+  return { excludes, includes };
+}
+
+/** Both source hashes and rsync consume these exact files and links. */
+export function managedTreeEntries(root: string, options: ManagedTreeOptions = {}): Array<{ path: string; type: 'file' | 'symlink' }> {
+  const patterns = (options.excludes ?? []).map((pattern) => ({
+    directory: pattern.endsWith('/'),
+    basename: !pattern.replace(/\/$/, '').includes('/'),
+    glob: new Bun.Glob(`${pattern.replace(/\/$/, '').includes('/') ? '**/' : ''}${pattern.replace(/\/$/, '')}`),
+  }));
   const entries: Array<{ path: string; type: 'file' | 'symlink' }> = [];
   const visit = (directory: string, prefix: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (entry.name === OWNER_MARKER) continue;
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (patterns.some((pattern) => (!pattern.directory || entry.isDirectory())
+        && pattern.glob.match(pattern.basename ? entry.name : relative))
+        // A declared runtime descendant keeps its excluded parent traversable.
+        && !(entry.isDirectory() && options.includes?.some((include) => include.startsWith(`${relative}/`)))) continue;
+      if (options.includes && !options.includes.some((include) => include.endsWith('/')
+        ? relative.startsWith(include) || `${relative}/` === include || include.startsWith(`${relative}/`)
+        : relative === include || include.startsWith(`${relative}/`))) continue;
       const absolute = join(directory, entry.name);
       if (entry.isDirectory()) visit(absolute, relative);
       else if (entry.isFile()) entries.push({ path: relative, type: 'file' });
       else if (entry.isSymbolicLink()) entries.push({ path: relative, type: 'symlink' });
+      else if (options.excludes !== undefined) throw new Error(`unsupported installed-copy source entry: ${relative}`);
     }
   };
   visit(root, '');
   entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  return entries;
+}
+
+/** Hash one selected tree. No filters means the complete ownership proof. */
+export function hashManagedTree(root: string, options: ManagedTreeOptions = {}): string {
+  const entries = managedTreeEntries(root, options);
   const hash = createHash('sha256');
   for (const entry of entries) {
     const absolute = join(root, entry.path);
@@ -349,8 +397,9 @@ function captureManagedFile(
 function captureOwnedPath(
   path: string,
   components: readonly InstallComponent[],
+  options: { readonly allowEmptyComponents?: boolean } = {},
 ): ManagedInstallSurface | null {
-  if (components.length === 0 || (!existsSync(path) && !lstatExists(path))) return null;
+  if ((components.length === 0 && !options.allowEmptyComponents) || (!existsSync(path) && !lstatExists(path))) return null;
   const stat = lstatSync(path);
   if (stat.isSymbolicLink()) {
     return {
@@ -401,8 +450,8 @@ function captureOwnedPath(
  *
  * Resolves the expected source path from the manifest-derived catalog
  * (facade-kind packages no longer all live under one fixed
- * assets/skill-commands/<name> parent -- e.g. repo-harness-plan sources from
- * assets/skills/repo-harness-plan) rather than assuming a fixed parent
+ * assets/skill-commands/<name> parent -- e.g. repo-harness-product sources from
+ * assets/skills/repo-harness-product) rather than assuming a fixed parent
  * directory. A name absent from the catalog's facade-kind packages (a fully
  * retired name, e.g. a stale repo-harness-handoff left over from an older
  * install) is never canonical.
@@ -410,6 +459,22 @@ function captureOwnedPath(
 function facadeIsCanonical(root: string, name: string, catalog: SkillSurfaceCatalog): boolean {
   const source = catalog.packages.find((pkg) => pkg.kind === 'facade' && pkg.name === name)?.source;
   return typeof source === 'string' && existsSync(join(root, 'repo-harness', source, 'SKILL.md'));
+}
+
+const FACADE_NAME_PREFIX = 'repo-harness-';
+
+function hostSkillRoots(home: string): readonly string[] {
+  return [join(home, '.codex', 'skills'), join(home, '.claude', 'skills')];
+}
+
+/**
+ * Discovery records every owner-marked repo-harness-* directory, including a
+ * name that later leaves the catalog. The state reader accepts the same
+ * bounded set, so a committed receipt stays readable until removal.
+ */
+function isDiscoveredFacadePath(path: string, home: string): boolean {
+  const name = basename(path);
+  return name.startsWith(FACADE_NAME_PREFIX) && hostSkillRoots(home).some((root) => join(root, name) === path);
 }
 
 function discoverManagedSurfaces(
@@ -428,11 +493,14 @@ function discoverManagedSurfaces(
     'release-deployment-gates',
   ].includes(component));
   const surfaces: ManagedInstallSurface[] = [];
-  for (const root of [join(home, '.codex', 'skills'), join(home, '.claude', 'skills')]) {
+  // A catalog facade can lack the prefix (obsidian-memory). Its copy needs
+  // the same marker-based receipt as a prefixed facade copy.
+  const facadeNames = new Set(catalog.packages.filter((pkg) => pkg.kind === 'facade').map((pkg) => pkg.name));
+  for (const root of hostSkillRoots(home)) {
     const canonical = captureDirectoryOrLink(join(root, 'repo-harness'), runtimeComponents);
     if (canonical) surfaces.push(canonical);
     if (!existsSync(root)) continue;
-    for (const name of readdirSync(root).filter((entry) => entry.startsWith('repo-harness-')).sort()) {
+    for (const name of readdirSync(root).filter((entry) => entry.startsWith(FACADE_NAME_PREFIX) || facadeNames.has(entry)).sort()) {
       // repo-harness-handoff retired as a facade (SSD-06): 'handoff' is now
       // fulfilled by the root router's own references/handoff.md rather than
       // a separately discoverable Skill. A stale repo-harness-handoff dir
@@ -449,6 +517,24 @@ function discoverManagedSurfaces(
             : [];
       const facade = captureDirectoryOrLink(join(root, name), facadeComponents);
       if (facade) surfaces.push(facade);
+    }
+  }
+  const sourceRoot = bunGlobalPackageRoot(env);
+  // A matching stable package or staging link is ownership proof. Never
+  // acquire an arbitrary link merely because the transaction found it.
+  if (sourceRoot !== null) {
+    for (const projection of expectedSkillProjections(catalog, sourceRoot, home, profile)) {
+      if (!skillLinkMatches(projection.destination, projection.source)) continue;
+      const pkg = catalog.packages.find(pkg => pkg.name === projection.name);
+      const components = projection.staged
+        ? componentsForTransactionPath(projection.destination)
+        : projection.name === 'repo-harness'
+        ? runtimeComponents
+        : projection.name === 'repo-harness-check'
+          ? desired.filter(component => component === 'scope-worktree-check-guards' || component === 'verifier')
+          : desired.filter(component => component === pkg?.component);
+      const surface = captureOwnedPath(projection.destination, components);
+      if (surface) surfaces.push(surface);
     }
   }
   for (const file of [join(home, '.codex', 'hooks.json'), join(home, '.claude', 'settings.json')]) {
@@ -586,6 +672,26 @@ export function recordVerifiedAgentFleetOwnership(
   writeState({ ...current, ownership_manifest: ownershipManifest }, env);
 }
 
+/** Refresh only receipts for surfaces already held by the install authority. */
+export function recordRefreshedInstallOwnership(
+  paths: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const current = readInstalledProfile(env);
+  if (current === null) return;
+  const selected = new Set(paths);
+  const ownershipManifest = current.ownership_manifest.map((surface) => {
+    if (!selected.has(surface.path)) return surface;
+    // Existing receipts keep ownership even when no component is selected.
+    // Recapture bytes without requiring or inventing a new owner marker.
+    const refreshed = captureOwnedPath(surface.path, surface.components, { allowEmptyComponents: true });
+    if (!refreshed || refreshed.type !== surface.type) throw new Error(`cannot refresh install ownership: ${surface.path}`);
+    return { ...surface, content_hash: refreshed.content_hash, symlink_target: refreshed.symlink_target };
+  });
+  if (JSON.stringify(ownershipManifest) === JSON.stringify(current.ownership_manifest)) return;
+  writeState({ ...current, package_version: installedPackageVersion(), ownership_manifest: ownershipManifest }, env);
+}
+
 export function assertInstallProfile(value: string): InstallProfile {
   if (!INSTALL_PROFILES.includes(value as InstallProfile)) {
     throw new Error(`invalid install profile ${value}; expected ${INSTALL_PROFILES.join('|')}`);
@@ -635,9 +741,41 @@ export function installProfileHostMutationPaths(env: NodeJS.ProcessEnv = process
   return [...new Set(paths)];
 }
 
+/**
+ * The skill roots that scripts/sync-codex-installed-copies.sh writes. An
+ * explicit CODEX_SKILLS_ROOT without CLAUDE_SKILLS_ROOT disables the Claude
+ * root. The skill sync tests compare this rule with the roots the shell reports.
+ */
+export function effectiveSkillRoots(env: NodeJS.ProcessEnv = process.env): readonly string[] {
+  const home = env.HOME ?? homedir();
+  if (env.CODEX_SKILLS_ROOT) return [env.CODEX_SKILLS_ROOT, ...(env.CLAUDE_SKILLS_ROOT ? [env.CLAUDE_SKILLS_ROOT] : [])];
+  return [join(home, '.codex', 'skills'), env.CLAUDE_SKILLS_ROOT || join(home, '.claude', 'skills')];
+}
+
+/**
+ * Skill sync also retires repo-harness-* facades and owned dangling links
+ * that the current catalog does not name. A host transaction snapshots that
+ * full set before sync runs.
+ */
+export function installProfileTransactionPaths(env: NodeJS.ProcessEnv = process.env): readonly string[] {
+  const { repoHarnessSkills } = catalogMutationPathSkillNames(loadSkillSurfaceCatalog());
+  const paths = [...installProfileHostMutationPaths(env)];
+  for (const root of effectiveSkillRoots(env)) {
+    for (const skill of repoHarnessSkills) paths.push(join(root, skill));
+    // Follow a linked root, as the shell's [[ -d ]] test does.
+    if (!statSync(root, { throwIfNoEntry: false })?.isDirectory()) continue;
+    for (const name of readdirSync(root)) {
+      const path = join(root, name);
+      if (name.startsWith(FACADE_NAME_PREFIX) || (lstatSync(path).isSymbolicLink() && !existsSync(path))) paths.push(path);
+    }
+  }
+  return [...new Set(paths)];
+}
+
 export function beginInstallHostTransaction(
   paths: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
+  options: { readonly retainBackup?: boolean } = {},
 ): InstallHostTransaction {
   const transactionRoot = join(env.HOME ?? homedir(), '.repo-harness', 'transactions');
   mkdirSync(transactionRoot, { recursive: true });
@@ -649,7 +787,11 @@ export function beginInstallHostTransaction(
       cpSync(path, backupPath, { recursive: true, force: false, errorOnExist: true, verbatimSymlinks: true });
       return { path, existed: true, backup_path: backupPath };
     });
-    return { protocol: 1, backup_root: backupRoot, snapshots };
+    const transaction: InstallHostTransaction = { protocol: 1, backup_root: backupRoot, snapshots };
+    if (options.retainBackup === true) {
+      writeFileSync(join(backupRoot, 'manifest.json'), `${JSON.stringify(transaction, null, 2)}\n`, { mode: 0o600 });
+    }
+    return transaction;
   } catch (error) {
     rmSync(backupRoot, { recursive: true, force: true });
     throw error;
@@ -665,7 +807,10 @@ function lstatExists(path: string): boolean {
   }
 }
 
-export function rollbackInstallHostTransaction(transaction: InstallHostTransaction): void {
+export function rollbackInstallHostTransaction(
+  transaction: InstallHostTransaction,
+  options: { readonly retainBackup?: boolean } = {},
+): void {
   const failures: string[] = [];
   for (const snapshot of [...transaction.snapshots].reverse()) {
     try {
@@ -683,7 +828,9 @@ export function rollbackInstallHostTransaction(transaction: InstallHostTransacti
       failures.push(`${snapshot.path}: ${String((error as Error).message ?? error)}`);
     }
   }
-  rmSync(transaction.backup_root, { recursive: true, force: true });
+  if (failures.length === 0 && options.retainBackup !== true) {
+    rmSync(transaction.backup_root, { recursive: true, force: true });
+  }
   if (failures.length > 0) throw new Error(`install transaction compensation failed:\n${failures.join('\n')}`);
 }
 
@@ -800,11 +947,12 @@ function removeRetiredOwnedSurfaces(
       throw new Error(`refusing profile switch because managed surface drifted: ${surface.path}`);
     }
   }
+  const ownedSkills = profileOwnedSkillsSet();
   const removedSkills = new Set<string>();
   for (const surface of unique) {
     const normalized = surface.path.replaceAll('\\', '/');
     const name = normalized.split('/').at(-1) ?? '';
-    if (profileOwnedSkillsSet().has(name) && normalized.includes('/.agents/skills/')) removedSkills.add(name);
+    if (ownedSkills.has(name) && normalized.includes('/.agents/skills/')) removedSkills.add(name);
     if (surface.managed_marker === CODEGRAPH_CONFIG_MARKER) removeCodegraphProjection(surface.path);
     else rmSync(surface.path, { recursive: true, force: true });
   }
@@ -844,7 +992,7 @@ function validateManagedSurface(
     && raw.authority === 'repo-harness-install-transaction'
     && raw.removal === 'managed-surfaces-only'
     && typeof raw.path === 'string'
-    && allowedPaths.has(raw.path)
+    && (allowedPaths.has(raw.path) || isDiscoveredFacadePath(raw.path, env.HOME ?? homedir()))
     && ['directory-copy', 'symlink', 'managed-file'].includes(String(raw.type))
     && (raw.content_hash === null || typeof raw.content_hash === 'string')
     && (raw.managed_marker === null || typeof raw.managed_marker === 'string')
@@ -874,8 +1022,12 @@ function parseCurrentStateBase(
   if (typeof raw.transaction_id !== 'string' || typeof raw.applied_at !== 'string') {
     throw new Error(`installed profile state has invalid metadata; rerun repo-harness install --profile <minimal|full>: ${path}`);
   }
+  if (raw.package_version !== undefined && (typeof raw.package_version !== 'string' || !raw.package_version.trim())) {
+    throw new Error(`installed profile state has an invalid package version: ${path}`);
+  }
   return {
     protocol: 2,
+    ...(raw.package_version === undefined ? {} : { package_version: raw.package_version }),
     profile,
     components: PROFILE_COMPONENTS[profile],
     transaction_id: raw.transaction_id,
@@ -1177,6 +1329,13 @@ function writeState(state: InstalledProfileState, env: NodeJS.ProcessEnv): void 
   renameSync(temp, target);
 }
 
+function installedPackageVersion(): string {
+  const path = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'package.json');
+  const raw = JSON.parse(readFileSync(path, 'utf-8')) as { version?: unknown };
+  if (typeof raw.version !== 'string' || !raw.version.trim()) throw new Error(`invalid package version: ${path}`);
+  return raw.version;
+}
+
 export function applyInstallProfile(
   profile: InstallProfile,
   env: NodeJS.ProcessEnv = process.env,
@@ -1198,7 +1357,10 @@ export function applyInstallProfile(
     : [];
   const fleetOwned = options.agentFleetVerified === true ? verifiedAgentFleetSurfaces(profile, env) : [];
   const ownershipManifest = [...new Map(
-    [...discovered, ...preserved, ...transactionOwned, ...fleetOwned].map((surface) => [
+    // Current verified link projections own their component classification.
+    // Historical records must not restore a retired or wrong component.
+    [...discovered, ...preserved, ...transactionOwned, ...fleetOwned,
+      ...discovered.filter(surface => surface.type === 'symlink')].map((surface) => [
       `${surface.path}\0${surface.managed_marker ?? surface.type}`,
       surface,
     ]),
@@ -1207,6 +1369,7 @@ export function applyInstallProfile(
     && JSON.stringify(current.ownership_manifest) === JSON.stringify(ownershipManifest);
   const state: InstalledProfileState = {
     protocol: 2,
+    package_version: installedPackageVersion(),
     profile,
     components: PROFILE_COMPONENTS[profile],
     transaction_id: current?.profile === profile && plan.install.length === 0 && plan.remove.length === 0 && sameOwnership
@@ -1218,6 +1381,7 @@ export function applyInstallProfile(
     ownership_manifest: ownershipManifest,
     previous: current && migrationSource === undefined ? {
       protocol: current.protocol,
+      ...(current.package_version === undefined ? {} : { package_version: current.package_version }),
       profile: current.profile,
       components: current.components,
       transaction_id: current.transaction_id,

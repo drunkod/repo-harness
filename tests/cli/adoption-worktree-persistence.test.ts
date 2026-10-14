@@ -16,7 +16,7 @@ function git(repo: string, args: string[]) {
 }
 
 describe("adoption workflow-directory persistence", () => {
-  test("a committed standard adoption passes strict workflow checks in a fresh Git worktree", () => {
+  test("a committed standard adoption retains workflow diagnostics in a fresh Git worktree", () => {
     const repo = tempDir("repo-harness-adoption-worktree-repo-");
     const home = tempDir("repo-harness-adoption-worktree-home-");
     const worktreeParent = tempDir("repo-harness-adoption-worktree-checkout-");
@@ -80,13 +80,13 @@ describe("adoption workflow-directory persistence", () => {
         expect(existsSync(join(worktree, ...path.split("/")))).toBe(true);
       }
 
-      const strict = spawnSync(
+      const diagnostics = spawnSync(
         "bun",
-        [CLI, "run", "check-task-workflow", "--strict"],
+        [CLI, "run", "check-task-workflow"],
         { cwd: worktree, encoding: "utf-8", env: { ...process.env, REPO_HARNESS_HOME: home } },
       );
-      expect(strict.status).toBe(0);
-      expect(`${strict.stdout}${strict.stderr}`).toContain("[workflow] OK");
+      expect(diagnostics.status, diagnostics.stderr).toBe(0);
+      expect(`${diagnostics.stdout}${diagnostics.stderr}`).toContain("[workflow] diagnostic issues=0");
     } finally {
       if (existsSync(worktree)) git(repo, ["worktree", "remove", "--force", worktree]);
       rmSync(repo, { recursive: true, force: true });

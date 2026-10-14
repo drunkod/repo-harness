@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { OperatorApp, primaryCause } from '../../src/operator-web/App';
+import { OperatorApp } from '../../src/operator-web/App';
+import { primaryCause } from '../../src/operator-web/worklist';
 import {
   changedDuringReadSnapshot,
   degradedSnapshot,
@@ -11,8 +12,11 @@ import {
 } from '../../src/operator-web/fixture';
 import { projectSnapshotViewState, snapshotViewKind } from '../../src/operator-web/types';
 
+/** The Fleet worklist lives on the repository page; the board is the default route. */
+const REPOSITORY_PLACE = { workspace: 'repository', module: null, item: null } as const;
+
 function renderStable(snapshot = stableSnapshot): string {
-  return renderToStaticMarkup(<OperatorApp initialState={projectSnapshotViewState(snapshot)} initialLocale="en" />);
+  return renderToStaticMarkup(<OperatorApp initialState={projectSnapshotViewState(snapshot)} initialLocale="en" initialPlace={REPOSITORY_PLACE} />);
 }
 
 function ordered(markup: string, ...fragments: readonly string[]): boolean {
@@ -48,7 +52,7 @@ describe('operator web control board', () => {
       'Done',
     )).toBe(true);
     expect(markup).toContain('protocol 7');
-    expect(markup).toContain('observe-only · one write: task message');
+    expect(markup).toContain('read-only');
   });
 
   test('UX-operator-worklist-v1-P2 leads every row with the human task label, never the digest', () => {
@@ -117,13 +121,14 @@ describe('operator web control board', () => {
       expect(markup).not.toContain(affordance);
     }
     expect(markup).not.toContain('data-write-action');
-    expect(markup).toContain('observe-only · one write: task message');
+    expect(markup).toContain('read-only');
   });
 
   test('UX-local-human-control-board-v1-F1 renders a fatal authority failure instead of an empty success board', () => {
     const markup = renderToStaticMarkup(
       <OperatorApp
         initialLocale="en"
+        initialPlace={REPOSITORY_PLACE}
         initialState={{
           kind: 'fatal',
           error: {
@@ -150,6 +155,7 @@ describe('operator web control board', () => {
     const markup = renderToStaticMarkup(
       <OperatorApp
         initialLocale="en"
+        initialPlace={REPOSITORY_PLACE}
         initialState={{
           kind: 'fatal',
           error: {
@@ -193,42 +199,5 @@ describe('operator web control board', () => {
     expect(markup).toContain('repo-unreadable');
     expect(markup).toContain('repository authority cannot be read');
     expect(markup).toContain('repo_unreadable');
-  });
-});
-
-describe('repository automation supervision', () => {
-  test('renders original decisions and unknown execution without deriving authorization or owners', async () => {
-    const { AutomationEvidence } = await import('../../src/operator-web/AutomationSummary');
-    const { repositoryObservationFixture } = await import('../../src/operator-web/fixture');
-    const { decodeOperatorRepositorySnapshot } = await import('../../src/operator-web/repository-snapshot');
-    const { translate } = await import('../../src/operator-web/i18n');
-    const observation = decodeOperatorRepositorySnapshot(repositoryObservationFixture(), 'repo-harness');
-    const markup = renderToStaticMarkup(<AutomationEvidence observation={observation} t={(key, values) => translate('en', key, values)} />);
-    for (const value of ['Native execution evidence unavailable', 'executing', 'operator', 'dispatch_started',
-      'grant-ui-observation', 'Stored grant only.', 'reconciliation_required', 'agent_turns',
-      'Last stored decision', 'no_progress', observation.automation.grants.records[0]!.expires_at,
-      observation.automation.controllers.records[0]!.event_sha256, 'Stale']) expect(markup).toContain(value);
-    expect(markup).not.toContain('Agent is running');
-    expect(markup).not.toContain('<button');
-    const zh = renderToStaticMarkup(<AutomationEvidence observation={observation} t={(key, values) => translate('zh', key, values)} />);
-    expect(zh).toContain('原生执行证据不可用');
-    expect(zh).toContain('最近已存储决策');
-    expect(zh).toContain('原始关注责任方');
-  });
-
-  test('keeps source absence, failure and stale budget metrics distinct', async () => {
-    const { AutomationEvidence } = await import('../../src/operator-web/AutomationSummary');
-    const { repositoryObservationFixture } = await import('../../src/operator-web/fixture');
-    const { translate } = await import('../../src/operator-web/i18n');
-    const original = repositoryObservationFixture('repo-console');
-    const observation = { ...original, automation: { ...original.automation,
-      policy: { ...original.automation.policy, status: 'unavailable' as const, reason: 'source_changed' as const, records: [] } } };
-    const markup = renderToStaticMarkup(<AutomationEvidence observation={observation} t={(key, values) => translate('en', key, values)} />);
-    expect(markup).toContain('data-source-status="unavailable"');
-    expect(markup).toContain('data-source-status="missing"');
-    expect(markup).toContain('source_changed');
-    expect(markup).toContain('No record');
-    expect(markup).toContain('Stale');
-    expect(markup).toContain('>15</td>');
   });
 });

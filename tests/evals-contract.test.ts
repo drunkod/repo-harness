@@ -51,7 +51,6 @@ describe("Skill eval assets", () => {
     for (const command of [
       "repo-harness",
       "repo-harness-setup",
-      "repo-harness-plan",
       "repo-harness-product",
       "repo-harness-check",
       "repo-harness-ship",
@@ -64,6 +63,12 @@ describe("Skill eval assets", () => {
     expect(combined).toContain("new project");
   });
 
+  test("eval asset uses the merged planning owner", () => {
+    const combined = JSON.stringify(evals);
+    expect(combined).not.toContain("repo-harness-plan");
+    expect(combined).toContain("repo-harness-check");
+  });
+
   test("eval asset covers shared .ai hook routing expectations", () => {
     const combined = evals.evals
       .flatMap((entry) => [entry.expected_output, ...entry.expectations])
@@ -71,13 +76,8 @@ describe("Skill eval assets", () => {
     expect(combined).toContain(".ai/");
   });
 
-  test("eval asset covers the route NL vs TS shadow benchmark", () => {
-    const entry = evals.evals.find((candidate) => candidate.slug === "route-nl-vs-ts");
-    expect(entry).toBeDefined();
-    expect(entry?.prompt).toContain("route-nl-vs-ts");
-    expect(entry?.prompt).toContain("loop-engine-nl-decision-table.md");
-    expect(entry?.expected_output).toContain(".ai/harness/runs/");
-    expect(entry?.expectations.join("\n")).toContain("false positives");
+  test("retired route shadow benchmark stays absent", () => {
+    expect(evals.evals.some((entry) => entry.slug === "route-nl-vs-ts")).toBe(false);
   });
 
   test("eval asset defines deterministic graders", () => {

@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { delimiter, join, resolve } from "node:path";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { basename, delimiter, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
+import { discoverTestFiles, integrationFiles, scheduleTestFiles, selectTestSuite, serialFiles } from '../scripts/select-test-suite';
+import recordedDurations from '../scripts/test-file-durations.json';
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 
@@ -27,6 +29,7 @@ type GateOptions = {
   jobs?: string;
   /** Prepended to PATH so a case can substitute a deterministic fake `bun`. */
   binDir?: string;
+  nodeOptions?: string;
 };
 
 function writeTestFile(dir: string, name: string, passing: boolean): string {
@@ -44,6 +47,8 @@ function writeTestFile(dir: string, name: string, passing: boolean): string {
 function gateEnv(overrides: Record<string, string>): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
   delete env.BUN_TEST_JOBS;
+  // Bun hides pass lines in agent environments, even with onlyFailures=false.
+  for (const key of ["CLAUDECODE", "REPL_ID", "AGENT"]) delete env[key];
   return { ...env, ...overrides };
 }
 
@@ -55,6 +60,7 @@ function runIsolatedGate(files: string[], options: GateOptions = {}): RunResult 
     cwd: REPO_ROOT,
     encoding: "utf-8",
     env: gateEnv({
+      ...(options.nodeOptions ? { NODE_OPTIONS: options.nodeOptions } : {}),
       ...(options.binDir ? { PATH: `${options.binDir}${delimiter}${process.env.PATH ?? ""}` } : {}),
       ...(options.jobs === undefined ? {} : { BUN_TEST_JOBS: options.jobs }),
       BUN_TEST_ISOLATE_FILES: "1",
@@ -116,6 +122,37 @@ function summaryEntries(output: string): string[] {
 }
 
 describe("ci isolate-mode test loop", () => {
+  test('suite entrypoint rejects invalid suite and timeout arguments before setup', () => {
+    for (const args of [['unknown'], ['core', '--timeout', '0'], ['full', '--timeout', 'bad'], ['core', '--timeout', '10', 'extra']]) {
+      const result = spawnSync('/bin/bash', [LIB_PATH, ...args], { cwd: REPO_ROOT, encoding: 'utf8' });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('Usage:');
+      expect(result.stdout).toBe('');
+    }
+  });
+
+  test('core and integration retain the complete file inventory without overlap', () => {
+    const files = discoverTestFiles(REPO_ROOT);
+    const core = selectTestSuite('core', files);
+    const integration = selectTestSuite('integration', files);
+    expect(core.filter(file => integration.includes(file))).toEqual([]);
+    expect([...core, ...integration].sort()).toEqual(files);
+    expect(selectTestSuite('full', files)).toEqual(files);
+    expect(Object.keys(recordedDurations.files).filter(file => !files.includes(file))).toEqual([]);
+    expect(integration.sort()).toEqual([...integrationFiles].sort());
+    for (const file of serialFiles) expect(files).toContain(file);
+    expect(() => selectTestSuite('unknown', files)).toThrow('Suite must be');
+    expect(() => selectTestSuite('full', [files[0]!, files[0]!])).toThrow('Duplicate');
+    expect(() => selectTestSuite('full', ['tests/../escape.test.ts'])).toThrow('Invalid');
+  });
+
+  test('recorded durations schedule the longest files first without losing new files', () => {
+    const files = ['tests/a.test.ts', 'tests/b.test.ts', 'tests/c.test.ts', 'tests/new.test.ts'];
+    expect(scheduleTestFiles(files, { [files[0]!]: 20, [files[1]!]: 90, [files[2]!]: 20 }))
+      .toEqual(['tests/b.test.ts', 'tests/a.test.ts', 'tests/c.test.ts', 'tests/new.test.ts']);
+    expect(() => scheduleTestFiles(files, { [files[0]!]: -1 })).toThrow('Invalid recorded duration');
+  });
+
   test("runs every selected file and reports each failing file once", () => {
     const dir = mkdtempSync(join(tmpdir(), "rh-ci-isolate-"));
     try {
@@ -241,6 +278,33 @@ function outputBlocks(output: string): { file: string; body: string }[] {
 }
 
 describe("ci isolate-mode job pool", () => {
+  test('the HOME lane runs after the parallel pool, even after a file fails', () => {
+    const root = mkdtempSync(join(tmpdir(), 'rh-ci-tail-'));
+    try {
+      mkdirSync(join(root, 'tests/cli'), { recursive: true });
+      const finished = join(root, 'finished');
+      const parallel = join(root, 'tests/parallel.test.ts');
+      writeFileSync(parallel, `import { expect, test } from 'bun:test';
+        test('parallel failure', async () => {
+          await Bun.sleep(25);
+          await Bun.write(${JSON.stringify(finished)}, 'complete');
+          expect(1).toBe(2);
+        });`);
+      writeFileSync(join(root, 'tests/cli/install.test.ts'), `import { expect, test } from 'bun:test';
+        test('serial tail', async () => {
+          expect(await Bun.file(${JSON.stringify(finished)}).text()).toBe('complete');
+        });`);
+      const result = spawnSync('bash', ['-c', 'set -euo pipefail; source "$1"; run_bun_tests', 'tail', LIB_PATH], {
+        cwd: root, encoding: 'utf8', env: gateEnv({ BUN_TEST_ISOLATE_FILES: '1', BUN_TEST_SCHEDULE_FILES: '1',
+          BUN_TEST_JOBS: '2', BUN_TEST_FILES: 'tests/cli/install.test.ts tests/parallel.test.ts' }),
+      });
+      expect(result.status).toBe(1);
+      expect(summaryEntries(result.stderr)).toEqual(['tests/parallel.test.ts (exit 1)']);
+      expect(outputBlocks(result.stdout).map(block => block.file)).toEqual(['tests/parallel.test.ts', 'tests/cli/install.test.ts']);
+      expect(result.stdout + result.stderr).toContain('(pass) serial tail');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   test("BUN_TEST_JOBS=1 reproduces the serial baseline byte for byte", () => {
     const root = mkdtempSync(join(tmpdir(), "rh-ci-jobs-"));
     try {
@@ -338,6 +402,71 @@ describe("ci isolate-mode job pool", () => {
       expect(result.output).toContain("[ci] BUN_TEST_JOBS must be a positive integer");
       expect(result.output).not.toContain("[ci] test ");
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+
+describe("disposable worker cleanup", () => {
+  test.each([
+    { mode: "transient", failing: false, status: 0, failures: 1 },
+    { mode: "transient", failing: true, status: 1, failures: 1 },
+    { mode: "persistent", failing: false, status: 1, failures: 4 },
+    { mode: "denied", failing: false, status: 1, failures: 1 },
+  ])("keeps cleanup bounded and preserves the test result: %j", ({ mode, failing, status, failures }) => {
+    const root = mkdtempSync(join(tmpdir(), "rh-ci-cleanup-"));
+    const marker = join(root, "cleanup.jsonl");
+    try {
+      const binDir = writeFakeBun(root);
+      const file = writeTestFile(root, failing ? "cleanup-failing.test.ts" : "cleanup-passing.test.ts", !failing);
+      const preload = join(root, "cleanup-preload.cjs");
+      // Inject the observed syscall error at the real parent-runner boundary.
+      // The successful retry removes a real late-written file, rather than
+      // returning a fabricated cleanup success.
+      writeFileSync(preload, `const fs = require("node:fs");
+const pathApi = require("node:path");
+const original = fs.rmSync;
+const seen = new Set();
+fs.rmSync = function(path, options) {
+  if (pathApi.basename(path).startsWith("rh-test-tmp-")) {
+    const fail = ${JSON.stringify(mode)} !== "transient" || !seen.has(path);
+    seen.add(path);
+    if (fail) {
+      fs.writeFileSync(pathApi.join(path, "late-runtime-cache"), "cache");
+      fs.appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ path, failure: true }) + "\\n");
+      throw Object.assign(new Error("injected cleanup error"), { code: ${JSON.stringify(mode === 'denied' ? 'EACCES' : 'ENOTEMPTY')} });
+    }
+    const result = original(path, options);
+    fs.appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ path, removed: !fs.existsSync(path) }) + "\\n");
+    return result;
+  }
+  return original(path, options);
+};`);
+      const result = runIsolatedGate([file], { binDir, jobs: "1", nodeOptions: `--require ${JSON.stringify(preload)}` });
+      expect(result.status).toBe(status);
+      const records = readFileSync(marker, "utf8").trim().split("\n").map(line => JSON.parse(line) as { path: string; failure?: boolean; removed?: boolean });
+      expect(records.filter(record => record.failure)).toHaveLength(failures);
+      expect(new Set(records.map(record => record.path)).size).toBe(1);
+      if (mode === "transient") {
+        expect(records.at(-1)?.removed).toBe(true);
+        expect(existsSync(records[0]!.path)).toBe(false);
+        expect(result.output).toContain("retrying disposable root cleanup after ENOTEMPTY (1/3)");
+        expect(summaryEntries(result.output)).toEqual(failing ? [`${file} (exit 1)`] : []);
+      } else {
+        expect(records.some(record => record.removed)).toBe(false);
+        expect(summaryEntries(result.output)).toEqual([`${file} (exit 1)`]);
+        expect(result.output).toContain(mode === "denied" ? "EACCES" : "ENOTEMPTY");
+      }
+    } finally {
+      if (existsSync(marker)) {
+        for (const line of readFileSync(marker, "utf8").trim().split("\n")) {
+          const { path } = JSON.parse(line) as { path: string };
+          expect(path.startsWith(realpathSync(resolve("/tmp")) + sep)).toBe(true);
+          expect(basename(path)).toStartWith("rh-test-tmp-");
+          rmSync(path, { recursive: true, force: true });
+        }
+      }
       rmSync(root, { recursive: true, force: true });
     }
   });

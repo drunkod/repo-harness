@@ -187,14 +187,16 @@ function probeOracleVersion(binary: string): string | undefined {
  * Probe an oracle binary's help/version output to confirm it actually accepts
  * the flags we send. The probe is the readiness gate — version comparison alone
  * is not enough, because the binary may not support the browser-mode surface.
+ * A caller that already ran the `--version` probe on this binary passes its
+ * result as `checkedVersion` so the probe does not spawn it a second time.
  */
-export function probeOracle(binary: string): OracleProbe {
+export function probeOracle(binary: string, checkedVersion?: string): OracleProbe {
   const help = spawnSync(binary, ['--help'], { encoding: 'utf-8', timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
   const debugHelp = spawnSync(binary, ['--debug-help'], { encoding: 'utf-8', timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
   const helpText = `${help.stdout ?? ''}\n${help.stderr ?? ''}\n${debugHelp.stdout ?? ''}\n${debugHelp.stderr ?? ''}`;
   // `--version` is the compatibility authority. A help banner is not a valid
   // substitute: it can omit or embed unrelated version-like strings.
-  const version = probeOracleVersion(binary);
+  const version = checkedVersion ?? probeOracleVersion(binary);
   const ranOk = !help.error && (help.status === 0 || helpText.trim().length > 0);
   const runtimeFlagsAccepted = probeRuntimeFlagAcceptance(binary);
   return {
@@ -411,6 +413,8 @@ interface OracleProcessResult {
   status: number | null;
   signal: NodeJS.Signals | null;
   error?: Error;
+  /** The workload watchdog fired; Oracle may already have submitted the prompt. */
+  timedOut: boolean;
 }
 
 function oracleProcessTreeSupportError(): { code: 'ORACLE_PROCESS_TREE_UNSUPPORTED'; message: string; recovery: string } | undefined {
@@ -465,7 +469,7 @@ function runOracleProcess(
       child.stdout?.destroy();
       child.stderr?.destroy();
     };
-    const settle = (result: OracleProcessResult, destroyPipes = false) => {
+    const settle = (result: Omit<OracleProcessResult, 'timedOut'>, destroyPipes = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
@@ -473,7 +477,7 @@ function runOracleProcess(
       child.removeListener('error', onError);
       child.removeListener('close', onClose);
       if (destroyPipes) stopCollecting();
-      resolveResult(result);
+      resolveResult({ ...result, timedOut });
     };
     const onStdout = (chunk: Buffer | string) => collect(chunk, 'stdout');
     const onStderr = (chunk: Buffer | string) => collect(chunk, 'stderr');
@@ -574,7 +578,7 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
   }
   const oracleBinary = resolution.binary;
   let cachedProbe: OracleProbe | undefined;
-  const probeResolvedOracle = (): OracleProbe => (cachedProbe ??= probeOracle(oracleBinary));
+  const probeResolvedOracle = (): OracleProbe => (cachedProbe ??= probeOracle(oracleBinary, resolvedOracleVersion));
   // The session descriptor and evidence flags exist only in the repo-harness
   // Oracle fork. Without them the real command dies at argument parsing, so it is
   // refused before the browser is ever launched.
@@ -690,8 +694,32 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
     if (historyPath) evidence.conversationCapture = readOracleConversationCapture(historyPath, providerSessionId, oracleHomeDir);
     if (capturePath) evidence.networkCapture = readOracleNetworkCapture(capturePath, providerSessionId, new URL(input.chatgptUrl ?? 'https://chatgpt.com/').origin);
 
-    // Pre/at-start failures are safe to surface as failed; the prompt never landed.
     if (result.error) {
+      // A watchdog timeout can interrupt a run after Oracle submitted the prompt.
+      // Only Oracle's own session metadata proves submission; an allocated session
+      // id alone does not.
+      if (result.timedOut && evidence.promptSubmitted === true) {
+        return {
+          status: 'recoverable',
+          ...evidence,
+          conversationUrl,
+          output: [
+            'Oracle recorded the prompt as submitted before the run timed out.',
+            'Do not re-send the prompt; continue the existing conversation.',
+            `Oracle session: ${providerSessionId}`,
+            log ? `\n[log]\n${log}` : '',
+          ].filter(Boolean).join('\n'),
+          command,
+          oracleBinary: resolution.binary,
+          oracleVersion,
+          error: {
+            code: 'ORACLE_TIMEOUT_AFTER_SUBMIT',
+            message: result.error.message,
+            recovery: 'Reconnect with browser-followup using the saved providerSessionId instead of re-sending the prompt.',
+          },
+        };
+      }
+      // Spawn failures and timeouts without a submission record stay failed.
       return {
         status: 'failed',
         ...evidence,

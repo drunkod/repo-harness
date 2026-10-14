@@ -7,7 +7,7 @@
 
 export const SKILL_SURFACE_CATALOG_VERSION = 2 as const;
 
-export const SKILL_SURFACE_HOSTS = ["claude", "codex"] as const;
+export const SKILL_SURFACE_HOSTS = ["claude", "codex", "pi"] as const;
 export type SkillSurfaceHost = (typeof SKILL_SURFACE_HOSTS)[number];
 
 export const SKILL_SURFACE_PROFILES = ["minimal", "full"] as const;
@@ -19,6 +19,7 @@ export type SkillSurfaceKind = (typeof SKILL_SURFACE_KINDS)[number];
 export const SKILL_SURFACE_DISCOVERABILITIES = [
   "always",
   "profile-facade",
+  "explicit-only",
   "cli-reference",
   "cross-model",
   "explicit-setup",
@@ -29,6 +30,11 @@ export type SkillSurfaceDiscoverability = (typeof SKILL_SURFACE_DISCOVERABILITIE
 export interface SkillSurfaceRetirementCandidate {
   readonly replacement: string | null;
   readonly note: string;
+}
+
+export interface SkillSurfaceRetirementCleanup {
+  readonly actionId: string;
+  readonly historicalFingerprints: readonly string[];
 }
 
 /**
@@ -44,11 +50,14 @@ export interface SkillSurfaceRetiredPackage {
   readonly name: string;
   readonly replacement: string | null;
   readonly note: string;
+  /** Inert ownership proof for the workflow contract's explicit cleanup action. */
+  readonly cleanup?: readonly SkillSurfaceRetirementCleanup[];
 }
 
 export interface SkillSurfacePackage {
   readonly name: string;
   readonly kind: SkillSurfaceKind;
+  readonly audience: "bot" | "worker";
   readonly source: string | null;
   /** Upstream package spec (e.g. "tw93/Waza") for kind:"external" packages fetched via `bunx skills add`; null otherwise. */
   readonly provider: string | null;
@@ -67,6 +76,7 @@ export interface SkillSurfacePackage {
 export interface SkillSurfaceHostPlacements {
   readonly claude: readonly string[];
   readonly codex: readonly string[];
+  readonly pi: readonly string[];
 }
 
 export interface SkillSurfaceExpectedProjections {
@@ -218,17 +228,13 @@ function computeHostSkillPlacements(
   packages: readonly SkillSurfacePackage[],
   profile: SkillSurfaceProfile | undefined,
 ): SkillSurfaceHostPlacements {
-  const claude: string[] = [];
-  const codex: string[] = [];
+  const placements: Record<SkillSurfaceHost, string[]> = { claude: [], codex: [], pi: [] };
   for (const pkg of packages) {
     if (pkg.kind !== "provider-skill") continue;
     if (profile !== undefined && !pkg.profiles.includes(profile)) continue;
-    for (const host of pkg.hosts) {
-      if (host === "claude") claude.push(pkg.name);
-      else if (host === "codex") codex.push(pkg.name);
-    }
+    for (const host of pkg.hosts) placements[host].push(pkg.name);
   }
-  return { claude, codex };
+  return placements;
 }
 
 function computeExternalSkillsForProfile(
@@ -339,6 +345,10 @@ function validatePackage(
     ));
   }
 
+  if (raw.audience !== "bot" && raw.audience !== "worker") {
+    diagnostics.push(diagnostic("FIELD_REQUIRED", `${basePath}.audience`, `${name}: audience must be bot or worker`));
+  }
+
   let retirementCandidate: SkillSurfaceRetirementCandidate | null = null;
   if (raw.retirementCandidate !== null && raw.retirementCandidate !== undefined) {
     if (!isRecord(raw.retirementCandidate)) {
@@ -372,6 +382,7 @@ function validatePackage(
 
   return {
     name,
+    audience: raw.audience as SkillSurfacePackage["audience"],
     kind: (raw.kind as SkillSurfaceKind) ?? "facade",
     source: (raw.source as string | null) ?? null,
     provider: typeof raw.provider === "string" ? raw.provider : null,
@@ -447,18 +458,20 @@ function validateExpectedProjections(
     if (
       !isRecord(hostPlacement) ||
       !isStringArray(hostPlacement.claude) ||
-      !isStringArray(hostPlacement.codex)
+      !isStringArray(hostPlacement.codex) ||
+      !isStringArray(hostPlacement.pi)
     ) {
       diagnostics.push(diagnostic(
         "EXPECTED_PROJECTIONS_REQUIRED",
         `expectedProjections.hostSkillPlacementsByProfile.${profile}`,
-        `expectedProjections.hostSkillPlacementsByProfile.${profile} must have claude and codex string arrays`,
+        `expectedProjections.hostSkillPlacementsByProfile.${profile} must have claude, codex and pi string arrays`,
       ));
       shapeOk = false;
     } else {
       hostSkillPlacementsByProfile[profile] = {
         claude: hostPlacement.claude as string[],
         codex: hostPlacement.codex as string[],
+        pi: hostPlacement.pi as string[],
       };
     }
   }
@@ -516,7 +529,27 @@ function validateRetiredPackages(
       ));
       continue;
     }
-    entries.push({ name, replacement: replacement as string | null, note });
+    let cleanup: SkillSurfaceRetirementCleanup[] | undefined;
+    if (rawEntry.cleanup !== undefined) {
+      if (!/^[a-z0-9][a-z0-9_-]*$/.test(name) || !Array.isArray(rawEntry.cleanup) || rawEntry.cleanup.length === 0) {
+        diagnostics.push(diagnostic("FIELD_REQUIRED", `${basePath}.cleanup`, `${name}: cleanup requires a safe package name and a non-empty array`));
+        continue;
+      }
+      cleanup = [];
+      const actionIds = new Set<string>();
+      for (const [cleanupIndex, item] of rawEntry.cleanup.entries()) {
+        const path = `${basePath}.cleanup[${cleanupIndex}]`;
+        if (!isRecord(item) || typeof item.actionId !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(item.actionId)
+          || actionIds.has(item.actionId) || !isStringArray(item.historicalFingerprints)
+          || item.historicalFingerprints.length === 0 || item.historicalFingerprints.some((hash) => !/^sha256:[0-9a-f]{64}$/.test(hash))) {
+          diagnostics.push(diagnostic("FIELD_REQUIRED", path, `${name}: cleanup requires a unique action id and exact SHA-256 fingerprints`));
+          continue;
+        }
+        actionIds.add(item.actionId);
+        cleanup.push({ actionId: item.actionId, historicalFingerprints: item.historicalFingerprints });
+      }
+    }
+    entries.push({ name, replacement: replacement as string | null, note, ...(cleanup === undefined ? {} : { cleanup }) });
   }
   return entries;
 }
@@ -549,6 +582,10 @@ export function validateSkillSurfaceCatalogValue(
 
   const diagnostics: SkillSurfaceCatalogDiagnostic[] = [];
   const packages: SkillSurfacePackage[] = [];
+  // Invalid entries are dropped, so `packages` positions differ from input
+  // positions. `names` holds positions in `packages`; diagnostics use
+  // `sourceIndexes` to name the input entry.
+  const sourceIndexes: number[] = [];
   const names = new Map<string, number>();
   const sources = new Map<string, number>();
 
@@ -556,6 +593,7 @@ export function validateSkillSurfaceCatalogValue(
     const pkg = validatePackage(rawPackage, index, diagnostics);
     if (!pkg) continue;
     packages.push(pkg);
+    sourceIndexes.push(index);
 
     if (pkg.name !== "(unknown)") {
       const previous = names.get(pkg.name);
@@ -566,7 +604,7 @@ export function validateSkillSurfaceCatalogValue(
           `duplicate package name: ${pkg.name}`,
         ));
       } else {
-        names.set(pkg.name, index);
+        names.set(pkg.name, packages.length - 1);
       }
     }
     if (pkg.source !== null) {
@@ -584,7 +622,8 @@ export function validateSkillSurfaceCatalogValue(
   }
 
   if (options.profileComponents) {
-    for (const [index, pkg] of packages.entries()) {
+    for (const [position, pkg] of packages.entries()) {
+      const index = sourceIndexes[position];
       for (const profile of pkg.profiles) {
         const allowed = options.profileComponents[profile];
         if (allowed && !allowed.includes(pkg.component)) {
@@ -598,7 +637,8 @@ export function validateSkillSurfaceCatalogValue(
     }
   }
 
-  for (const [index, pkg] of packages.entries()) {
+  for (const [position, pkg] of packages.entries()) {
+    const index = sourceIndexes[position];
     const seenRequirements = new Set<string>();
     for (const [requirementIndex, requirement] of pkg.requires.entries()) {
       const requirementPath = `packages[${index}].requires[${requirementIndex}]`;
@@ -679,7 +719,7 @@ export function validateSkillSurfaceCatalogValue(
         reportedCycles.add(key);
         diagnostics.push(diagnostic(
           "CYCLIC_REQUIREMENT",
-          `packages[${names.get(name) ?? 0}].requires`,
+          `packages[${sourceIndexes[names.get(name) ?? 0]}].requires`,
           `dependency cycle: ${cycle.join(" -> ")}`,
         ));
       }
@@ -697,7 +737,8 @@ export function validateSkillSurfaceCatalogValue(
   for (const name of names.keys()) visitRequirements(name, []);
 
   if (options.exists) {
-    for (const [index, pkg] of packages.entries()) {
+    for (const [position, pkg] of packages.entries()) {
+      const index = sourceIndexes[position];
       if (pkg.source !== null && !options.exists(pkg.source)) {
         diagnostics.push(diagnostic(
           "SOURCE_MISSING",
@@ -737,13 +778,12 @@ export function validateSkillSurfaceCatalogValue(
       const declaredHosts = expectedProjections.hostSkillPlacementsByProfile[profile];
       const computedHosts = computeHostSkillPlacements(packages, profile);
       if (
-        !arraysEqual(declaredHosts.claude, computedHosts.claude) ||
-        !arraysEqual(declaredHosts.codex, computedHosts.codex)
+        SKILL_SURFACE_HOSTS.some(host => !arraysEqual(declaredHosts[host], computedHosts[host]))
       ) {
         diagnostics.push(diagnostic(
           "PROJECTION_MISMATCH",
           `expectedProjections.hostSkillPlacementsByProfile.${profile}`,
-          `hostSkillPlacementsByProfile.${profile} declared claude=[${declaredHosts.claude.join(", ")}] codex=[${declaredHosts.codex.join(", ")}] but packages compute claude=[${computedHosts.claude.join(", ")}] codex=[${computedHosts.codex.join(", ")}]`,
+          `hostSkillPlacementsByProfile.${profile} declared ${JSON.stringify(declaredHosts)} but packages compute ${JSON.stringify(computedHosts)}`,
         ));
       }
     }

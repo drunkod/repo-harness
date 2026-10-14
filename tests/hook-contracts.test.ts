@@ -80,11 +80,15 @@ describe("Hook contracts", () => {
     expect(script).toContain("deploy/");
   });
 
-  test("mutation-guard handler should be warning-first with marker-based worktree enforcement", () => {
+  test("mutation-guard preserves private path fences and treats workflow scope as advice", () => {
     const script = read("src/cli/hook/mutation-guard.ts");
-    expect(script).toContain(".claude/.require-worktree");
-    expect(script).toContain("Warning: primary working tree detected");
-    expect(script).toContain("Mutation blocked");
+    expect(script).toContain("canonicalRepoRelativePath");
+    expect(script).toContain("RepoScopeGuard");
+    expect(script).toContain("OpsPrivateGuard");
+    expect(script).toContain("ExternalReferenceGuard");
+    expect(script).toContain("[ContractScopeGuard] Advisory:");
+    expect(script).toContain("[WorkflowObservation]");
+    expect(script).not.toContain(".claude/.require-worktree");
   });
 
   test("typed trace observer keeps trace, CodeGraph session state, and plan annotation without budget probes", () => {
@@ -104,14 +108,14 @@ describe("Hook contracts", () => {
     const handler = read("src/cli/hook/subagent-handler.ts");
     expect(handler).toContain("[repo-harness:return-channel]");
     expect(handler).toContain("updatedInput");
-    expect(handler).toContain("permissionDecision: 'deny'");
+    expect(handler).toContain("permissionDecision: 'allow'");
     expect(handler).toContain("/(delegate|parallel)");
     expect(handler).toContain("max_agents");
     expect(handler).toContain("max_depth");
     expect(handler).toContain("permission only");
     expect(handler).toContain("[repo-harness:subagent-context]");
-    expect(handler).toContain("[SubagentQualityGate]");
-    expect(handler).toContain("last_blocked_hash");
+    expect(handler).toContain("[SubagentQuality]");
+    expect(handler).toContain("Record the report gap");
   });
 
   test("delegation requires an explicit slash command and has no standing authorization", () => {
@@ -125,38 +129,16 @@ describe("Hook contracts", () => {
     expect(sessionStart).not.toContain("effectiveDelegationMode");
   });
 
-  test("typed prompt handler keeps route hints, gates, acceptance, and circuit rendering", () => {
+  test("typed prompt handler gives bounded advice without automatic workflow gates", () => {
     const script = read("src/cli/hook/prompt-handler.ts");
-    expect(script).toContain("[WazaRoute]");
-    expect(script).toContain("Waza /check");
-    expect(script).toContain("Waza /health");
-    expect(script).toContain("Waza /think");
-    expect(script).toContain("[AgenticDevRoute]");
-    expect(script).toContain("execute continuation via Effective State after user authorization");
-    expect(script).toContain("hook will not plan or create assets");
-    expect(script).not.toContain("Waza /hunt");
-    expect(script).not.toContain("Waza /learn");
-    expect(script).toContain("ResearchGuard");
-    expect(script).toContain("AnnotationGuard");
-    expect(script).toContain("PlanStatusGuard");
-    expect(script).toContain("PlanDiscussionGate");
-    expect(script).toContain("writePendingOrchestration");
-    expect(script).toContain("ContractGuard");
-    expect(script).toContain("ResearchGate");
-    expect(script).toContain("done");
-    expect(script).toContain("'run', 'acceptance-receipt', 'verify'");
-    expect(script).toContain("[ExternalAcceptance]");
-    expect(script).toContain("AcceptanceReceipt");
-    expect(script).toContain("[CrossReview]");
-    expect(script).toContain("kind: 'cross-model-consult'");
-    expect(script).toContain("guard: 'CrossModelLimit'");
-    expect(script).toContain("kind: 'review'");
-    expect(script).toContain("guard: 'ReviewLimit'");
-    expect(script).not.toContain("📋");
-    expect(script).not.toContain("🧠");
-    expect(script).not.toContain("📎");
-    expect(script).not.toContain("is_implement_intent");
-    expect(script).not.toContain("prompt_guard_decide_fallback");
+    for (const advice of ["[ReviewAdvice]", "[DiagnosisAdvice]", "[PlanningAdvice]", "[OperationBoundaries]", "[WorkflowObservation]"]) {
+      expect(script).toContain(advice);
+    }
+    expect(script).toContain("routePromptExplicitFirst");
+    expect(script).toContain("no plan, receipt or archive step is required");
+    expect(script).not.toContain("writePendingOrchestration");
+    expect(script).not.toContain("ContractGuard");
+    expect(script).not.toContain("acceptance-receipt");
   });
 
   test("prompt intent classifier owns Chinese bug/feature keywords with Unicode semantics", () => {
@@ -212,11 +194,11 @@ describe("Hook contracts", () => {
 
   test("in-process stop handler should own Stop JSON control and recovery projection", () => {
     const handler = read("src/cli/hook/stop-handler.ts");
-    expect(handler).toContain("PlanCompletenessGate");
+    expect(handler).toContain("[StopReadiness]");
     expect(handler).toContain("last_assistant_message");
     expect(handler).toContain("stop_hook_active");
     expect(handler).toContain("StopProjectionBatch");
-    expect(handler).toContain("decision: 'block'");
+    expect(handler).toContain("Stop may continue");
     expect(handler).toContain("getStopEffectiveState");
   });
 
@@ -231,22 +213,18 @@ describe("Hook contracts", () => {
   // HRD-05: post-edit-guard.sh's per-edit task-handoff regeneration
   // ("[TaskHandoff]") is retired -- deferred to Stop's existing unconditional
   // handoff refresh instead of reprinted per edit -- so that assertion does
-  // not carry over. architecture-queue/context-contract-sync move from a
-  // synchronous `run_repo_harness_helper` call to deferred Stop-time
-  // consumption (`runRepoHarnessHelper`, same helper names as CLI args).
-  test("mutation-observed should combine doc drift and deferred contract/architecture dirty bits", () => {
+  // not carry over. Edits never start architecture queue work.
+  test("mutation-observed preserves doc drift and disables automatic contract verification", () => {
     const script = read("src/cli/hook/mutation-observed.ts");
     expect(script).toContain("[DocDrift]");
     expect(script).toContain("[DeployAsset]");
-    expect(script).toContain("'architecture-queue'");
-    expect(script).toContain("'context-contract-sync'");
+    expect(script).not.toContain("'architecture-queue'");
     expect(script).not.toContain("sync-brain-docs");
-    expect(read("assets/templates/helpers/archive-architecture-request.sh")).toContain("[ArchitectureArchive]");
     expect(read("assets/templates/helpers/workstream-sync.sh")).toContain("tasks/workstreams");
     expect(script).toContain("tasks/todos.md");
-    expect(script).toContain("'verification-plan'");
-    expect(script).toContain("'evaluate'");
-    expect(script).toContain("contract_references_path");
+    expect(script).toContain("'contract-verification': false");
+    expect(script).toContain("capability: false");
+    expect(script).toContain("context: true");
   });
 
   test("workflow verification should not gate on external brain vault state", () => {
@@ -255,35 +233,6 @@ describe("Hook contracts", () => {
     expect(script).not.toContain('run_optional_helper "sync-brain-docs.sh"');
     expect(script).not.toContain("Brain doc sync check failed");
   });
-
-  test("architecture drift helpers should keep detection and context sync separated", () => {
-    const eventHelper = read("assets/templates/helpers/architecture-event.ts");
-    const drift = read("assets/templates/helpers/architecture-queue.sh");
-    const sync = read("assets/templates/helpers/context-contract-sync.sh");
-    const workstream = read("assets/templates/helpers/workstream-sync.sh");
-
-    expect(eventHelper).toContain("sync-context-map");
-    expect(eventHelper).toContain("sync-contract-files");
-    expect(eventHelper).toContain("event-json");
-    expect(drift).toContain("docs/architecture/requests");
-    expect(drift).toContain("architecture-event.ts");
-    expect(drift).toContain(".ai/harness/architecture/events.jsonl");
-    expect(eventHelper).toContain("repo-harness run workstream-sync");
-    expect(drift).not.toContain("BEGIN ARCHITECTURE CONTRACT");
-    expect(sync).toContain("architecture-event.ts");
-    expect(sync).toContain("BEGIN ARCHITECTURE CONTRACT");
-    expect(sync).toContain("Active Workstreams");
-    expect(sync).toContain("discoverable_contexts");
-    expect(sync).toContain("Semantic diagram source");
-    expect(sync).not.toContain("Latest human diagram");
-    expect(sync).not.toContain("docs/architecture/diagrams");
-    expect(eventHelper).toContain("Mermaid fenced block");
-    expect(eventHelper).toContain("only architecture diagram artifact");
-    expect(eventHelper).not.toContain("architecture HTML");
-    expect(workstream).toContain("tasks/workstreams");
-    expect(workstream).toContain("context-contract-sync.sh");
-  });
-
 
   test("mutation observer owns first-principles anti-overengineering advice in-process", () => {
     const observer = read("src/cli/hook/mutation-observed.ts");

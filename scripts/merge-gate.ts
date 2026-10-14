@@ -7,9 +7,10 @@ import { dirname, isAbsolute, join } from 'path';
 import { fileURLToPath } from 'url';
 import { acceptanceReceiptPath, resolveProtectedGitRuntime } from './acceptance-receipt';
 import { collectPullRequestMergeReadiness } from '../src/effects/publication/merge-readiness';
+import { resolveTrustedGhExecutable } from '../src/effects/runtime/protected-helper-platform';
 
 type OutputFormat = 'json' | 'sha' | 'required';
-type Candidate = { baseSha: string; headSha: string; diff: Buffer; diffFingerprint: string; changedFiles: string[] };
+export type Candidate = { baseSha: string; headSha: string; diff: Buffer; diffFingerprint: string; changedFiles: string[] };
 type Seal = { protocol: 2; kind: 'repo-harness-merge-seal'; repository_root: string; base_ref: string; base_sha: string; head_sha: string; diff_fingerprint: string; helper_fingerprint: string; pr_number: number; sealed_at: string };
 function lockedGitEnv(): NodeJS.ProcessEnv { return { ...resolveProtectedGitRuntime().env }; }
 
@@ -98,7 +99,7 @@ function runGit(root: string, args: string[], binary = false, required = true) {
   });
   if (required && result.status !== 0) {
     const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf-8") : result.stderr;
-    fail(`git ${args.join(" ")} failed: ${(stderr ?? "").trim()}`);
+    throw new Error(`git ${args.join(" ")} failed: ${(stderr ?? "").trim()}`);
   }
   return result;
 }
@@ -160,7 +161,7 @@ function parseArgs(argv: string[]): { command: 'run' | 'verify' | 'fingerprint';
   return { command: command as 'run' | 'verify' | 'fingerprint', base, format };
 }
 
-function candidate(root: string, baseRef: string): Candidate {
+export function candidate(root: string, baseRef: string): Candidate {
   const baseSha = gitText(root, ["rev-parse", "--verify", `${baseRef}^{commit}`]);
   const headSha = gitText(root, ["rev-parse", "--verify", "HEAD^{commit}"]);
   gitText(root, ["merge-base", baseSha, headSha]);
@@ -191,10 +192,10 @@ function requireHostOwnedDirectory(path: string, label: string): void {
   if ((stat.mode & 0o022) !== 0) fail(`${label} must not be group- or world-writable`);
 }
 
-function helperFingerprint(root: string): string {
+export function helperFingerprint(root: string): string {
   const helper = realpathSync(fileURLToPath(import.meta.url));
   if (pathIsInside(root, helper)) {
-    fail("merge gate must run from the installed repo-harness helper runtime, not the candidate repository");
+    throw new Error("merge gate must run from the installed repo-harness helper runtime, not the candidate repository");
   }
   return sha256(readFileSync(helper));
 }
@@ -239,15 +240,24 @@ function writeSeal(path: string, seal: Seal): void {
 }
 
 function requireChecks(root: string, current: Candidate): number {
-  const result = spawnSync('gh', ['pr', 'view', '--json', 'number'], {
+  const ghBin = resolveTrustedGhExecutable();
+  if (!ghBin) fail('trusted GitHub CLI executable unavailable; no merge authorized');
+  const runGh = (args: readonly string[]) => spawnSync(ghBin, [...args], {
     cwd: root, env: lockedGitEnv(), encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
   });
+  const result = runGh(['pr', 'view', '--json', 'number']);
   if (result.error || result.status !== 0) fail('GitHub PR readback unavailable; no merge authorized');
   let value: unknown;
   try { value = JSON.parse(result.stdout); } catch { fail('invalid GitHub PR readback'); }
   if (!isRecord(value) || !Number.isSafeInteger(value.number) || Number(value.number) < 1) fail('invalid GitHub PR identity');
   const number = Number(value.number);
-  const readiness = collectPullRequestMergeReadiness({ repo_root: root, pr_number: number,
+  const readiness = collectPullRequestMergeReadiness({ repo_root: root, pr_number: number, gh_bin: ghBin,
+    // Keep every provider query on the same binary and cleared caller environment.
+    gh_runner: args => {
+      const observed = runGh(args);
+      return { status: observed.status ?? -1, stdout: observed.stdout ?? '',
+        stderr: observed.stderr || observed.error?.message };
+    },
     expected_head_sha: current.headSha, expected_base_sha: current.baseSha });
   if (!readiness.ready) fail(`automatic merge checks refuse candidate: ${readiness.blockers.map(b => b.code).join(', ')}`);
   const after = candidate(root, current.baseSha);
@@ -269,6 +279,7 @@ function readSeal(path: string): Seal {
 }
 
 export async function runMergeGateCli(argv: string[], authorityHome = osAccountHome()): Promise<void> {
+  try {
   const args = parseArgs(argv); const root = repositoryRoot(); const current = candidate(root, args.base);
   const required = true;
   if (args.command === 'fingerprint') { requireLeakFreeCandidate(current); printResult(args.format, required, current); return; }
@@ -288,5 +299,8 @@ export async function runMergeGateCli(argv: string[], authorityHome = osAccountH
       || seal.head_sha !== current.headSha || seal.diff_fingerprint !== current.diffFingerprint
       || seal.helper_fingerprint !== helper || seal.pr_number !== number) fail('merge seal is stale or belongs to another candidate');
   printResult(args.format, true, current);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
 }
 if (import.meta.main) await runMergeGateCli(process.argv.slice(2));

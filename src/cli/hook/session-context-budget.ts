@@ -8,9 +8,6 @@ const EVIDENCE_PATH = '.ai/harness/state/session-context-budget.json';
 export const SESSION_CONTEXT_PROVIDER_IDS = [
   'effective-state',
   'resume',
-  'capability-context-pending',
-  'architecture-queue-pending',
-  'architecture-model-guidance',
   'pending-plan-capture',
   'current-status-snapshot',
   'active-sprint',
@@ -38,6 +35,8 @@ export interface SessionContextSection {
   readonly mandatory: boolean;
   readonly actionable: boolean;
   readonly reference?: string;
+  /** Runs only after the host output includes this section verbatim. */
+  readonly onDelivered?: () => void;
 }
 
 export interface SessionContextBudgetEvidence {

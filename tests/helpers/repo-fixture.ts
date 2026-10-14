@@ -1,6 +1,6 @@
 import { afterAll, expect } from "bun:test";
 import { spawnSync } from "child_process";
-import { appendFileSync, chmodSync, cpSync, mkdtempSync, realpathSync, rmSync, linkSync, writeFileSync } from "fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, linkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 
@@ -58,7 +58,7 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
  * The snapshot is restored into the workspace directories the fixture already
  * owns, never copied to a fresh path: `repoHarnessRepoIdFor` hashes the
  * repository root verbatim, so the sealed authorization, registry entry,
- * campaign intent and publication recorded inside a fixture are all bound to
+ * task intent and publication recorded inside a fixture are all bound to
  * that exact path. Restoring in place therefore keeps the returned value valid
  * while giving each caller unshared bytes, which is the same isolation a rebuild
  * provides.
@@ -117,6 +117,16 @@ export function fixtureTemplate(
       templates.clear();
     },
   };
+}
+
+export function copyPackageRuntimeFixture(sourceRoot: string, destination: string): void {
+  const manifest = JSON.parse(readFileSync(join(sourceRoot, 'package.json'), 'utf8')) as { files: string[] };
+  mkdirSync(destination, { recursive: true });
+  // Match the package boundary. Local state, tests and unlisted docs are not runtime inputs.
+  for (const path of ['package.json', ...manifest.files]) {
+    const source = join(sourceRoot, path);
+    if (existsSync(source)) cpSync(source, join(destination, path), { recursive: true, verbatimSymlinks: true });
+  }
 }
 
 export function sandboxEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

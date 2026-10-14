@@ -16,6 +16,9 @@ import { inspectRepo } from "../scripts/inspect-project-state";
 import { planAdoption } from "../src/core/adoption/plan";
 import { applyAdoptionPlan } from "../src/effects/fs-transaction";
 import { loadWorkflowContract } from "../scripts/workflow-contract";
+import { renderWorkflowContractMarker } from "../src/core/adoption/workflow-contract-asset";
+import { captureGitVirtualTreeSnapshot } from "../src/effects/evidence/verification-execution";
+import { hashManagedTree } from "../src/cli/installer/install-profile";
 
 const ROOT = join(import.meta.dir, "..");
 
@@ -52,10 +55,10 @@ describe("workflow contract manifest", () => {
     expect(contract.helpers.scripts).toContain("cutover-closure.ts");
   });
 
-  test("self-hosted runtime manifest should match the asset contract", () => {
-    const asset = readFileSync(join(ROOT, "assets/workflow-contract.v1.json"), "utf-8");
+  test("self-hosted opt-in marker matches the renderer and the protocol", () => {
     const runtime = readFileSync(join(ROOT, ".ai/harness/workflow-contract.json"), "utf-8");
-    expect(runtime).toBe(asset);
+    expect(runtime).toBe(renderWorkflowContractMarker());
+    expect(JSON.parse(runtime)).toEqual({ kind: "repo-harness.workflow-contract-marker", protocol: 1 });
   });
 
   test("hook asset files should stay in projection parity with self-hosted .ai/hooks", () => {
@@ -102,11 +105,11 @@ describe("workflow contract manifest", () => {
     expect(contract.helpers.scripts).toContain("switch-plan.sh");
     expect(contract.helpers.scripts).not.toContain("context-budget.ts");
     expect(contract.helpers.scripts).toContain("capability-resolver.ts");
-    expect(contract.helpers.scripts).toContain("architecture-event.ts");
+    expect(contract.helpers.scripts).not.toContain("architecture-event.ts");
     expect(contract.helpers.scripts).toContain("capability-config.ts");
-    expect(contract.helpers.scripts).toContain("architecture-queue.sh");
-    expect(contract.helpers.scripts).toContain("archive-architecture-request.sh");
-    expect(contract.helpers.scripts).toContain("context-contract-sync.sh");
+    expect(contract.helpers.scripts).not.toContain("architecture-queue.sh");
+    expect(contract.helpers.scripts).not.toContain("archive-architecture-request.sh");
+    expect(contract.helpers.scripts).not.toContain("context-contract-sync.sh");
     expect(contract.helpers.scripts).toContain("workstream-sync.sh");
     expect(contract.helpers.scripts).toContain("refresh-current-status.sh");
     expect(contract.helpers.scripts).toContain("prepare-codex-handoff.sh");
@@ -115,7 +118,7 @@ describe("workflow contract manifest", () => {
     expect(contract.helpers.scripts).toContain("check-brain-manifest.sh");
     expect(contract.helpers.scripts).toContain("sync-brain-docs.sh");
     expect(contract.helpers.scripts).toContain("check-deploy-sql-order.sh");
-    expect(contract.helpers.scripts).toContain("check-architecture-sync.sh");
+    expect(contract.helpers.scripts).not.toContain("check-architecture-sync.sh");
     expect(contract.helpers.scripts).toContain("install-agent-fleet.sh");
     expect(contract.externalTooling?.waza?.primaryHost).toBe("codex");
     expect(contract.externalTooling?.waza?.managedSkills).toContain("think");
@@ -185,8 +188,8 @@ describe("workflow contract manifest", () => {
     expect(contract.artifacts.runtimeFiles).not.toContain(".ai/harness/context-budget/latest.json");
     expect(contract.artifacts.runtimeFiles).toContain(".ai/harness/capability-context/");
     expect(contract.artifacts.runtimeFiles).toContain(".ai/harness/planning/");
-    expect(contract.artifacts.runtimeFiles).toContain(".ai/harness/checks/latest.json");
-    expect(contract.artifacts.runtimeFiles).toContain(".ai/harness/architecture/events.jsonl");
+    expect(contract.artifacts.runtimeFiles).not.toContain(".ai/harness/checks/latest.json");
+    expect(contract.artifacts.runtimeFiles).not.toContain(".ai/harness/architecture/events.jsonl");
     expect(contract.artifacts.runtimeFiles).toContain(".ai/harness/active-plan");
     expect(contract.artifacts.runtimeFiles).toContain(".ai/harness/active-worktree");
     expect(contract.artifacts.runtimeFiles).toContain(".ai/harness/worktrees/");
@@ -206,6 +209,11 @@ describe("workflow contract manifest", () => {
     expect(legacyRootHelpers?.cleanupMode).toBe("generated_helper");
     expect(legacyRootHelpers?.paths).toContain("scripts/architecture-drift.sh");
     expect(legacyRootHelpers?.paths).toContain("scripts/check-task-workflow.sh");
+    expect(legacyRootHelpers?.paths).toContain("scripts/architecture-queue.sh");
+    const queueScaffold = contract.migrations.upgrade?.actions.find((action) => action.id === "architecture-request-queue-scaffold");
+    expect(queueScaffold?.action).toBe("remove");
+    expect(queueScaffold?.cleanupMode).toBe("exact_fingerprint");
+    expect(queueScaffold?.paths).toEqual([".ai/harness/architecture/.gitkeep", ".ai/harness/architecture/events.jsonl", "docs/architecture/requests/.gitkeep"]);
   });
 
   test("helper descriptions should cover the helper inventory 1:1 with non-empty text", () => {
@@ -285,10 +293,80 @@ describe("workflow contract manifest", () => {
     }
   });
 
+
+  test("live runtime caches remain ignored and excluded from installed copies", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "runtime-cache-preservation-"));
+    const source = join(workspace, "source");
+    const destination = join(workspace, "installed");
+    const ownedDestination = join(workspace, "owned-installed");
+    const home = join(workspace, "home");
+    const oldRuntime = ".ai/harness/checks/latest.json";
+    const unownedCache = ".ai/harness/checks/unowned-cache.json";
+    const oldRuntimeBytes = '{"history":"retained private runtime bytes"}\n';
+    const caches = [
+      "change-assessment.latest.json", "minimal-change.latest.json", "post-bash-latest.json",
+      "contract-verify.latest.json", "runtime-evidence-release.latest.json",
+    ].map((name) => `.ai/harness/checks/${name}`);
+    try {
+      mkdirSync(join(source, ".ai/harness/checks"), { recursive: true });
+      mkdirSync(destination);
+      mkdirSync(home);
+      writeFileSync(join(source, ".gitignore"), readFileSync(join(ROOT, "assets/templates/runtime.gitignore")));
+      expect(spawnSync("git", ["init", "-q"], { cwd: source }).status).toBe(0);
+      for (const cache of caches) {
+        writeFileSync(join(source, cache), "private runtime cache fixture\n");
+        expect(spawnSync("git", ["check-ignore", "--no-index", "--", cache], { cwd: source }).status).toBe(0);
+      }
+      writeFileSync(join(source, oldRuntime), oldRuntimeBytes);
+      writeFileSync(join(source, unownedCache), "private cache without a registered writer\n");
+      for (const cache of [oldRuntime, unownedCache]) {
+        expect(spawnSync("git", ["check-ignore", "--no-index", "--", cache], { cwd: source }).status).toBe(0);
+      }
+      const status = spawnSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: source, encoding: "utf8" });
+      expect(status.status).toBe(0);
+      expect(status.stdout).not.toContain(oldRuntime);
+      expect(status.stdout).not.toContain(unownedCache);
+      const snapshot = captureGitVirtualTreeSnapshot(source);
+      writeFileSync(join(source, unownedCache), "changed private cache bytes\n");
+      expect(captureGitVirtualTreeSnapshot(source).snapshot_hash).toBe(snapshot.snapshot_hash);
+      const contract = JSON.parse(readFileSync(join(ROOT, "assets/workflow-contract.v1.json"), "utf8")) as { installedCopyExcludes: string[] };
+      const copied = spawnSync("rsync", ["-a", ...contract.installedCopyExcludes.map((pattern) => `--exclude=${pattern}`), `${source}/`, `${destination}/`], { encoding: "utf8" });
+      expect(copied.status).toBe(0);
+      expect(copied.stderr).toBe("");
+      for (const cache of caches) expect(existsSync(join(destination, cache))).toBe(false);
+      expect(existsSync(join(destination, ".gitignore"))).toBe(true);
+      for (const cache of [oldRuntime, unownedCache]) expect(existsSync(join(destination, cache))).toBe(false);
+      const ownedCopy = spawnSync("bash", [join(ROOT, "scripts/sync-codex-installed-copies.sh"), "--stage-owned-copy", source, ownedDestination, "canonical-skill"], {
+        cwd: ROOT,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: home,
+          TMPDIR: tmpdir(),
+          BUN_INSTALL: join(home, ".bun"),
+          CODEX_SKILLS_ROOT: join(home, ".codex/skills"),
+          CLAUDE_SKILLS_ROOT: join(home, ".claude/skills"),
+          AGENTIC_DEV_SOURCE_ROOT: ROOT,
+          AGENTIC_DEV_LINK_INSTALLED_COPIES: "0",
+          REPO_HARNESS_INSTALL_PROFILE: "minimal",
+        },
+      });
+      expect(ownedCopy.status, ownedCopy.stdout + ownedCopy.stderr).toBe(0);
+      for (const cache of [...caches, oldRuntime, unownedCache]) expect(existsSync(join(ownedDestination, cache))).toBe(false);
+      const marker = JSON.parse(readFileSync(join(ownedDestination, ".repo-harness-owner.json"), "utf8"));
+      expect(marker.owner).toBe("repo-harness");
+      expect(marker.content_hash).toBe(hashManagedTree(ownedDestination));
+      expect(readFileSync(join(source, oldRuntime), "utf8")).toBe(oldRuntimeBytes);
+      expect(readFileSync(join(source, unownedCache), "utf8")).toBe("changed private cache bytes\n");
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   test("runtime harness artifacts should be ignored local state, not tracked deliverables", () => {
     const contract = loadWorkflowContract(join(ROOT, "assets/workflow-contract.v1.json"));
     const runtimeFiles = contract.artifacts.runtimeFiles ?? [];
-    expect(runtimeFiles).toContain(".ai/harness/checks/latest.json");
+    expect(runtimeFiles).not.toContain(".ai/harness/checks/latest.json");
     expect(runtimeFiles).toContain(".ai/harness/evidence/");
     expect(runtimeFiles).toContain(".ai/harness/active-plan");
     expect(runtimeFiles).toContain(".ai/harness/active-worktree");
@@ -318,7 +396,7 @@ describe("workflow contract manifest", () => {
     expect(gitignore).toContain("tasks/.current.md.tmp.*");
     expect(gitignore).toContain("tasks/current.md");
     expect(gitignore).toContain(".claude/.plan-state/");
-    expect(gitignore).toContain(".ai/harness/checks/latest.json");
+    expect(gitignore).not.toContain(".ai/harness/checks/latest.json");
     expect(gitignore).toContain(".ai/harness/evidence/");
     expect(gitignore).toContain(".ai/harness/state/");
     expect(gitignore).toContain(".ai/harness/checks/*.latest.json");
@@ -338,6 +416,34 @@ describe("workflow contract manifest", () => {
 });
 
 describe("state inspection and legacy doc migration", () => {
+  test("inspector uses the package contract regardless of repo marker content", () => {
+    const repo = mkdtempSync(join(tmpdir(), "inspect-project-state-marker-"));
+    try {
+      mkdirSync(join(repo, ".ai", "harness"), { recursive: true });
+      mkdirSync(join(repo, "docs"), { recursive: true });
+      writeFileSync(join(repo, "docs", "TODO.md"), "- [ ] legacy task\n");
+      const markerPath = join(repo, ".ai", "harness", "workflow-contract.json");
+      const missing = inspectRepo(repo);
+      expect(missing.drift_signals).toContain("missing-runtime-contract-manifest");
+      expect(missing.upgrade_plan.map((item) => item.id)).toContain("runtime-contract-refresh");
+
+      writeFileSync(markerPath, renderWorkflowContractMarker());
+      const expected = inspectRepo(repo);
+      expect(expected.drift_signals).not.toContain("missing-runtime-contract-manifest");
+      expect(expected.upgrade_plan.map((item) => item.id)).toContain("legacy-docs-todo");
+      for (const content of [
+        readFileSync(join(ROOT, "tests/fixtures/adoption/workflow-contract-v0.19.5.json"), "utf8"),
+        "{}\n",
+        "{broken\n",
+      ]) {
+        writeFileSync(markerPath, content);
+        expect(inspectRepo(repo)).toEqual(expected);
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   test("inspector should classify pre-tasks-first drift", () => {
     const repo = mkdtempSync(join(tmpdir(), "inspect-project-state-"));
 

@@ -1,4 +1,3 @@
-import { recordArtifactRepair } from '../../effects/state/artifact-repair-store';
 import { Command } from 'commander';
 import {
   ATTEMPT_OUTCOME_VALUES,
@@ -22,7 +21,7 @@ import {
 import { resolveBoard } from '../../effects/state/resolve-board';
 import { resolveContinuationEnvelope } from '../../effects/state/resolve-continuation-envelope';
 import { resolveEffectiveState } from '../../effects/state/resolve-effective-state';
-import { migrateLegacyActivePlan } from '../hook/legacy-active-plan-migration';
+import { migratePendingPostEditJournalV1 } from '../hook/mutation-observed';
 
 export interface StateCommandOptions {
   readonly targetPath?: readonly string[];
@@ -281,18 +280,6 @@ export function buildStateCommand(): Command {
     });
 
   state
-    .command('repair-artifact')
-    .description('Record a reason to edit only the current verifier-declared invalid contract')
-    .requiredOption('--json', 'Output the artifact repair receipt as JSON')
-    .requiredOption('--reason <reason>', 'Why the active verification artifact needs repair')
-    .action((opts: { reason: string }) => {
-      try {
-        const receipt = recordArtifactRepair(process.cwd(), opts.reason);
-        writeOutcome({ exitCode: 0, stdout: `${JSON.stringify(receipt, null, 2)}\n`, stderr: '' });
-      } catch (error) { writeOutcome(operationalFailure(error)); }
-    });
-
-  state
     .command('board')
     .description('Project the read-only kanban board for one canonical sprint')
     .requiredOption('--json', 'Output the board document as JSON')
@@ -313,18 +300,15 @@ export function buildStateCommand(): Command {
     });
 
   state
-    .command('migrate-legacy-active-plan')
-    .description('One-shot migration of the retired .claude/.active-plan marker')
+    .command('migrate-post-edit-journal-v1')
+    .description('Explicit one-way migration of pending post-edit journal v1 events')
     .requiredOption('--json', 'Output the migration result as JSON')
-    .action(() => {
+    .option('--limit <count>', 'Maximum events to migrate, from 1 to 1000', '100')
+    .action((opts: { limit: string }) => {
       try {
-        process.stdout.write(`${JSON.stringify(migrateLegacyActivePlan(), null, 2)}\n`);
-        process.exitCode = 0;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`${message}\n`);
-        process.exitCode = 1;
-      }
+        const result = migratePendingPostEditJournalV1(process.cwd(), Number(opts.limit));
+        writeOutcome({ exitCode: 0, stdout: `${JSON.stringify(result, null, 2)}\n`, stderr: '' });
+      } catch (error) { writeOutcome(operationalFailure(error)); }
     });
 
   return state;

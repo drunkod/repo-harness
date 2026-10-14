@@ -1,12 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 unset GH_TOKEN GITHUB_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN SSH_AUTH_SOCK HTTP_PROXY HTTPS_PROXY NO_PROXY
 
 GIT_BIN="${REPO_HARNESS_GIT_BIN:-/usr/bin/git}"
 BASH_BIN="${REPO_HARNESS_BASH_BIN:-/bin/bash}"
 BUN_BIN="${REPO_HARNESS_BUN_BIN:-}"
-WORKFLOW_STATE_LIB="${REPO_HARNESS_WORKFLOW_STATE_LIB:-.ai/hooks/lib/workflow-state.sh}"
+WORKFLOW_STATE_LIB="${REPO_HARNESS_WORKFLOW_STATE_LIB:-$SCRIPT_DIR/../assets/hooks/lib/workflow-state.sh}"
 if [[ "${OS:-}" == "Windows_NT" ]]; then
   GIT_BIN="${GIT_BIN//\\//}"
   BASH_BIN="${BASH_BIN//\\//}"
@@ -32,10 +34,10 @@ if [[ -n "$BUN_BIN" ]] && ! is_trusted_regular_file "$WORKFLOW_STATE_LIB"; then
   echo "contract-worktree: trusted workflow-state library is unavailable" >&2
   exit 1
 fi
+export REPO_HARNESS_GIT_BIN="$GIT_BIN"
 git() { "$GIT_BIN" "$@"; }
 bash() { "$BASH_BIN" "$@"; }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -n "${REPO_HARNESS_TARGET_REPO_ROOT:-}" ]]; then
   REPO_ROOT="$REPO_HARNESS_TARGET_REPO_ROOT"
 elif REPO_ROOT="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null)"; then
@@ -294,10 +296,17 @@ worktree_status_for_cleanup() {
 
 default_worktree_path() {
   local slug="$1"
-  local parent repo_name
-  parent="$(dirname "$REPO_ROOT")"
+  local repo_name template default_template
+  default_template="$(run_contract_runtime default-template)" || return $?
   repo_name="$(basename "$REPO_ROOT")"
-  printf '%s/%s-wt-%s' "$parent" "$repo_name" "$slug"
+  template="$(policy_get '.worktree_strategy.worktree_dir_template' "$default_template")"
+  template="$(run_contract_runtime resolve-template --template "$template")" || return $?
+  if [[ -n "${REPO_HARNESS_WORKTREE_ROOT:-}" && "$template" == "$default_template" ]]; then
+    template="${REPO_HARNESS_WORKTREE_ROOT}/{{repo}}-wt-{{slug}}"
+  fi
+  template="${template//\{\{repo\}\}/$repo_name}"
+  template="${template//\{\{slug\}\}/$slug}"
+  printf '%s' "$template"
 }
 
 write_start_metadata() {
@@ -370,10 +379,10 @@ clear_primary_markers_for_transferred_plan() {
 bootstrap_worktree_runtime() {
   # A fresh linked worktree starts without the gitignored runtime artifacts the
   # verification gates depend on, and both resulting failures name neither cause.
-  # A missing dependency tree surfaces as `state=missing`, because
-  # check-architecture-sync resolves the provider through the candidate build,
-  # which requires archctx package-locally, while the globally installed CLI
-  # resolves it elsewhere and cheerfully reports ready. A missing code index
+  # A missing dependency tree surfaces as `state=missing`, because the
+  # projection provider resolves archctx package-locally from the candidate
+  # build, while the globally installed CLI resolves it elsewhere and reports
+  # ready. A missing code index
   # surfaces as `unresolved-major-change` listing every capability, because
   # archctx cannot prove a single flow without code facts. Seeding both here
   # keeps that diagnosis from being re-derived once per worktree.
@@ -508,8 +517,15 @@ start_worktree() {
     echo "contract-worktree: --fresh refuses residual worktree metadata: $metadata_file" >&2
     return 1
   fi
-  if [[ "$require_fresh" -eq 1 && ( -e "$worktree_path" || -L "$worktree_path" ) ]]; then
-    echo "contract-worktree: --fresh refuses residual worktree path: $worktree_path" >&2
+  # The existing Bun adapter uses lstat. It never follows the target leaf.
+  local freshness_args=()
+  [[ "$require_fresh" -eq 0 ]] || freshness_args+=(--fresh)
+  if ! run_contract_runtime check-start-path --repo "$REPO_ROOT" --worktree "$worktree_path" --branch "$branch_name" ${freshness_args[@]+"${freshness_args[@]}"}; then
+    if [[ "$require_fresh" -eq 1 ]]; then
+      echo "contract-worktree: --fresh refuses residual worktree path: $worktree_path" >&2
+    else
+      echo "contract-worktree: target worktree path already exists: $worktree_path" >&2
+    fi
     return 1
   fi
 
@@ -520,6 +536,7 @@ start_worktree() {
       return 1
     fi
     worktree_path="$existing_worktree"
+    run_contract_runtime mark-active --repo "$REPO_ROOT" --worktree "$worktree_path" --branch "$branch_name"
     disposition="reused_existing_worktree"
     start_notice "[ContractWorktree] Reusing existing worktree: $worktree_path"
   elif git show-ref --verify --quiet "refs/heads/$branch_name"; then
@@ -528,17 +545,17 @@ start_worktree() {
       return 1
     fi
     if [[ "$output_json" -eq 1 ]]; then
-      git worktree add "$worktree_path" "$branch_name" >&2
+      run_contract_runtime add-worktree --repo "$REPO_ROOT" --worktree "$worktree_path" --branch "$branch_name" --base "$source_commit" >&2
     else
-      git worktree add "$worktree_path" "$branch_name"
+      run_contract_runtime add-worktree --repo "$REPO_ROOT" --worktree "$worktree_path" --branch "$branch_name" --base "$source_commit"
     fi
     disposition="attached_existing_branch"
     start_notice "[ContractWorktree] Added worktree for existing branch: $worktree_path"
   else
     if [[ "$output_json" -eq 1 ]]; then
-      git worktree add "$worktree_path" -b "$branch_name" HEAD >&2
+      run_contract_runtime add-worktree --repo "$REPO_ROOT" --worktree "$worktree_path" --branch "$branch_name" --base "$source_commit" --new-branch >&2
     else
-      git worktree add "$worktree_path" -b "$branch_name" HEAD
+      run_contract_runtime add-worktree --repo "$REPO_ROOT" --worktree "$worktree_path" --branch "$branch_name" --base "$source_commit" --new-branch
     fi
     new_branch=1
     disposition="created"
@@ -548,7 +565,7 @@ start_worktree() {
   worktree_path="$(cd "$worktree_path" && pwd -P)"
   if [[ -n "$herdr_endpoint" ]]; then
     if ! run_contract_runtime register --worktree "$worktree_path" --endpoint "$herdr_endpoint" >&2; then
-      echo "contract-worktree: Herdr registration incomplete; checkout preserved, retry the same start command" >&2
+      echo "contract-worktree: Herdr registration incomplete; checkout preserved; register its runtime with the supplied endpoint before continuing" >&2
       return 1
     fi
   fi
@@ -1591,7 +1608,7 @@ sprint_lease_reconcile_after_publication() {
     echo "[ContractWorktree] Warning: the sprint lease survived publication (claim $sprint_lease_claim_id); run 'repo-harness sprint reconcile --task-id $sprint_lease_task_id --target-ref $target_branch' to clear it" >&2
     return 0
   fi
-  if ! printf '%s' "$output" | grep -q '"action": "cleared_completed_lease"'; then
+  if [[ "$output" != *'"action": "cleared_completed_lease"'* ]]; then
     printf '%s\n' "$output" >&2
     echo "[ContractWorktree] Warning: reconcile left the sprint lease in place (claim $sprint_lease_claim_id); the canonical row on $target_branch does not read [x] yet" >&2
     return 0
@@ -2050,7 +2067,15 @@ cleanup_worktree() {
     fi
   fi
 
+  if [[ -n "$worktree_path" ]] && ! git show-ref --verify --quiet "refs/heads/$branch_name"; then
+    echo "contract-worktree: registered worktree branch is missing; refusing unproven cleanup" >&2
+    return 1
+  fi
+
+  local cleanup_head="" cleanup_target=""
+  cleanup_target="$(git rev-parse "$target_branch^{commit}")"
   if git show-ref --verify --quiet "refs/heads/$branch_name"; then
+    cleanup_head="$(git rev-parse "refs/heads/$branch_name")"
     # Merge state comes from the shared authority in worktree-merge-lib.sh --
     # scripts/ship-worktrees.sh consumes the same function, so the batch and
     # single-slug entrypoints cannot drift apart again. The lib is
@@ -2099,6 +2124,16 @@ cleanup_worktree() {
     echo "[ContractWorktree] Worktree already absent, skipping: $branch_name"
   fi
 
+  if [[ -n "$worktree_path" ]]; then
+    # The current cleanup owner cannot retain the native ledger, runs, and
+    # virtual-tree objects. Keep the worktree until that retention is proven.
+    if [[ -s "$worktree_path/.ai/harness/evidence/events/log.jsonl" ]] \
+      || [[ -n "$(find "$worktree_path/.ai/harness/runs" -maxdepth 1 -type f -name 'verification-*.json' -print -quit 2>/dev/null)" ]]; then
+      echo "contract-worktree: native verification evidence retention is unavailable; preserve worktree before cleanup" >&2
+      return 1
+    fi
+  fi
+
   if [[ "$dry_run" -eq 1 ]]; then
     echo "[ContractWorktree] dry-run cleanup slug=$slug target=$target_branch"
     if [[ "$repair_needed" -eq 1 ]]; then
@@ -2117,28 +2152,16 @@ cleanup_worktree() {
       echo "contract-worktree: runtime cleanup incomplete; preserve worktree and retry cleanup only" >&2
       return 1
     fi
-    git worktree remove "$worktree_path"
-    echo "[ContractWorktree] Removed worktree: $worktree_path"
   fi
 
+  # Bind the observations before runtime shutdown to the existing exact authority.
   if git show-ref --verify --quiet "refs/heads/$branch_name"; then
-    if [[ -n "$expected_head" ]]; then
-      git update-ref -d "refs/heads/$branch_name" "$expected_head"
-    elif [[ "$merge_mode" == "absorbed" ]]; then
-      # The absorption check above already proved this branch's tree is
-      # identical to target's -- git's own ancestry-based `-d` safety check
-      # is a guaranteed false positive here (squash-merge never makes the
-      # branch tip an ancestor of target), so force delete on this
-      # predicate only. Every other path (ancestor, or merge_mode unset
-      # because the branch was already absent at gate time -- which can't
-      # reach here since show-ref above would then be false) keeps the
-      # safer `-d`.
-      git branch -D "$branch_name"
-      echo "[ContractWorktree] Deleted branch: $branch_name (-D, absorbed)"
-    else
-      git branch -d "$branch_name"
-      echo "[ContractWorktree] Deleted branch: $branch_name (-d, ancestor)"
-    fi
+    run_contract_runtime remove-exact --repo "$current_root" \
+      --worktree "${worktree_path:-${expected_worktree:-(absent)}}" \
+      --branch "$branch_name" --head "${expected_head:-$cleanup_head}" --target "$target_branch" \
+      --target-oid "${expected_target:-$cleanup_target}" --merge "${expected_merge:-$cleanup_target}"
+    echo "[ContractWorktree] Removed worktree: ${worktree_path:-(absent)}"
+    echo "[ContractWorktree] Deleted branch: $branch_name (update-ref, $merge_mode)"
   fi
 
   if [[ -n "$expected_worktree" ]]; then

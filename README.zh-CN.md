@@ -21,9 +21,8 @@ checks 和 review evidence 写回项目文件，让下一个 agent 会话从文�
 记忆里继续。它用 tasks-first agent contract 接入已有仓库，让 Claude 和 Codex
 保持一致。
 
-在这层 contract 之上，它运行 **authorized programs**：长周期的工作各自持有自己的
-authorization、budget、task offer 和 lease，因此一个 Sprint 可以跨会话推进，不需要
-人盯着每一步。
+在这层 contract 之上，由 Bot 调度 **长周期 program**：task offer 和 lease 让一个
+Sprint 可以跨会话推进。repo-harness 提供工具和证据；Bot 决定下一步运行什么。
 
 ## 目录
 
@@ -48,7 +47,7 @@ authorization、budget、task offer 和 lease，因此一个 Sprint 可以跨会
 
 ### 1. 安装 CLI
 
-前置条件：一个 Git working tree、`bun`，以及可用的 `herdr` >=0.9.0 来满足 host
+前置条件：一个 Git working tree、`bun`，以及可用的 `herdr` >=0.9.3 来满足 host
 readiness；macOS/Linux 还需要 `bash`，Windows 则需要 Git for Windows（包括其 Bash
 与 `usr/bin` 工具）。`jq` 可选。不需要 Node.js——installer 使用 Bun >= 1.4.0
 作为 runtime，需要时会先安装或升级 Bun。
@@ -76,7 +75,7 @@ npx -y repo-harness@latest install   # npx fallback; the CLI still runs on Bun
 常驻 review hosting 依赖 POSIX process group；Windows 上请走 WSL。herdr 缺失或
 不可用会直接挡住 host readiness。从 tmux 升级之前，先用旧版本把已有的 reviewer
 drain 掉，并显式重新绑定 terminal endpoint。见
-[runtime cutover](docs/researches/20260909-herdr-runtime-cutover.md)。
+[runtime cutover](https://github.com/Ancienttwo/repo-harness/blob/archive/docs-researches-20261004/docs/researches/20260909-herdr-runtime-cutover.md)。
 
 ### 2. 引导 host runtime
 
@@ -112,7 +111,7 @@ application stack；新项目和新模块改用 `repo-harness-setup` 的 scaffol
 
 ```bash
 repo-harness init
-bash scripts/check-task-workflow.sh --strict
+bash scripts/check-task-workflow.sh
 bun test
 ```
 
@@ -151,9 +150,8 @@ repo-harness mcp uninstall --services-stopped # after stopping all MCP HTTP serv
   证据和一张 review card。人工决策面就是一屏——verdict、intended vs actual
   files、commands passed、residual risk、rollback——而不用靠还原 agent 自称做过
   什么来判断。
-- **无人值守的工作仍然可追责。** 一个 program 没有存好的 authorization 就起不来，
-  超不出自己的 budget ledger，拿不住超过 lease 期限的任务，也没有 receipt 就声称
-  不了 acceptance。约束自主性的是 artifact，不是信任。
+- **调度的工作仍然可追责。** 任务不能超过 lease 期限被持有。没有 receipt 也不能
+  声称 acceptance。Bot 依据记录下来的证据调度，而不是依据信任。
 
 在接入后的仓库里，surface 刻意保持精简：
 
@@ -173,20 +171,18 @@ contract、checks、review 和 handoff 是持久的 authority；hook 负责把�
 里面。对单人仓库来说这就是完整的产品，[任务 Workflow](#任务-workflow) 里的全部内容
 都属于这一层。下面的内容都不是使用它的前提。
 
-**第 2 层 —— authorized programs。** 活得比会话更久的工作：无人值守的 controller
-逐步推进一个 Sprint、一个撰写并 adopt GitHub Issue 的修复 campaign、一个由架构
-模型驱动的 refactor program、一个多个 Module Engineer 交换信号与 handoff 的协作
-平面。每个 program 都以 operator 铸造的 authorization 为前提，从 per-goal budget
-ledger 支取额度，并用可续期的 lease 持有工作。见
+**第 2 层 —— Bot 调度的 program。** 活得比会话更久的工作：一个多个 Module
+Engineer 交换信号与 handoff 的协作平面，以及通过可续期 lease 持有的 engineer
+task offer。Bot 决定调度什么。repo-harness 提供工具和证据。见
 [Authorized Programs](#authorized-programs)。
 
 | | 第 1 层 | 第 2 层 |
 | --- | --- | --- |
-| 工作单元 | 一份 task contract | 一个 authorized program |
-| 谁在驱动 | 会话里的人 | 受上限约束的 controller |
-| Authority | Plan、contract、review、checks | 以上全部，再加 authorization、budget、lease、receipt |
-| 入口 | `repo-harness init` | `repo-harness automation grant mint` |
-| 停止条件 | Task closeout | Budget 耗尽、lease 丢失，或拿到终态 receipt |
+| 工作单元 | 一份 task contract | 一个被调度的 engineer task |
+| 谁在驱动 | 会话里的人 | Bot，通过 repo-harness CLI 和 Herdr |
+| Authority | Plan、contract、review、checks | 以上全部，再加 engineer binding 和 lease |
+| 入口 | `repo-harness init` | `repo-harness engineer acquire-next` |
+| 停止条件 | Task closeout | Task closeout 或 lease 丢失 |
 
 第 2 层不取代第 1 层：program 的每一步仍然投射进人类本来会写的那些 plan、contract
 和 review artifact。
@@ -198,8 +194,7 @@ ledger 支取额度，并用可续期的 lease 持有工作。见
 | **会话状态落在文件里** | Plan、contract、check 和 handoff 都留在仓库里，新会话从 artifact 而不是聊天线程恢复 |
 | **Typed hook runtime** | 八条共享 managed route 加三条 Codex-only delegation route，每条都绑定唯一一个 typed in-process handler，在 edit boundary 上做 fail-closed guard |
 | **Plan → Contract → Review** | 从 approved plan 到 projected contract、隔离 worktree、结构化证据，再到可审查 closeout 的完整生命周期 |
-| **Authorized programs** | Campaign、refactor、automation 和 collaboration program 各自持有 authorization、budget ledger、task offer 和可续期 lease |
-| **有上限的无人值守 controller** | 一条 Engineer dispatch loop，受 step、duration、retry 硬上限约束，每次尝试前先预留 budget |
+| **Bot 调度的 program** | 带 engineer task offer 和可续期 lease 的 collaboration program；Bot 负责调度，repo-harness 提供工具和证据 |
 | **渐进式 context loading** | 约 12KB 的稳定 root context，加上只为实际改动文件加载的约 1KB capability contract |
 | **CodeGraph 集成** | 用预建索引回答调用者、被调用者、定义位置这类结构化查询，取代反复的 grep-and-read |
 | **MCP planner sidecar** | ChatGPT 读取真实仓库状态并写出 PRD/Sprint/Goal artifact；Codex 负责执行，默认没有源码写入权限 |
@@ -244,7 +239,7 @@ flowchart TD
   NextTask --> UserTask
 
   UserTask --> Discovery["Due diligence<br/>P1 map, P2 trace, P3 decision"]
-  Discovery --> LoopEvidence["Loop evidence when routing changes<br/>state-snapshot --json<br/>route-nl-vs-ts / cutover gate"]
+  Discovery --> LoopEvidence["Loop evidence when routing changes<br/>state-snapshot --json<br/>affected routing tests"]
   LoopEvidence --> PlanDraft["Draft plan<br/>plans/plan-*.md"]
   PlanDraft --> PlanReview{"Plan ready for execution?"}
   PlanReview -->|no| Refine["Refine plan, scope, evidence contract"]
@@ -272,11 +267,11 @@ flowchart TD
   PreHooks -->|blocked| ScopeFix["Fix plan, contract, worktree, or scope"]
   ScopeFix --> Implement
   PreHooks -->|allowed| Changes["Code, docs, tests, or config changes"]
-  Changes --> PostHooks["Post-edit and post-bash hooks<br/>trace, drift request, handoff, check evidence"]
-  PostHooks --> ArchQueue["Architecture queue<br/>architecture-queue.sh record/reindex<br/>check-architecture-sync.sh"]
-  ArchQueue --> Verify["Run verification<br/>tests plus repo workflow checks"]
+  Changes --> PostHooks["Post-edit and post-bash hooks<br/>trace, handoff, check evidence"]
+  PostHooks --> ArchUpdate["Explicit architecture update<br/>archctx ChangeSet when responsibilities change<br/>architecture-projection apply"]
+  ArchUpdate --> Verify["Run verification<br/>tests plus repo workflow checks"]
 
-  Verify --> Checks["Structured evidence<br/>.ai/harness/checks/latest.json<br/>.ai/harness/runs/*.json"]
+  Verify --> Checks["Structured evidence<br/>.ai/harness/evidence/events/log.jsonl<br/>.ai/harness/runs/*.json"]
   Checks --> CheckReview["Evaluator review<br/>Waza /check -> review file"]
   CheckReview --> External["External acceptance advice<br/>or explicit manual override"]
   External --> DoneGate{"Contract, checks, review, and acceptance pass?"}
@@ -306,38 +301,11 @@ source of truth，backlog 是持久的执行队列，这样 resume 之后的 Goa
 
 ## Authorized Programs
 
-Program 指的是活得比会话更久的工作。它们全都从同样的三个原语出发，缺了第一个
-就一个也起不来。
+Program 指的是活得比会话更久的工作。Bot 通过 repo-harness CLI 和 Herdr 调度它。
+repo-harness 自己不保留 scheduler、budget ledger 或 controller。
 
-```bash
-repo-harness automation grant mint   # store one operator ProgramAuthorizationV1
-repo-harness automation grant list   # digests held for this repository
-repo-harness automation budget show          # the enforceable per-goal ledger
-repo-harness automation budget repair        # seal a stopped or expired run's exhaustion receipt
-```
-
-- **Authorization。** operator 铸造的 `ProgramAuthorizationV1` 存在 harness home
-  的 gate store 里。没有未经认证的启动路径，program 也不会自己推导 actor——每条
-  记录的作者都由 `--authorization-id` 解析而来。
-- **Budget。** Provider 调用、campaign step、adoption 观测、heartbeat 执行和
-  worker acquisition，都要先对 per-goal ledger 预留额度，工作才会被记录。
-  `budget repair` 只会重跑一次加锁的 reconciliation；它不预留、不扣费，也不改
-  上限。
 - **Lease。** 被持有的工作带一个可续期的 lease，有续期间隔、最大 TTL 和一组封闭的
   evidence source。liveness 状态无法证明时需要人来看，而不是悄悄回收。
-
-### 无人值守 controller
-
-```bash
-repo-harness automation controller start --maximum-steps 20 --maximum-duration-ms 300000
-repo-harness automation controller step
-repo-harness automation controller status
-repo-harness automation controller stop
-```
-
-一条 Engineer dispatch loop，受硬上限约束，带确定性 backoff 和有界的
-attempt-retry ledger。每次 attempt 记录之前先预留 budget，投射出来的 outcome 落在
-封闭 enum 之外时不能算 satisfied。
 
 ### Engineer 调度
 
@@ -353,33 +321,18 @@ repo-harness engineer board                   # read-only organization attention
 从 receipt authority 解析，不靠推断；backlog schema v2 下 Sprint task ID 是不可变
 身份——较旧的 backlog 跑一次 `repo-harness sprint migrate-schema`。
 
-### 开发 campaign
+Campaign execution moved to the existing Bot skills on 2026-10-04. Use [repo-harness](SKILL.md) to dispatch and collect work through Herdr/OAR. Use [repo-harness-product](assets/skills/repo-harness-product/SKILL.md) for planning and [repo-harness-check](assets/skill-commands/repo-harness-check/SKILL.md) for scope and verification. repo-harness has no campaign runtime.
+
+### Refactor recommendations
 
 ```bash
-repo-harness campaign audit          # budgeted read-only group audit
-repo-harness campaign author         # persist an IssueBatchIntentV1, open the GPT Pro authoring lane
-repo-harness campaign adopt          # exact-SHA readback, seal authoring, publish a repair batch
-repo-harness campaign step           # hand one adopted task to its local planning session
-repo-harness campaign prepare-resume # zero-provider resume request from stored evidence
+repo-harness refactor recommendations                       # measured suggestions with evidence
+repo-harness refactor decide <id> accept|defer|reject --reason "<text>"
 ```
 
-一个带种子的修复 program：audit 一个 group，走 GPT Pro lane 撰写它的 Issue，用
-exact SHA readback 去 adopt，然后把每个 adopted task step 进普通的 plan →
-contract → review 生命周期。`prepare-resume` 从存好的 adoption、continuation 和
-budget 证据里重建 resume request，不联系 provider。
-
-### Refactor Mode
-
-```bash
-repo-harness refactor discover        # bounded shadow scan of one local proposal
-repo-harness refactor materialize     # one recommendation into N Work Packages
-repo-harness refactor verify-candidate
-repo-harness refactor board
-```
-
-一个 ArchContext 支撑的 program，把架构建议转成 work package，对应到单一 canonical
-Sprint task authority。启用是有闸门的：canary set 和 rung-promotion 证据必须对着
-已安装的 provider 重新刷新过，它才会打开。
+ArchContext 测量循环依赖、依赖方向违规等结构问题。repo-harness 把每条建议连同其指标和
+模块统计一起展示，并记录用户的决定。它从不执行重构；被接受的建议走正常的 plan 和
+pull request 流程。
 
 ### 协作平面
 
@@ -394,15 +347,8 @@ repo-harness collaboration packet build|read
 多个 Module Engineer 读同一份 Work Exchange，并发布有界的 coordination 记录。
 Handoff adoption 刻意做成非独占：它不授予 Task、Claim 或 Lease。
 
-底层保持一个 Module Engineer 和一个 writer，同时让有界的只读 Worker 交换不受信任的
-signal 和显式 handoff。用 `bun scripts/c9-collaboration-canary.ts --live` 在
-source checkout 里跑 live gate；它会为三组配对的 baseline/treatment trace 创建隔离
-的一次性仓库，并记录 provider 权威的 Codex token 用量、context 大小、signal 复用、
-handoff adoption、writer 数量和 delivery-plane digest。被接受的 C9 结论刻意是一个
-否定性的 multi-seat 决定：三读者的 treatment 保住了 authority 也复用了状态，产出
-却没有超过单读者 baseline。常驻的同 capability `EngineerSeatV2`、独立的 Review
-marketplace 和无人值守 Merge 仍然处于关闭状态。见
-[`20260830-c9-real-multi-agent-canary.md`](docs/researches/20260830-c9-real-multi-agent-canary.md)。
+底层保持一个 Module Engineer 和一个 writer。有界的 read-only Worker 交换不受信任的 signal 和显式 handoff。C9 source-checkout canary 已退休。历史结果不支持多个 reader seat。共享 collaboration runtime 测试保留。常驻的同 capability `EngineerSeatV2`、独立的 Review marketplace 和无人值守 Merge 仍处于关闭状态。
+[`20260830-c9-real-multi-agent-canary.md`](https://github.com/Ancienttwo/repo-harness/blob/archive/docs-researches-20261004/docs/researches/20260830-c9-real-multi-agent-canary.md)。
 
 ### 外部来源接入
 
@@ -423,6 +369,8 @@ repo-harness review round --contract tasks/contracts/<task>.contract.md --review
 repo-harness review status --contract tasks/contracts/<task>.contract.md
 repo-harness review close --contract tasks/contracts/<task>.contract.md
 ```
+
+在没有 Herdr 的 Claude 桌面 app 里，加 `--launch app-terminal`，不传 `--herdr-endpoint`。第一次调用会输出固定的 host 命令。Claude 在 app 的 Terminal 里运行一次这个命令，再重跑同一轮。OAR、Seatbelt 和 Receipt 都不变。
 
 独立 linked checkout 里的 fleet `deep-reasoner` task-agent 在明确指定的 Herdr session 中最多执行三轮修复 review。默认选 owner 对侧 harness，`--harness` 可显式选择；只有启动前证明可执行文件缺失才允许明确提示的 fallback。文件 Result 通过领域绑定与 finding 校验，再由 generic-review Receipt writer/verifier 记录，close 重新验收；history 只是观察。Claude 使用精确结果文件 allowlist 与修改指纹，生产 OS 写隔离和大包完整读取仍未证。
 
@@ -460,6 +408,27 @@ tool activity 在 `.claude/.trace.jsonl`。常见的 guard 有 `PlanStatusGuard`
 active 或可执行的 plan）、`ContractGuard`（缺少 contract scaffold，或者在 contract
 通过之前就声称完成）和 `WorktreeGuard`（从错误的 worktree 写入）。完整 playbook 见
 [`docs/reference-configs/hook-operations.md`](docs/reference-configs/hook-operations.md)。
+
+### Pi 1.2.0 package
+
+Pi 使用官方 package loader。先构建候选包，再安装：
+
+```bash
+pi install /absolute/path/to/repo-harness
+```
+
+包提供 `repo-harness` router 和 `repo-harness-check` 技能。
+安装后在现有会话中执行 `/reload`。仓库必须有
+`.ai/harness/workflow-contract.json`，才会启用 hooks。
+需要 Pi `1.2.0`、Bun `>=1.4.0` 和 SDK 安装中的路径解析函数。
+其他版本或缺少该函数的发行包会标为 unavailable。
+
+extension 检查原生 edit/write，包括 codemode 的嵌套调用。
+检查拒绝、bridge 故障或无效输出会阻止编辑。
+上下文或观察失败后，后续编辑也会阻止。修复故障后执行 `/reload`。
+
+Shell 写入、`!`/`!!`、extension 直接写入和第三方 MCP 写入需要各自的控制。
+Pi package 不安装 scheduler，也不启用 OAR Pi review worker。
 
 ## 本地人工控制台
 
@@ -509,7 +478,7 @@ Index-stale、CodeGraph-down 和 rollback 操作见
 先看 `tasks/reviews/<task>.review.md`。它的 `## Human Review Card` 是一屏决策面：
 verdict、change type、intended vs actual files、commands passed、external
 acceptance、residual risk、reviewer action、rollback。然后再检查 active contract、
-`.ai/harness/checks/latest.json` 里的最新 trace，以及实际改动的文件。只有当 review
+Verification Plan execution records 里的最新 trace，以及实际改动的文件。只有当 review
 建议 pass、card 的 verdict 是 pass，且 external acceptance 是 pass、`not_required`
 或明确的 override 时，才能接受这次交付。
 
@@ -523,7 +492,7 @@ Agent 会先读 source artifact，再读派生出来的摘要：
 | 当前用户 prompt 和引用的文件 | `tasks/reviews/<task>.review.md` 的 Human Review Card |
 | `AGENTS.md` / `CLAUDE.md` | 改动的文件和 diff |
 | `.ai/harness/active-plan` 里的 active plan | Active contract 的 allowed paths 和 exit criteria |
-| `tasks/contracts/` 里的 active contract | `.ai/harness/checks/latest.json` 和 run trace |
+| `tasks/contracts/` 里的 active contract | Verification Plan execution records 和 run trace |
 | `.ai/harness/handoff/` 里的最新 handoff | 残余风险和 rollback |
 
 `tasks/current.md` 是一份被 ignore 的本地 orientation snapshot，不是 tracked 文件。
@@ -545,14 +514,26 @@ Canonical 的 rule-owner package 放在 `assets/skills/` 和 `assets/skill-comma
 | --- | --- |
 | `repo-harness` | 根路由 Skill，无条件同步到每个 profile |
 | `repo-harness-setup` | Init、migrate、upgrade、repair、scaffold 和 capability-configuration 各 mode；仅 router-only |
-| `repo-harness-plan` | 创建一份 decision-complete plan，或者 review 已有的 plan |
 | `repo-harness-product` | 面向上层产品规划的 PRD、Sprint 和 Goal mode |
-| `repo-harness-check` | Workflow 和 release check，附带 deploy-readiness reference |
+| `repo-harness-check` | 制定范围明确的计划。审阅计划。核对检查证据。 |
 | `repo-harness-ship` | 校验完成的 worktree，push 分支并开 PR |
-| `repo-harness-architecture` | Architecture 文档、drift request 和图表，不需要完整刷新 harness |
+| `repo-harness-architecture` | Architecture 模型、投影文档和图表，不需要完整刷新 harness |
 | `repo-harness-cross-review` | Generic acceptance through persistent fleet deep-reasoner task-agent + Herdr review; direct advisory runtime retired |
 | `repo-harness-chatgpt` | Oracle browser/GPT Pro consult、MCP Connector setup 和 bridge handoff；仅限显式 setup |
+| `obsidian-memory` | Bot：明确请求后读取或写入记忆。 |
+| `repo-harness-test` | Worker：源码测试与真实 fixture。 |
+| `windows-python-first` | Worker：原生 Windows 下用 Python 处理文件、文本和 shell 任务。 |
 | `merge-gate`（外部） | Exact-candidate 的 final gate；repo-harness 本身不附带 merge-gate Skill——见 [external tooling](docs/reference-configs/external-tooling.md) |
+
+Bot skills 负责范围、委派和验收。Worker skills 负责执行。
+
+Bot: `repo-harness`, `repo-harness-check`, `repo-harness-product`,
+`repo-harness-ship`, `obsidian-memory`, `repo-harness-cross-review`,
+`repo-harness-chatgpt`. Worker: `repo-harness-setup`,
+`repo-harness-test`, `repo-harness-architecture`, and
+`windows-python-first`.
+`obsidian-memory`, and `repo-harness-ship` 必须显式调用。
+普通任务使用简短 brief 和 PR 描述。PRD、Sprint、Goal 用于明确请求的产品工作。
 
 规划链路刻意分层：
 
@@ -580,9 +561,8 @@ symlink-backed 的 runtime entrypoint，由 `scripts/sync-codex-installed-copies
 重建。
 
 `bun run check:ci` 是唯一的 CI-equivalent gate；`bun run check:release` 只是在委托
-给它之前，多加一步 npm unpublished-version preflight。治理类和功能类检查作为独立的
-CI job 运行，`bun run check:route-eval` 对每个 prompt-guard intent 和 action 守住
-一条钉死的覆盖率下限。
+给它之前，多加一步 npm unpublished-version preflight。
+Runtime routing 回归保留在受影响测试中。旧 routing eval gate 已退休。
 
 ```bash
 bun run check:ci                    # the whole gate
@@ -627,8 +607,8 @@ commit script 或 hook，除非目标仓库采用同样的 policy。
 
 ## 当前 Release
 
-- npm package：`repo-harness@0.20.0`
-- Generated workflow stamp：`repo-harness@0.20.0+template@0.20.0`
+- npm package：`repo-harness@0.22.1`
+- Generated workflow stamp：`repo-harness@0.22.1+template@0.22.1`
 - GitHub repository：`Ancienttwo/repo-harness`
 - Release notes 和 history：[`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 

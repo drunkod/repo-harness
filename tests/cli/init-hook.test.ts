@@ -4,6 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
 import {
+  buildSetupCheck,
   formatInitHook,
   runInitHook,
   type ToolingReport,
@@ -12,6 +13,7 @@ import type { DoctorReport } from '../../src/cli/commands/doctor';
 import type { StatusReport } from '../../src/cli/commands/status';
 import { planAdoption } from '../../src/core/adoption/plan';
 import { applyAdoptionPlan } from '../../src/effects/fs-transaction';
+import { readUpgradeFixture } from '../helpers/upgrade-fixtures';
 
 const ROOT = join(import.meta.dir, '..', '..');
 const CLI = join(ROOT, 'src/cli/index.ts');
@@ -114,6 +116,19 @@ function baseToolingReport(tools: ToolingReport['tools'] = {}): ToolingReport {
 }
 
 describe('init-hook command', () => {
+  test('prints one leftover summary without listing or changing retired bytes', () => {
+    withTempHome((home, repo) => {
+      const target = join(home, '.repo-harness/hook-shim.sh');
+      mkdirSync(join(home, '.repo-harness'), { recursive: true });
+      const original = readUpgradeFixture('upgrade-v0.10-home', '.repo-harness/hook-shim.sh').toString('utf8');
+      writeFileSync(target, original);
+      const report = runInitHook({ cwd: repo, env: { ...process.env, HOME: home },
+        statusReport: baseStatusReport(), doctorReport: baseDoctorReport(), toolingReport: baseToolingReport() });
+      expect(formatInitHook(report)).toContain('1 leftovers (1 removable). Run: repo-harness upgrade');
+      expect(formatInitHook(report)).not.toContain(target);
+      expect(readFileSync(target, 'utf8')).toBe(original);
+    });
+  });
   test('reports missing Global Working Rules as Agent action without creating files', () => {
     withTempHome((home, repo) => {
       const report = runInitHook({
@@ -664,4 +679,37 @@ describe('init-hook command', () => {
     expect(res.stdout).toContain('--target <target>');
     expect(res.stdout).toContain('--check-updates');
   }, 30_000);
+});
+
+describe('setup check builder', () => {
+  test('links each check to the action it generated and keeps the report unchanged', () => {
+    withTempHome((home, repo) => {
+      const options = {
+        cwd: repo,
+        target: 'both' as const,
+        env: { ...process.env, HOME: home },
+        statusReport: baseStatusReport({ managedEntryCount: 11 }),
+        doctorReport: baseDoctorReport([
+          { id: 'codegraph-index', describe: 'CodeGraph project index', status: 'warn', detail: 'index=stale; remediation=bash scripts/ensure-codegraph.sh --sync' },
+        ]),
+        toolingReport: baseToolingReport({
+          agent_fleet: { name: 'agent_fleet', status: 'missing', reason: 'none', install_command: 'repo-harness run install-agent-fleet' },
+        }),
+      };
+      const build = buildSetupCheck(options);
+      expect(JSON.stringify(build.report)).toBe(JSON.stringify(runInitHook(options)));
+      const commandFor = (checkId: string) => build.check_actions.get(checkId)?.command;
+      expect(build.check_actions.get('status.adapter.codex')?.id).toBe('adapter.codex.install');
+      expect(commandFor('status.adapter.codex')).toBe('repo-harness install --target codex --location global');
+      expect(build.check_actions.has('status.adapter.claude')).toBe(false);
+      expect(commandFor('doctor.codegraph-index')).toBe('bash scripts/ensure-codegraph.sh --sync');
+      expect(commandFor('tooling.agent_fleet')).toBe('repo-harness run install-agent-fleet');
+      expect(build.check_actions.get('global-rules.codex')?.id).toBe('global-rules.insert');
+      expect(build.check_actions.get('global-rules.claude')?.id).toBe('global-rules.insert');
+      for (const [checkId, action] of build.check_actions) {
+        expect(build.report.checks.some(check => check.id === checkId)).toBe(true);
+        expect(build.report.agent_actions).toContain(action);
+      }
+    });
+  });
 });

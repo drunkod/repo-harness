@@ -9,12 +9,9 @@ import { Window } from 'happy-dom';
 
 import { projectOperatorWorkExchangeSnapshot } from '../../src/core/operator/collaboration-snapshot';
 import type { CollaborativeWorkExchangeSnapshotV1 } from '../../src/core/collaboration/work-exchange';
-import {
-  CollaborationPane,
-  fetchOperatorCollaborationSnapshot,
-  fetchOperatorSnapshot,
-  OperatorApp,
-} from '../../src/operator-web/App';
+import { OperatorApp } from '../../src/operator-web/App';
+import { fetchOperatorCollaborationSnapshot, fetchOperatorSnapshot } from '../../src/operator-web/fleet-api';
+import { CollaborationPane } from '../../src/operator-web/RepositoryWorkspace';
 import {
   changedCollaborationSnapshot,
   collaborationSnapshot,
@@ -42,7 +39,7 @@ let window: Window;
  * a repository's lanes" hint is correctly unreachable there.
  */
 function installDom(): void {
-  window = new Window({ url: 'http://127.0.0.1:4318/' });
+  window = new Window({ url: 'http://127.0.0.1:4318/#repository' });
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
     value: (media: string) => ({
@@ -280,7 +277,9 @@ describe('operator collaboration surface', () => {
 
     expect(markup).toContain('Collaboration');
     expect(markup).toContain('mode shadow');
-    expect(markup).toContain('Read only. Nothing in this section writes.');
+    // The read-only boundary is stated once on the System page, not per section.
+    expect(markup).not.toContain('Read only. Nothing in this section writes.');
+    expect(markup).not.toContain('<form');
 
     // Lanes, hottest first, with C2's own score.
     expect(markup).toContain('capability.runtime-harness.collaboration');
@@ -327,8 +326,8 @@ describe('operator collaboration surface', () => {
     expect(pane).not.toContain('<form');
     expect(pane).not.toContain('<textarea');
     expect(pane).not.toContain('data-write-action');
-    // The board's one write is still declared, and it is still the task message.
-    expect(markup).toContain('observe-only · one write: task message');
+    // The footer declares the read-only browser boundary.
+    expect(markup).toContain('read-only');
   });
 
   test('UX-operator-collaboration-v1-F1 states a degraded read instead of showing fewer lanes', () => {
@@ -546,10 +545,10 @@ describe('operator collaboration read', () => {
     await act(async () => buttonWithText(fixtureTasks.blocked.task_label).click());
     expect(paneText()).toContain('The collaboration store cannot be read');
     expect(paneText()).not.toContain('No lane has a signal in this snapshot.');
-    // The task's own detail and the one write are untouched by the failure.
+    // The task's own read-only detail remains available after the failure.
     expect(document.querySelector('.detail-pane')?.textContent)
       .toContain('The base branch moved after verification');
-    expect(document.querySelector('.detail-pane [data-slot="composer"]')).not.toBeNull();
+    expect(document.querySelector('.detail-pane [data-slot="composer"]')).toBeNull();
   });
 
   test('explicit board refresh retries a failed collaboration read without changing selection', async () => {
@@ -887,9 +886,7 @@ describe('formal Human Decision observation UI', () => {
 
   test('replaces pages, keeps task selection scope, and cancels late pages on refresh or repository change', async () => {
     const pending: Array<{ repositoryId: string; after: string | null; signal: AbortSignal; resolve: (snapshot: OperatorCollaborationSnapshotV4) => void }> = [];
-    let writes = 0;
     await mount(<OperatorApp initialSnapshot={stableSnapshot} initialLocale="en" fetchSnapshot={async () => stableSnapshot}
-      sendMessage={async () => { writes++; }}
       fetchCollaboration={(repositoryId, signal, after) => new Promise(resolve => pending.push({repositoryId, after, signal, resolve}))} />);
     const finish = async (index: number) => act(async () => { const request = pending[index]!; request.resolve(decisionEnvelope(request.repositoryId, request.after)); });
     const text = () => document.querySelector('.decision-summary')!.textContent!;
@@ -913,7 +910,7 @@ describe('formal Human Decision observation UI', () => {
     expect(pending[5]!.signal.aborted).toBe(true); expect(pending[6]!.after).toBeNull();
     await finish(5); expect(text()).not.toContain('Second original question');
     await finish(6); expect(text()).toContain('First original question');
-    expect(writes).toBe(0);
+    expect(document.querySelector('[data-write-action], textarea')).toBeNull();
   });
 
   test('fetch binds the exact cursor and rejects a stale first-page response', async () => {

@@ -21,9 +21,10 @@
 なくファイルから続きに入れるようにします。既存のリポジトリに、Claude と Codex を
 揃える tasks-first な agent contract を導入します。
 
-その contract の上で、**authorized programs** を動かします。これは自前の
-authorization、budget、task offer、lease を保持する長時間の作業であり、人間が
-1 ステップずつ駆動しなくても Sprint がセッションをまたいで前進できるようにします。
+その contract の上で、Bot が **long-running programs** をスケジュールします。
+task offer と lease により、Sprint はセッションをまたいで前進できます。
+repo-harness は tools と evidence を提供します。次に何を実行するかは Bot が
+決めます。
 
 ## 目次
 
@@ -49,7 +50,7 @@ authorization、budget、task offer、lease を保持する長時間の作業で
 ### 1. CLI をインストールする
 
 前提条件は Git working tree、`bun`、そして host readiness のための利用可能な
-`herdr` >=0.9.0 です。macOS/Linux ではさらに `bash` が必要で、Windows では
+`herdr` >=0.9.3 です。macOS/Linux ではさらに `bash` が必要で、Windows では
 Git for Windows(その Bash と `usr/bin` の tools を含む)が必要です。`jq` は
 任意です。Node.js は不要です — installer は runtime として Bun >= 1.4.0 を
 使用し、必要であれば先に Bun のインストールまたはアップグレードを行います。
@@ -80,7 +81,7 @@ Windows では WSL を使用します。herdr が存在しない、または利�
 host readiness が block されます。tmux からアップグレードする前に、既存の
 reviewer を以前のバージョンで drain し、terminal endpoint を明示的に rebind
 してください。詳細は
-[runtime cutover](docs/researches/20260909-herdr-runtime-cutover.md) を参照して
+[runtime cutover](https://github.com/Ancienttwo/repo-harness/blob/archive/docs-researches-20261004/docs/researches/20260909-herdr-runtime-cutover.md) を参照して
 ください。
 
 ### 2. host runtime を bootstrap する
@@ -124,7 +125,7 @@ spec、task state、helper runtime、hook adapter の対象、verification フ�
 
 ```bash
 repo-harness init
-bash scripts/check-task-workflow.sh --strict
+bash scripts/check-task-workflow.sh
 bun test
 ```
 
@@ -170,10 +171,9 @@ repo-harness mcp uninstall --services-stopped # after stopping all MCP HTTP serv
   収まります — verdict、想定/実際の変更ファイル、通過した commands、残余
   リスク、rollback — agent が何をしたと主張しているかを再構築する必要は
   ありません。
-- **無人の作業も説明責任を保つ。** program は保存された authorization なしに
-  開始できず、budget ledger を超過できず、lease を過ぎて task を保持できず、
-  receipt なしに acceptance を主張できません。自律性を縛るのは信頼ではなく
-  artifacts です。
+- **スケジュールされた作業も説明責任を保つ。** task は lease を過ぎて保持
+  できません。receipt なしに acceptance を主張することもできません。Bot は
+  信頼ではなく、記録された evidence に基づいてスケジュールします。
 
 導入済みのリポジトリでは、意識すべき surface area は意図的に小さく保たれて
 います。
@@ -195,21 +195,19 @@ task。plan、contract、check、review、handoff が持続的な authority で�
 [タスク Workflow](#タスク-workflow) の内容はすべてここに属します。以降の内容は
 利用に必須ではありません。
 
-**Layer 2 — authorized programs。** セッションより長く生きる作業です。Sprint を
-進める無人 controller、GitHub Issues を author して adopt する repair campaign、
-architecture model に基づく refactor program、複数の Module Engineer が signal と
-handoff をやり取りする collaboration plane などが該当します。各 program は
-operator が mint した authorization で gate され、goal 単位の budget ledger から
-引き当て、更新可能な lease を通じて作業を保持します。詳細は
-[Authorized Programs](#authorized-programs) を参照してください。
+**Layer 2 — Bot-scheduled programs。** セッションより長く生きる作業です。
+複数の Module Engineer が signal と handoff をやり取りする collaboration plane と、
+更新可能な lease を通じて保持される engineer task offer が該当します。何を
+スケジュールするかは Bot が決めます。repo-harness は tools と evidence を提供
+します。詳細は [Authorized Programs](#authorized-programs) を参照してください。
 
 | | Layer 1 | Layer 2 |
 | --- | --- | --- |
-| 作業の単位 | 1 つの task contract | 1 つの authorized program |
-| 駆動するのは誰か | セッション内の人間 | 上限の範囲で動く controller |
-| Authority | Plan、contract、review、checks | 上記に加えて authorization、budget、lease、receipt |
-| Entry point | `repo-harness init` | `repo-harness automation grant mint` |
-| 停止条件 | Task closeout | Budget の枯渇、lease の喪失、または終端 receipt |
+| 作業の単位 | 1 つの task contract | スケジュールされた 1 つの engineer task |
+| 駆動するのは誰か | セッション内の人間 | Bot（repo-harness CLI と Herdr を通じて） |
+| Authority | Plan、contract、review、checks | 上記に加えて engineer binding と lease |
+| Entry point | `repo-harness init` | `repo-harness engineer acquire-next` |
+| 停止条件 | Task closeout | Task closeout または lease の喪失 |
 
 Layer 2 は Layer 1 を置き換えるものではありません。program のすべてのステップも、
 人間が書いたであろう同じ plan、contract、review の artifacts へ投射されます。
@@ -221,8 +219,7 @@ Layer 2 は Layer 1 を置き換えるものではありません。program の�
 | **File-backed sessions** | Plan、contract、check、handoff がリポジトリに残るので、新しいセッションはチャットスレッドではなく artifacts から再開します |
 | **Typed hook runtime** | 8 本の共有 managed route と 3 本の Codex 専用 delegation route があり、それぞれが exactly one の typed in-process handler に bind され、edit boundary で fail-closed な guard がかかります |
 | **Plan → Contract → Review** | approved plan から投射された contract、隔離された worktree、構造化された evidence、review 可能な closeout までの 1 本の lifecycle |
-| **Authorized programs** | 自前の authorization、budget ledger、task offer、更新可能な lease を保持する campaign・refactor・automation・collaboration の各 program |
-| **Bounded unattended controller** | step・duration・retry の hard cap 下で動く 1 本の Engineer dispatch loop。各試行の前に budget を予約します |
+| **Bot-scheduled programs** | engineer task offer と更新可能な lease を持つ collaboration program。Bot がスケジュールし、repo-harness が tools と evidence を提供します |
 | **Progressive context loading** | 安定した約 12KB の root context に、実際に触れるファイルにだけ読み込まれる約 1KB の capability contract が加わります |
 | **CodeGraph integration** | caller・callee・definition などの構造的なクエリに、grep-and-read を繰り返す代わりに事前構築された index が答えます |
 | **MCP planner sidecar** | ChatGPT が実際のリポジトリ状態を読み、PRD/Sprint/Goal artifacts を書きます。実行するのは Codex で、既定では source code への書き込み権限を持ちません |
@@ -275,7 +272,7 @@ flowchart TD
   NextTask --> UserTask
 
   UserTask --> Discovery["Due diligence<br/>P1 map, P2 trace, P3 decision"]
-  Discovery --> LoopEvidence["Loop evidence when routing changes<br/>state-snapshot --json<br/>route-nl-vs-ts / cutover gate"]
+  Discovery --> LoopEvidence["Loop evidence when routing changes<br/>state-snapshot --json<br/>affected routing tests"]
   LoopEvidence --> PlanDraft["Draft plan<br/>plans/plan-*.md"]
   PlanDraft --> PlanReview{"Plan ready for execution?"}
   PlanReview -->|no| Refine["Refine plan, scope, evidence contract"]
@@ -303,11 +300,11 @@ flowchart TD
   PreHooks -->|blocked| ScopeFix["Fix plan, contract, worktree, or scope"]
   ScopeFix --> Implement
   PreHooks -->|allowed| Changes["Code, docs, tests, or config changes"]
-  Changes --> PostHooks["Post-edit and post-bash hooks<br/>trace, drift request, handoff, check evidence"]
-  PostHooks --> ArchQueue["Architecture queue<br/>architecture-queue.sh record/reindex<br/>check-architecture-sync.sh"]
-  ArchQueue --> Verify["Run verification<br/>tests plus repo workflow checks"]
+  Changes --> PostHooks["Post-edit and post-bash hooks<br/>trace, handoff, check evidence"]
+  PostHooks --> ArchUpdate["Explicit architecture update<br/>archctx ChangeSet when responsibilities change<br/>architecture-projection apply"]
+  ArchUpdate --> Verify["Run verification<br/>tests plus repo workflow checks"]
 
-  Verify --> Checks["Structured evidence<br/>.ai/harness/checks/latest.json<br/>.ai/harness/runs/*.json"]
+  Verify --> Checks["Structured evidence<br/>.ai/harness/evidence/events/log.jsonl<br/>.ai/harness/runs/*.json"]
   Checks --> CheckReview["Evaluator review<br/>Waza /check -> review file"]
   CheckReview --> External["External acceptance advice<br/>or explicit manual override"]
   External --> DoneGate{"Contract, checks, review, and acceptance pass?"}
@@ -339,41 +336,13 @@ execution queue となるため、resume された Goal セッションが元の
 
 ## Authorized Programs
 
-program とは、セッションより長く生きる作業のことです。どの program も同じ
-3 つの primitive から始まり、最初の 1 つがなければ起動できません。
+program とは、セッションより長く生きる作業のことです。Bot は repo-harness CLI
+と Herdr を通じてそれをスケジュールします。repo-harness は独自の scheduler、
+budget ledger、controller を持ちません。
 
-```bash
-repo-harness automation grant mint   # store one operator ProgramAuthorizationV1
-repo-harness automation grant list   # digests held for this repository
-repo-harness automation budget show          # the enforceable per-goal ledger
-repo-harness automation budget repair        # seal a stopped or expired run's exhaustion receipt
-```
-
-- **Authorization。** operator が mint した `ProgramAuthorizationV1` が harness
-  home の gate store に置かれます。認証されていない起動経路は存在せず、program
-  が自分の actor を導出することもありません。すべてのレコードの author は
-  `--authorization-id` から解決されます。
-- **Budget。** provider 呼び出し、campaign step、adoption observation、heartbeat
-  の実行、worker acquisition は、作業が記録される前にすべて goal 単位の ledger
-  に対して予約を行います。`budget repair` はロックされた reconciliation を
-  再実行するだけであり、予約も課金も cap の変更も行いません。
 - **Lease。** 保持された作業には、更新間隔・最大 TTL・閉じた evidence source の
   集合を伴う更新可能な lease が付きます。liveness が証明できない状態は、黙って
   reclaim するのではなく attention を要求します。
-
-### Unattended controller
-
-```bash
-repo-harness automation controller start --maximum-steps 20 --maximum-duration-ms 300000
-repo-harness automation controller step
-repo-harness automation controller status
-repo-harness automation controller stop
-```
-
-hard cap の下で動く 1 本の Engineer dispatch loop で、決定的な backoff と
-上限のある attempt-retry ledger を備えます。各 attempt は記録される前に budget
-を予約し、閉じた enum の外にある projected outcome は satisfied として数えられ
-ません。
 
 ### Engineer scheduling
 
@@ -390,35 +359,19 @@ repo-harness engineer board                   # read-only organization attention
 Sprint task ID は backlog schema v2 の下で不変の identity です。古い backlog
 には `repo-harness sprint migrate-schema` を一度実行してください。
 
-### Development campaign
+Campaign execution moved to the existing Bot skills on 2026-10-04. Use [repo-harness](SKILL.md) to dispatch and collect work through Herdr/OAR. Use [repo-harness-product](assets/skills/repo-harness-product/SKILL.md) for planning and [repo-harness-check](assets/skill-commands/repo-harness-check/SKILL.md) for scope and verification. repo-harness has no campaign runtime.
+
+### Refactor recommendations
 
 ```bash
-repo-harness campaign audit          # budgeted read-only group audit
-repo-harness campaign author         # persist an IssueBatchIntentV1, open the GPT Pro authoring lane
-repo-harness campaign adopt          # exact-SHA readback, seal authoring, publish a repair batch
-repo-harness campaign step           # hand one adopted task to its local planning session
-repo-harness campaign prepare-resume # zero-provider resume request from stored evidence
+repo-harness refactor recommendations                       # measured suggestions with evidence
+repo-harness refactor decide <id> accept|defer|reject --reason "<text>"
 ```
 
-seed された repair program です。group を audit し、その Issues を GPT Pro lane
-経由で author し、exact な SHA readback に対して adopt し、adopt 済みの各 task
-を通常の plan → contract → review lifecycle へ step させます。`prepare-resume`
-は、provider に接続することなく、保存された adoption・continuation・budget の
-evidence から resume request を再構成します。
-
-### Refactor Mode
-
-```bash
-repo-harness refactor discover        # bounded shadow scan of one local proposal
-repo-harness refactor materialize     # one recommendation into N Work Packages
-repo-harness refactor verify-candidate
-repo-harness refactor board
-```
-
-ArchContext に裏打ちされた program で、architecture recommendation を単一の
-canonical Sprint task authority に対する work package へ変換します。有効化は
-gate されており、canary set と rung-promotion の evidence を、インストール済みの
-provider に対してリフレッシュしてからでないと有効になりません。
+ArchContext は循環や依存方向の違反などの構造上の問題を計測します。repo-harness は
+各提案をその指標とモジュール統計とともに表示し、ユーザーの判断を記録します。
+リファクタリング自体は実行しません。受け入れた提案は通常の plan と pull request の
+流れで進めます。
 
 ### Collaboration plane
 
@@ -434,19 +387,8 @@ repo-harness collaboration packet build|read
 coordination record を publish します。handoff の adoption は意図的に
 non-exclusive であり、Task も Claim も Lease も付与しません。
 
-substrate は Module Engineer と writer をそれぞれ 1 つに保ちつつ、範囲の限られた
-read-only な Worker が untrusted な signal と明示的な handoff をやり取りします。
-source checkout での live gate は `bun scripts/c9-collaboration-canary.ts --live`
-で実行します。これは 3 組の baseline/treatment trace のために隔離された
-使い捨てリポジトリを作成し、provider-authoritative な Codex token usage、context
-size、signal reuse、handoff adoption、writer count、delivery-plane digest を記録
-します。受け入れられた C9 の結果は意図的に negative な multi-seat 判断です。
-3-reader の treatment は authority を保ち state を再利用したものの、
-single-reader の baseline を上回る産出はしませんでした。持続的な同一 capability
-の `EngineerSeatV2`、独立した Review marketplace、無人の Merge は inactive の
-ままです。詳細は
-[`20260830-c9-real-multi-agent-canary.md`](docs/researches/20260830-c9-real-multi-agent-canary.md)
-を参照してください。
+Module Engineer と writer はそれぞれ一つです。有界の read-only Worker が信頼されていない signal と明示的な handoff を交換します。C9 canary は廃止しました。過去の結果は複数の reader seat を支持しません。共有 collaboration runtime のテストは保持します。同じ capability の常駐 `EngineerSeatV2`、独立した Review marketplace、無人 Merge は無効のままです。
+[`20260830-c9-real-multi-agent-canary.md`](https://github.com/Ancienttwo/repo-harness/blob/archive/docs-researches-20261004/docs/researches/20260830-c9-real-multi-agent-canary.md)。
 
 ### External source intake
 
@@ -467,6 +409,8 @@ repo-harness review round --contract tasks/contracts/<task>.contract.md --review
 repo-harness review status --contract tasks/contracts/<task>.contract.md
 repo-harness review close --contract tasks/contracts/<task>.contract.md
 ```
+
+Herdr のない Claude デスクトップアプリでは `--launch app-terminal` を付け、`--herdr-endpoint` は渡しません。最初の呼び出しが固定の host コマンドを出力します。Claude がそれをアプリの Terminal で一度実行し、同じラウンドを再実行します。OAR、Seatbelt、Receipt は変わりません。
 
 専用 linked checkout の fleet `deep-reasoner` task-agent が、指定した Herdr session で最大 3 回の repair review を行います。既定は owner と反対の harness、`--harness` で明示選択できます。起動前の executable 不在だけが通知付き fallback を許可します。ファイル Result の domain binding と findings を検証し、generic-review Receipt を記録・再検証して close します。history は観察のみです。Claude の保護は結果ファイル allowlist と変更 fingerprint であり、production OS isolation と大きい packet の完全読み取りは未検証です。
 
@@ -563,7 +507,7 @@ index-stale・CodeGraph-down・rollback operation は
 `## Human Review Card` が 1 画面の意思決定 surface であり、verdict、change
 type、想定/実際の変更ファイル、通過した commands、external acceptance、残余
 リスク、reviewer action、rollback を載せています。続いて active contract、
-`.ai/harness/checks/latest.json` の最新 trace、変更ファイルを確認します。
+Verification Plan execution records の最新 trace、変更ファイルを確認します。
 review が pass を推奨し、card の verdict が pass で、external acceptance が
 pass・`not_required`・明示的な override のいずれかのときだけ accept します。
 
@@ -578,7 +522,7 @@ Agent は派生した summary より先に、source artifacts を読みます。
 | 現在のユーザー prompt と参照ファイル | `tasks/reviews/<task>.review.md` の Human Review Card |
 | `AGENTS.md` / `CLAUDE.md` | 変更ファイルと diff |
 | `.ai/harness/active-plan` の active plan | active contract の allowed paths と exit criteria |
-| `tasks/contracts/` の active contract | `.ai/harness/checks/latest.json` と run trace |
+| `tasks/contracts/` の active contract | Verification Plan execution records と run trace |
 | `.ai/harness/handoff/` の latest handoff | 残余リスクと rollback |
 
 `tasks/current.md` は ignore されるローカルな orientation snapshot であり、
@@ -603,14 +547,26 @@ Canonical な rule-owner package は `assets/skills/` と
 | --- | --- |
 | `repo-harness` | root router Skill。すべての profile に無条件で同期されます |
 | `repo-harness-setup` | init、migrate、upgrade、repair、scaffold、capability-configuration の各 mode。router-only です |
-| `repo-harness-plan` | decision-complete な plan を作成する、または既存の plan を review します |
 | `repo-harness-product` | 上位層の product planning のための PRD・Sprint・Goal の各 mode |
-| `repo-harness-check` | workflow と release の checks、および deploy-readiness reference |
+| `repo-harness-check` | 作業範囲を計画する。計画を確認する。記録した検証結果を確認する。 |
 | `repo-harness-ship` | 完了した worktree を検証し、branch を push し、PR を開きます |
-| `repo-harness-architecture` | harness 全体の refresh を伴わない architecture docs、drift request、diagram |
+| `repo-harness-architecture` | harness 全体の refresh を伴わない architecture model、投影 docs、diagram |
 | `repo-harness-cross-review` | Generic acceptance through persistent fleet deep-reasoner task-agent + Herdr review; direct advisory runtime retired |
 | `repo-harness-chatgpt` | Oracle browser/GPT Pro consult、MCP Connector setup、bridge handoff。explicit setup 限定 |
+| `obsidian-memory` | Bot：明示的な依頼で記憶を読む、または保存する。 |
+| `repo-harness-test` | Worker：ソースのテストと実際の fixture。 |
+| `windows-python-first` | Worker：ネイティブ Windows のファイル・テキスト・シェル作業を Python で行う。 |
 | `merge-gate`(external) | exact-candidate な final gate。repo-harness は merge-gate Skill を同梱しません — [external tooling](docs/reference-configs/external-tooling.md) を参照 |
+
+Bot skills は範囲、委任、承認を決めます。Worker skills は作業を実行します。
+
+Bot: `repo-harness`, `repo-harness-check`, `repo-harness-product`,
+`repo-harness-ship`, `obsidian-memory`, `repo-harness-cross-review`,
+`repo-harness-chatgpt`. Worker: `repo-harness-setup`,
+`repo-harness-test`, `repo-harness-architecture`, and
+`windows-python-first`.
+`obsidian-memory`, and `repo-harness-ship` は明示的な呼び出しが必要です。
+通常の作業には短い brief と PR の説明を使います。PRD、Sprint、Goal は依頼された製品作業に使います。
 
 planning chain は意図的に層を分けています。
 
@@ -640,9 +596,8 @@ Claude/Codex skill path は `scripts/sync-codex-installed-copies.sh` によっ�
 
 `bun run check:ci` が唯一の CI-equivalent gate であり、
 `bun run check:release` はそこへ委譲する前に npm の unpublished-version
-preflight を追加するだけです。Governance と functional の checks は独立した
-CI job として走り、`bun run check:route-eval` はすべての prompt-guard intent と
-action に対して固定された coverage floor を保ちます。
+preflight を追加するだけです。
+Runtime routing の回帰テストは保持します。旧 routing eval gate は廃止しました。
 
 ```bash
 bun run check:ci                    # the whole gate
@@ -690,8 +645,8 @@ commit script や hooks に組み込まないでください。
 
 ## 現在の Release
 
-- npm package：`repo-harness@0.20.0`
-- Generated workflow stamp：`repo-harness@0.20.0+template@0.20.0`
+- npm package：`repo-harness@0.22.1`
+- Generated workflow stamp：`repo-harness@0.22.1+template@0.22.1`
 - GitHub repository：`Ancienttwo/repo-harness`
 - Release notes and history：[`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 

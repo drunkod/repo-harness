@@ -9,21 +9,109 @@ import {
   writeFileSync,
 } from 'fs';
 import { basename, join } from 'path';
+import { revokeUserWaiverGrant } from '../scripts/acceptance-receipt';
+import { executeVerificationContract } from '../src/effects/evidence/verification-execution';
 import {
   buildStateSnapshot,
   resolveEffectiveState,
 } from '../src/effects/state/resolve-effective-state';
 import { stateVersionOwnerPath } from '../src/effects/state/git-state-version-store';
-import { migrateLegacyActivePlan } from '../src/cli/hook/legacy-active-plan-migration';
 import {
   CONTRACT,
   PLAN,
   commitFixture,
   createEffectiveStateFixture,
+  makeFreshEvidence,
+  nativeVerificationPlan,
   resolveFixtureState,
   withRepo,
   writeFixture as write,
 } from './state/effective-state-fixture';
+
+describe('native effective-state evidence', () => {
+  test('reads executed facts and refuses a revoked user waiver', () => {
+    withRepo(cwd => {
+      makeFreshEvidence(cwd, Date.now());
+      const fresh = resolveFixtureState(cwd);
+      expect(fresh.checks.path).toBeNull();
+      expect(fresh.checks.status).toBe('passed');
+      expect(fresh.checks.freshness).toBe('fresh');
+      expect(fresh.checks.result_refs?.[0]?.run_file).toStartWith('.ai/harness/runs/');
+      expect(fresh.external_acceptance.freshness).toBe('fresh');
+      expect(fresh.external_acceptance.status).toBe('user_waiver');
+      revokeUserWaiverGrant({ root: cwd, authorityHome: process.env.HOME! });
+      const revoked = resolveFixtureState(cwd);
+      expect(revoked.checks.freshness).toBe('fresh');
+      expect(revoked.external_acceptance.freshness).toBe('stale');
+      expect(revoked.evidence_revision).not.toBe(fresh.evidence_revision);
+      expect(revoked.authority_revision).toBe(fresh.authority_revision);
+    });
+  });
+
+  test('missing, empty, and malformed plans remain non-passing observations', () => {
+    withRepo(cwd => {
+      const original = readFileSync(join(cwd, CONTRACT), 'utf8');
+      const missing = resolveFixtureState(cwd);
+      expect(missing.checks.status).toBe('missing');
+      expect(missing.checks.reason).toBe('missing_plan');
+      expect(missing.checks.freshness).toBe('missing');
+      write(cwd, CONTRACT, original + '\n## Verification Plan\n\n```json\n{"protocol":1,"checks":[]}\n```\n');
+      const empty = resolveFixtureState(cwd);
+      expect(empty.checks.status).toBe('missing');
+      expect(empty.checks.reason).toBe('empty_plan');
+      expect(empty.checks.freshness).toBe('missing');
+      write(cwd, CONTRACT, original + '\n## Verification Plan\n\n```json\n{"protocol":1,"checks":"bad"}\n```\n');
+      const malformed = resolveFixtureState(cwd);
+      expect(malformed.checks.freshness).toBe('unavailable');
+      expect(malformed.checks.status).toBeNull();
+      expect(malformed.checks.reason).toContain('VerificationPlanValidationError');
+      expect(existsSync(join(cwd, '.ai/harness/evidence/events/log.jsonl'))).toBe(false);
+      expect(existsSync(join(cwd, '.ai/harness/runs'))).toBe(false);
+      expect(existsSync(join(cwd, '.ai/harness/checks/latest.json'))).toBe(false);
+    });
+  });
+
+  test('tree churn, plan relation, and direct assessment changes cannot preserve fresh evidence', () => {
+    withRepo(cwd => {
+      makeFreshEvidence(cwd, Date.now());
+      const original = readFileSync(join(cwd, CONTRACT), 'utf8');
+      const fresh = resolveFixtureState(cwd);
+      write(cwd, 'feature.txt', 'unverified\n');
+      const churned = resolveFixtureState(cwd);
+      expect(churned.checks.freshness).toBe('missing');
+      expect(churned.external_acceptance.freshness).not.toBe('fresh');
+      expect(churned.evidence_revision).not.toBe(fresh.evidence_revision);
+      write(cwd, 'feature.txt', 'fixture\n');
+      write(cwd, CONTRACT, original.replace(`> **Plan**: ${PLAN}`, '> **Plan**: plans/plan-other.md'));
+      const mismatch = resolveFixtureState(cwd);
+      expect(mismatch.blockers).toContain('conflict:contract_plan_relationship');
+      expect(mismatch.checks.freshness).toBe('stale');
+      write(cwd, CONTRACT, original);
+      const assessmentPath = '.ai/harness/checks/change-assessment.latest.json';
+      const assessment = JSON.parse(readFileSync(join(cwd, assessmentPath), 'utf8'));
+      assessment.selection_packet.target_revision = '0'.repeat(40);
+      write(cwd, assessmentPath, JSON.stringify(assessment));
+      const stale = resolveFixtureState(cwd);
+      expect(stale.checks.freshness).toBe('stale');
+      expect(stale.external_acceptance.freshness).not.toBe('fresh');
+    });
+  });
+
+  test('a genuine current failed run remains a negative fact', () => {
+    withRepo(cwd => {
+      write(cwd, 'feature.txt', 'wrong\n');
+      write(cwd, CONTRACT, readFileSync(join(cwd, CONTRACT), 'utf8') + nativeVerificationPlan());
+      const result = executeVerificationContract({ repoRoot: cwd, contractPath: CONTRACT });
+      expect(result.passed).toBe(false);
+      expect(result.status).toBe('failed');
+      const state = resolveFixtureState(cwd);
+      expect(state.checks.status).toBe('failed');
+      expect(state.checks.freshness).toBe('fresh');
+      expect(state.blockers).toContain('checks_failed');
+      expect(state.external_acceptance.freshness).not.toBe('fresh');
+    });
+  });
+});
 
 describe('effective state resolver', () => {
   test('fails closed when artifact-derived paths escape the repository', () => {
@@ -160,34 +248,11 @@ describe('effective state resolver', () => {
     });
   }, 30_000);
 
-  test('performs legacy migration only through the explicit one-shot command', () => {
+  test('legacy-only marker is not state authority', () => {
     withRepo((cwd) => {
       write(cwd, '.claude/.active-plan', `${PLAN}\n`);
       rmSync(join(cwd, '.ai/harness/active-plan'));
       expect(resolveEffectiveState(cwd, Date.now(), { targetPaths: ['src/index.ts'] }).authoritative_plan).toBeNull();
-      const migrated = migrateLegacyActivePlan(cwd);
-      expect(migrated).toMatchObject({ migrated: true, plan: PLAN });
-      expect(readFileSync(join(cwd, '.ai/harness/active-plan'), 'utf-8').trim()).toBe(PLAN);
-      expect(() => readFileSync(join(cwd, '.claude/.active-plan'), 'utf-8')).toThrow();
-      expect(resolveFixtureState(cwd).authoritative_plan?.path).toBe(PLAN);
-    });
-  }, 30_000);
-
-  test('explicit legacy migration fails closed on a real authority conflict', () => {
-    withRepo((cwd) => {
-      write(cwd, '.claude/.active-plan', 'plans/plan-other.md\n');
-      expect(() => migrateLegacyActivePlan(cwd)).toThrow('conflicts with canonical');
-    });
-  }, 30_000);
-
-  test('explicit legacy migration fails closed when a canonical marker is unreadable', () => {
-    withRepo((cwd) => {
-      write(cwd, '.claude/.active-plan', `${PLAN}\n`);
-      const marker = join(cwd, '.ai/harness/active-plan');
-      rmSync(marker);
-      mkdirSync(marker);
-      expect(() => migrateLegacyActivePlan(cwd)).toThrow();
-      expect(readFileSync(join(cwd, '.claude/.active-plan'), 'utf-8')).toContain(PLAN);
     });
   }, 30_000);
 
@@ -521,6 +586,77 @@ describe('effective state resolver', () => {
         expect(state.profile_reasons).toContain('capability:unmapped:1');
       });
     }, 30_000);
+
+    function seedArchcontextCapability(cwd: string, source = ['  include:', '    - src/**', '  exclude:', '    - src/generated/**']): void {
+      write(cwd, '.ai/harness/policy.json', JSON.stringify({ context: { capability_source: 'archcontext' } }));
+      write(cwd, '.archcontext/model/nodes/capability.fixture.feature.yaml', [
+        'schemaVersion: archcontext.node/v2',
+        'id: capability.fixture.feature',
+        'kind: capability',
+        'name: Feature',
+        'status: active',
+        'summary: Fixture feature',
+        'responsibilities:',
+        '  - Own the feature sources',
+        'source:',
+        ...source,
+        'extensions:',
+        '  contractFiles:',
+        '    agents: AGENTS.md',
+        '    claude: CLAUDE.md',
+        '  lspProfile: typescript-lsp',
+        '  verification: []',
+        '',
+      ].join('\n'));
+      commitFixture(cwd, 'seed archcontext capability');
+    }
+
+    test('archcontext ownership comes from archctx resolve, including source.exclude', () => {
+      withRepo((cwd) => {
+        seedArchcontextCapability(cwd);
+        const state = resolveEffectiveState(cwd, Date.now(), {
+          targetPaths: ['src/feature.ts', 'src/generated/out.ts'],
+          operationKind: 'edit',
+        });
+        expect(state.blockers).not.toContain('capability_registry:invalid');
+        expect(state.profile_reasons).toContain('capability:unmapped:1');
+      });
+    }, 60_000);
+
+    test('archcontext ownership is not reused after a target path turns into a directory', () => {
+      withRepo((cwd) => {
+        // The exact include owns the file; ArchContext gives the directory contents no owner.
+        seedArchcontextCapability(cwd, ['  include:', '    - src/thing']);
+        write(cwd, 'src/thing', 'file\n');
+        commitFixture(cwd, 'add src/thing as a file');
+        const options = { targetPaths: ['src/thing'], operationKind: 'edit' as const };
+        expect(resolveEffectiveState(cwd, Date.now(), options).profile_reasons).not.toContain('capability:unmapped:1');
+        rmSync(join(cwd, 'src/thing'));
+        write(cwd, 'src/thing/inner.ts', 'export {};\n');
+        commitFixture(cwd, 'turn src/thing into a directory');
+        expect(resolveEffectiveState(cwd, Date.now(), options).profile_reasons).toContain('capability:unmapped:1');
+      });
+    }, 60_000);
+
+    test('archcontext ownership fails closed when archctx cannot run', () => {
+      withRepo((cwd) => {
+        seedArchcontextCapability(cwd);
+        const previous = process.env.REPO_HARNESS_NODE_BIN;
+        // A non-executable runtime makes the package-local archctx unavailable.
+        process.env.REPO_HARNESS_NODE_BIN = join(cwd, '.ai/harness/policy.json');
+        try {
+          const state = resolveEffectiveState(cwd, Date.now(), {
+            targetPaths: ['src/feature.ts'],
+            operationKind: 'edit',
+          });
+          expect(state.blockers).toContain('capability_registry:invalid');
+          expect(state.profile_reasons).toContain('capability:registry:invalid');
+        } finally {
+          if (previous === undefined) delete process.env.REPO_HARNESS_NODE_BIN;
+          else process.env.REPO_HARNESS_NODE_BIN = previous;
+        }
+      });
+    }, 60_000);
 
     test('registry and policy changes advance the state revision, durable version, and authority revision', () => {
       withRepo((cwd) => {

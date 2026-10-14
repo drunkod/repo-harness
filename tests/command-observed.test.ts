@@ -22,8 +22,8 @@ function checks(repoRoot: string): Record<string, unknown> {
   return JSON.parse(readFileSync(join(repoRoot, '.ai/harness/checks/post-bash-latest.json'), 'utf8')) as Record<string, unknown>;
 }
 
-function commandInput(command: string, toolOutput: unknown, exitCode: number): string {
-  return JSON.stringify({ tool_input: { command }, tool_output: toolOutput, exit_code: exitCode });
+function commandInput(command: string, stdout: string, exitCode: number): string {
+  return JSON.stringify({ tool_input: { command }, tool_response: { stdout, stderr: '', interrupted: false }, exit_code: exitCode });
 }
 
 describe('runCommandObserved', () => {
@@ -34,7 +34,7 @@ describe('runCommandObserved', () => {
         repoRoot,
         input: JSON.stringify({
           tool_input: { command: 'rg foo' },
-          tool_output: 'src/a.ts:foo\nsrc/b.ts:foo\n',
+          tool_response: { stdout: 'src/a.ts:foo\nsrc/b.ts:foo\n', stderr: '', interrupted: false },
           exit_code: 0,
         }),
         env: { PATH: '' },
@@ -64,13 +64,34 @@ describe('runCommandObserved', () => {
     }
   });
 
+  test('Pi cannot import passing verification evidence without an explicit integer exit code', () => {
+    for (const exitCode of [undefined, null, '0', 0.5]) {
+      const repoRoot = workspace('command-observed-pi-unknown');
+      try {
+        const result = runCommandObserved({
+          repoRoot,
+          input: JSON.stringify({ tool_input: { command: 'bun run check:type' }, tool_response: { output: 'All checks passed', isError: false }, exit_code: exitCode }),
+          env: { PATH: '', HOOK_HOST: 'pi', EXIT_CODE: '0' },
+          dependencies: { hasExecutable: () => false },
+        });
+        expect(result).toMatchObject({ exitCode: 0, reason: 'ok' });
+        expect(checks(repoRoot)).toMatchObject({ exit_code: null, status: 'unknown', verbosity_class: 'inline',
+          suggested_runner: 'inline', raw_output_path: null, raw_output_sha256: null });
+        expect(existsSync(join(repoRoot, '.ai/harness/runs/bash-output'))).toBe(false);
+        expect(readAcceptedEvents(repoRoot).accepted).toHaveLength(0);
+      } finally {
+        rmSync(repoRoot, { recursive: true, force: true });
+      }
+    }
+  });
+
   test('stores long output as raw evidence and uses an injected runner probe', () => {
     const repoRoot = workspace('command-observed-long');
     try {
       const output = Array.from({ length: 201 }, (_, index) => `line-${index}`).join('\n');
       const result = runCommandObserved({
         repoRoot,
-        input: JSON.stringify({ tool_input: { command: 'rg foo' }, tool_output: output, exit_code: 0 }),
+        input: JSON.stringify({ tool_input: { command: 'rg foo' }, tool_response: { stdout: output, stderr: '', interrupted: false }, exit_code: 0 }),
         dependencies: { hasExecutable: (name) => name === 'rtk', now: () => new Date('2026-07-21T12:34:56.000Z') },
       });
       expect(result.exitCode).toBe(0);
@@ -160,8 +181,8 @@ describe('runCommandObserved', () => {
       const structured = { nested: true, values: [1, 2] };
       const result = runCommandObserved({
         repoRoot,
-        input: JSON.stringify({ tool_input: { command: 'bun test' }, tool_output: structured }),
-        env: { PATH: '', TOOL_OUTPUT: '', EXIT_CODE: '0' },
+        input: JSON.stringify({ tool_input: { command: 'bun test' }, tool_response: structured }),
+        env: { PATH: '', EXIT_CODE: '0' },
         dependencies: { hasExecutable: () => false },
       });
       expect(result.exitCode).toBe(0);
@@ -170,6 +191,31 @@ describe('runCommandObserved', () => {
         exit_code: 0,
         output_line_count: 1,
         raw_output_bytes: Buffer.byteLength(JSON.stringify(structured)),
+      });
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('reads stdout and stderr from the host tool_response on separate lines', () => {
+    const repoRoot = workspace('command-observed-tool-response');
+    try {
+      const result = runCommandObserved({
+        repoRoot,
+        input: JSON.stringify({
+          tool_name: 'Bash',
+          tool_input: { command: 'git status --short' },
+          tool_response: { stdout: ' M src/a.ts', stderr: 'hint: advice', interrupted: false },
+        }),
+        env: { PATH: '' },
+        dependencies: { hasExecutable: () => false },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(checks(repoRoot)).toMatchObject({
+        command: 'git status --short',
+        exit_code: 0,
+        output_line_count: 2,
+        raw_output_bytes: Buffer.byteLength(' M src/a.ts\nhint: advice'),
       });
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });

@@ -2,9 +2,351 @@
 
 All notable changes to this skill are documented here.
 
-## [0.20.0] - 2026-10-01
+## [0.22.1] - 2026-10-13
+
+0.22.0 was tagged but not published to npm. 0.22.1 contains all of 0.22.0
+and the changes below.
 
 ### Added
+
+- `repo-harness review round --launch app-terminal` runs acceptance review
+  in the Claude desktop app without Herdr. The first call returns the exact
+  OAR host command and sends no request. Claude runs the command once in an
+  app Terminal tab. The next call binds the host by its claim, process
+  identity and exact argv, then sends the round. The OAR host, the Seatbelt
+  profile and the Receipt do not change. (#657)
+
+### Breaking
+
+- The Pi host extension now requires Pi `1.2.0` exactly. Pi `1.1.0` fails
+  with `PI_HOOK_UNSUPPORTED_VERSION`. Upgrade Pi to `1.2.0` with the
+  package. A Pi run started by a custom message gets its own run ID and
+  Stop check. It is not a `UserPromptSubmit`. (#683)
+
+### Changed
+
+- Pin `archctx` and `archctx-contracts` to exact version `0.7.2`. A busy
+  archctx daemon now keeps its connection file after a timed-out health
+  check. The CLI then fails with `AC_RUNTIME_UNAVAILABLE` and names the
+  daemon pid. The contract schemas do not change. (#659)
+
+### Fixed
+
+- Merge-gate provider reads use the shared trusted host `gh` resolver. An
+  empty CLI review decision is normalized to null. The standard native
+  Windows `gh.exe` installation is supported. (#654)
+- A lock acquire retries the single-owner election after a slow
+  stale-owner reclaim, so a free lock is no longer reported as a timeout.
+  (#656)
+- Sprint lease reconcile no longer keeps the lease token file because of a
+  `printf | grep -q` SIGPIPE race under `pipefail`. (#661)
+- The Pi hook bridge classifies a hook result after the child exits. A
+  child that closes stdin early no longer changes the error code. Every
+  rejection after the child starts includes the bounded child stderr.
+  (#673)
+
+## [0.22.0] - 2026-10-13
+
+### Changed
+
+- **Breaking:** repo-harness supplies tools and evidence, and the Bot
+  schedules work. The projection job queue, the hook architecture cascade
+  and the in-CLI automation scheduler are removed. Global
+  `projection_apply` accepts only `manual` or `disabled`.
+  `projection_failure_gate` is removed. `update` and `init` migrate a
+  retired section once (`automatic` becomes `manual`); readers refuse it
+  until then. (#617)
+- Pin `archctx` and `archctx-contracts` to exact version `0.7.1`. The
+  architecture docs use renderer `archcontext.docs-renderer/v5` and
+  projection manifest v2. Manifest provenance records only the CodeGraph
+  package and version. Module pages show component entrypoints, sizes and
+  outbound relations. Mermaid labels keep the model text. Path ownership
+  uses the archctx parent-chain rule. (#629, #647)
+- Use Bun 1.4.3 in CI and in the Bun type definitions. (#620)
+- A PR runs typecheck and affected tests once. The full suite runs once a
+  day on `main`. (#625)
+- Implementation sub-agents do not run checks. The parent agent owns build,
+  typecheck, tests and integration. Committing workers use separate
+  worktrees. Evidence roles run their named check and do not commit.
+  (#626, #638)
+- SessionStart host configuration scans need explicit per-session scope.
+  Findings contain no repeat-scan command. (#642)
+- The daily governance lane and `check:release` run the read-only
+  architecture projection check. A result other than `noop` fails the lane,
+  and the daily CI report opens a repair issue. The worker and Bot guidance
+  build CodeGraph code facts first. (#648)
+- Under `capability_source: archcontext`, ArchContext is the only path
+  ownership authority. The resolver and the pre-edit hook call
+  `archctx resolve --paths-from` in one batch. Node `source.exclude` and glob
+  includes are accepted. An archctx failure fails closed with the
+  `capability_registry:invalid` blocker. Registry mode keeps longest-prefix
+  matching. (#649)
+- The architecture model owns directories with globs and excludes instead
+  of explicit file lists. Each of the 45 multiply-owned files now has one
+  owner. (#653)
+
+### Added
+
+- Rebuild the operator console on Kumo with a development progress board.
+  Add read-only Agents, Skills and Hooks pages. (#609, #611)
+- Read back a saved worker request after a lost response. The read path
+  never resends a request or starts a worker. (#610)
+- Add the `windows-python-first` Skill to the `minimal` and `full`
+  profiles. It applies only on native Windows. (#614)
+- Document the product architecture: one overview and one page for each of
+  37 capabilities in 6 domains. (#632)
+- Tell the Bot when to read architecture evidence: after a worker reports
+  `done` with source changes, and before review. Scan added and renamed
+  paths for ownership first, then run the projection check. (#635)
+
+### Fixed
+
+- A second accepted major change in one workspace is no longer refused with
+  `AC_PROJECTION_APPLY_COMMITTED`. Each accepted change gets its own
+  request id. (#634)
+- `update` runs the leftover check in the package that owns the runtime. An
+  older running CLI no longer fails on a newer skill catalog. (#628)
+- The macOS pipeline ledger identifies local filesystems by name, not by
+  `statfs` index. Local APFS and HFS+ volumes are accepted. (#621)
+- PM HTTP effects are fenced after disable. Accepted delivery receipts are
+  kept after a guard denial. Public errors are redacted. (#619)
+- Development activity sends SIGTERM on timeout, masks absolute paths and
+  marks a truncated PR list as partial. (#623)
+- Setup snapshot composition moves into the CLI layer. The state boundary
+  check passes. (#643)
+- Remove retired drift request wording from the routing corpus. (#633)
+- Stabilize timing-sensitive test fixtures. (#639, #645, #646)
+
+## [0.21.2] - 2026-10-10
+
+### Added
+
+- Add native Pi 1.1.0 host support. The Pi package provides the
+  `repo-harness` router, the `repo-harness-check` skill and an extension. In
+  opted-in repositories the extension runs typed hook checks on native
+  `edit` and `write`, direct or nested in codemode. The peer dependency is
+  pinned to exactly Pi `1.1.0`; other versions are unavailable. Hook
+  telemetry records host `pi`. (#607)
+- Show read-only Kanban runtime status from native capture sources or the
+  optional Herdr 0.9.3 / protocol 22 adapter. Codex capture needs no Python.
+  Claude and Pi capture use a bundled PTY relay that needs Python 3.9 or
+  later. PTY capture runs on macOS and Linux only. Claude lifecycle status is
+  not yet accepted. Status never advances tasks or accepts results. (#606)
+- Add default-off strategy context and proposal validation. Human-owned project
+  documents remain canonical. Context reads do not dispatch agents or edit memory.
+  The optional Skill requires an explicit install. (#599)
+- Add the export-only wake contract and explicit repository pilot. The pilot
+  keeps its 128 KiB file and 4 MiB request limits. Global limits stay at
+  64 KiB and 1 MiB. Proposals grant no execution authority. (#601)
+- Add five closed PM Bot operations: capabilities, status, dispatch,
+  follow-up and collect. They reject caller-supplied commands, paths, runtime
+  flags and permission changes. Dispatch needs operator approval for the exact
+  worker scope and runs a fixed OAR coding host in Herdr. Existing task,
+  claim, worktree and result records stay authoritative. Add a Hermes PM
+  profile adapter that exposes only these five tools. Only macOS Codex
+  workers are conditionally supported. Live Hermes configuration and a real
+  coding-provider task are not yet verified. The Hermes restriction is a tool
+  boundary, not an OS sandbox. (#608)
+- Add a scoped PM MCP server for Bot controllers. It exposes the same bounded
+  PM operations over MCP with server-owned repository and action scope. It
+  keeps task IDs, atomic claims, fencing and operation receipts. It adds no
+  shell tool, ledger, approval identity or credentials. Dot hosts, live
+  providers and event wake are not yet verified. (#615)
+
+### Changed
+
+- Upgrade OAR to `0.45.1`. (#607)
+- macOS native CI installs the pinned Herdr 0.9.3 binary and verifies its
+  checksum before Herdr-dependent tests. (#612)
+- CI pins Bun 1.4.3. (#616)
+- New task worktrees default to `/tmp/<repo>-wt-<slug>`, and MCP coding
+  workspaces default to `/tmp/repo-harness-mcp-worktrees`. Native Windows
+  uses its system temp directory instead of `/tmp`. New policies store the
+  portable value `{{system_tmp}}/{{repo}}-wt-{{slug}}`, and each host
+  resolves `{{system_tmp}}` at run time. Older repo-harness versions do not
+  understand this token. `contract-worktree` now reads the stored
+  `worktree_dir_template`, so existing downstream policies keep their value.
+  Set it to `../{{repo}}-wt-{{slug}}` to keep the old location. (#600)
+- `start` refuses an existing target path. It reuses the path only when this
+  clone registers it on the expected branch, unlocked, with no other owner,
+  and it matches the identity that `start` recorded at creation. The
+  checkout directory must be yours and not group or other writable. Its
+  `.git` file and Git metadata must be yours and not other-writable. A
+  replaced directory with a copied `.git` file is refused. An older worktree
+  without that record is refused with a recovery instruction. This works
+  with umask 002 and shared Git metadata. On a platform without a user id,
+  `start` still creates worktrees but cannot reuse them. A failed
+  `git worktree add` releases only the empty path that it claimed. Removal
+  also deletes the identity record. (#600)
+- Closeout removes a merged, clean worktree and its branch through the exact
+  cleanup checks. It releases only that worktree's own marker. MCP cleanup now
+  also refuses marked worktrees and retained verification evidence. Cleanup of
+  a registered worktree whose branch is missing is refused. (#600)
+- Each SessionStart removes left-behind worktrees under the managed root that
+  are merged, clean and unowned and whose reflog shows a commit made on the
+  branch. A fast-forward, reset or rebase entry alone does not count. It keeps
+  untouched new branches, unreadable reflogs and worktrees with submodules.
+  The sweep has a time limit and reports processed paths and deferred counts.
+  The next session resumes an interrupted removal. Removal also deletes
+  Git-ignored files in that worktree. A reboot or an age-based `/tmp` cleaner
+  can remove worktrees; commit or push work first. When more worktrees are
+  missing than one sweep can handle, the sweep records them first, and later
+  sessions finish the merged branches. (#600)
+- The Herdr webhook notifier sends `done` and `blocked` notifications for a
+  registered task worktree under the system temp directory. Other temporary
+  paths stay filtered. An installed notifier that points to its own source
+  directory must be updated there. (#600)
+- `test:files` and `check-ci.sh` now run each test file in its own Bun
+  process and fail a file that leaves a new `/tmp/*-wt-*` path owned by the
+  current user. The check never deletes the path. A directory argument runs
+  only its own test files, and `--coverage` keeps one combined summary.
+  (#600)
+
+## [0.21.1] - 2026-10-08
+
+### Added
+
+- Add a read-only Architecture workspace to the operator board. It groups
+  modules by domain and shows model validity, generated summary and §3 state
+  separately. A module page shows a one-hop graph, model facts, flows, §3 text
+  and the review prompt, with a copy button for the exact Bot command. The
+  board serves three new GET/HEAD architecture routes with ETag support. (#590)
+- Add the operator capability to the architecture model. (#590)
+- Add a typed document handoff envelope, its validation and canonical
+  rendering, and a short SOP. (#587)
+
+### Changed
+
+- Pin `archctx` and `archctx-contracts` to exact version `0.6.3`.
+  Align architecture and refactor policies, init defaults, and clean-room
+  verification with these dependencies. (#586)
+- Upgrade `@botiverse/oar` from `0.18.0` to `0.37.0`. The Generic review
+  host keeps its API surface, provider defaults and Seatbelt isolation. OAR
+  now stops a provider turn within 10 seconds after an abort and cleans up
+  the provider process tree. The lockfile no longer installs the Cursor SDK.
+  (#595, #598)
+- The prompt hook boundary text now says that a main merge needs explicit
+  current-task authorization. (#596)
+- `repo-harness module review-prompt` now fails with `secret_detected` when
+  the prompt contains a URL with a filled `token`, `key`, `auth`, `code`,
+  `sig` or `signature` query field. MCP redaction uses the same patterns. (#590)
+- Operator API requests with a `Sec-Fetch-Site` value other than
+  `same-origin` or `none` now get 403. (#590)
+
+### Fixed
+
+- Restore the collaboration flow proof after a removed source symbol. The
+  architecture projection no longer reports unrelated drift. (#589)
+- Remove stale `.herdr-stage-*` and `.herdr-stage-*-backup` directories that
+  an interrupted Herdr skill install left in the host skill roots. Only old,
+  provably owned entries are removed; every removal and skip is reported.
+  (#593)
+- Find a compatible Node runtime in Homebrew versioned kegs
+  (`/opt/homebrew/opt/node@N` and `/usr/local/opt/node@N`). A host with
+  Homebrew `node` 26 and keg-only `node@24` no longer fails
+  `repo-harness init` at architecture projection readiness. (#594)
+
+## [0.21.0] - 2026-10-06
+
+### Breaking changes
+
+- `init --apply` and global runtime setup now require the release-matched
+  `herdr --skill` output. Hosts without that binary fail setup.
+  Managed skill writes preserve user edits and refuse unowned targets. (#582)
+
+- MCP `engineer_acquire` now acquires one offer from a trusted
+  `engineer_prepare` observation. It requires `idempotency_key` and
+  `observation_ref`. It no longer accepts `max_attempts`.
+  Call `engineer_prepare` first. Then call `engineer_acquire` with the
+  observation ref, one stable idempotency key, and all 13 fields of one offer
+  from that observation. The same key returns the stored result.
+- The first acquisition on a store requires the protocol 2 acquisition cutover
+  seal. A store with pre-existing receipts but no seal fails with
+  `engineer_acquisition_ledger_cutover_required`. A new empty store
+  initializes the seal itself.
+- A selected or automatic acquisition that is not an idle poll writes a
+  ledger receipt. The same key replays that stored result.
+- MCP acquisition now surfaces the typed `engineer_observation_*` and
+  `engineer_acquire_next_*` codes.
+
+### Added
+
+- Export committed architecture module facts and bounded review prompts with
+  `repo-harness module`. Reads do not run configured Git helpers. (#536)
+- Read immutable Docs graph snapshots and compute Agent-config rule and policy
+  projections. These are backend foundations. New frontend views are deferred.
+  (#579, #580)
+- Read publication health with `repo-harness pipeline health --json`.
+  Writers save publication intent before commit. A later writer or matching
+  replay can repair a failed snapshot export without repeating the mutation.
+  Unsynced-command replay, Mini setup and a real Bot pilot are deferred. (#581)
+
+- Add `repo-harness engineer acquire` to acquire one exact observed Work Package.
+  The command checks the full assertion and uses a durable transaction key.
+- Add the `claim_actor_lease_unavailable` error code. Live Claim listing now
+  refuses a receipt whose Lease state is unknown. The receipt store stays valid.
+  Operators repair the Lease, not the receipt store.
+
+### Changed
+
+- Unknown Leases now occupy a concurrency group. Only a proven-free Lease is
+  free capacity. The unknown reason is part of the concurrency revision.
+- Engineer acquisition reloads the Profile limit and counts live Claims under
+  the Engineer Binding lock before the Fleet mutation. A full Profile refuses
+  with `fleet_acquire_failed`.
+
+- Stop copying `workflow-state.sh` into consumer repositories during adoption.
+  Use `repo-harness hook-lib path` to source the installed package library.
+  Packaged workflow helpers use that library. Init and upgrade preserve legacy
+  repo copies and user edits. Doctor reports copies with migration steps.
+  Upgrade no longer refreshes the legacy library. It reports consumer copies
+  with manual migration steps. Upgrade check exits 1 while a copy remains.
+- `prepare-handoff` and `summarize-failures` now exit 1 if the workflow-state
+  library is missing. They no longer write a substitute handoff or fall back to
+  the default failure log.
+- `repo-harness run archive-workflow` and `repo-harness run summarize-failures`
+  now use the package library. Edits in a repo-local `workflow-state.sh` copy
+  no longer affect these commands.
+
+### Fixed
+
+- Save the complete review packet before launch preparation or reviewer start.
+  A failed start preserves the packet. A changed retry fails before another
+  launch and reports how to inspect the saved subject. (#578)
+- Refuse invalid principals, incomplete collaboration reads and unknown Lease
+  capacity. Protect state locks, hook ownership and observation revisions.
+  (#551, #552, #553, #554, #556, #558, #562)
+- Bind pipeline gates and architecture publication to current evidence.
+  Keep committed publication receipts available after repair. (#547, #555, #559)
+- Use revision-bound MCP codes, recoverable OAuth consent retries and one doctor
+  client. Protect adoption rollback and exact index state. (#544, #550, #564)
+- Report stale operator panes, keep disclosure focus and refresh panel state.
+  Pause Organization-only readers while another tab is active. (#568, #570)
+- Reduce repeated log, lease, inbox and runtime probes without changing their
+  source authority. (#569, #571, #572, #573)
+- Resolve Windows Git installation roots and recover midnight CI observations.
+  Run native macOS review fixtures in the required HOME-isolation job.
+  (#566, #577, #578)
+
+- Managed Draft publication no longer needs a host merge seal. The publication
+  receipt moves to protocol 3 and records PR, head, base and candidate diff
+  identity only. Merge readiness still blocks a moved base. Receipt protocols 1
+  and 2 are retired and fail closed without migration.
+- Publication reopen, takeover and abandon now check historical publication
+  identity. A target base advance no longer blocks these repair transitions.
+
+## [0.20.0] - 2026-10-05
+
+This preparation covers `v0.19.5..ffe70133`.
+Additional merged changes through `363009be` are included below.
+
+The earlier `281e6555` commit was a preparation draft; the release was cut from `0482c621`.
+`v0.20.0` is tagged on `0482c621` and was published to npm on 2026-10-05.
+
+### Added
+
+- Document a safe worktree lifecycle and a dated checkout inventory.
+  Garbage collection and migration remain unimplemented. (#480)
 
 - Persistent Herdr task-agent lifecycle and CLI commands for task-scoped execution,
   protected result collection, and repository-scoped workspace cleanup.
@@ -13,7 +355,35 @@ All notable changes to this skill are documented here.
   for maintenance. Runtime verification rejects unhealthy connections; a pending
   daemon replacement preserves the verified CLI and its dependency closure.
 
+- Add persistent domain review through `repo-harness review` and OAR.
+  Isolate macOS reviewers with Seatbelt. (#476)
+- Add Herdr notifications for a required Bot webhook and optional Slack,
+  Discord, and Telegram channels. Select `blocked` and optional `done` per channel.
+  The Kanban shows read-only plugin and delivery status. (#500, #509)
+- Add the phase 1 R1-R4 pipeline observer ledger and read-only board projection.
+  Bind observations to source evidence. Record facts without automatic dispatch,
+  merge, or cleanup. Mini deployment and live cross-machine acceptance remain
+  outside this release preparation. (#519)
+
+- Add `upgrade` to check retired project and home files without writes.
+  `--apply` backs up targets and removes only unchanged owned bytes.
+  Changed and unowned items remain in the report.
+- Show the same leftover count in setup checks and after successful updates.
+  Update does not apply cleanup.
+- Add historical fingerprints and release-byte fixtures with provenance.
+- Refresh unchanged owned skill copies and two stale project assets with apply.
+  Report old state artifacts. Require `--include-state-artifacts` and ownership
+  proof for state removal. Keep third-party plugins and user rule lines.
+
 ### Changed
+
+- Require explicit Change Assessment preparation after native verification
+  and before review or acceptance. Missing or stale evidence still fails closed.
+  Empty or missing Verification Plans cannot pass. (#523)
+- Align the Herdr 0.9.3 floor, current reference commands, coding MCP tool counts,
+  and generated task-flow guidance with their owning runtime surfaces. (#521)
+
+- Keep user global hook commands that only contain a retired hook path during upgrade cleanup.
 
 - Replace the old Codex goal MCP names with task-goal commands.
 - Retire the Codex plugin review provider, App-thread execution backend, and
@@ -22,12 +392,124 @@ All notable changes to this skill are documented here.
 
 - Publish host-invariant guidance through the reference-document reader.
 
+- Pin `@botiverse/oar` to exact version `0.18.0`. Require Node `>=24 <26`.
+  ArchContext and its contracts remain pinned to `0.6.1`. (#481, #507)
+- Keep the whole runtime checks cache directory private in Git and installed copies. Keep legacy cache bytes in place without restoring a reader.
+- Make Kanban read-only. Use CLI or MCP for task messages. (#482)
+- Split Bot decisions from worker execution. Restore P1/P2/P3 due diligence
+  and standalone host instructions. Limit plans to the requested scope.
+  Keep four operation boundaries and explicit owner approval for merge.
+  Use `gh`, `git`, or the GitHub API for GitHub operations.
+  (#483, #486, #487, #488, #489, #491, #495, #515)
+- Run the full union of core and integration tests in isolated file workers.
+  Start tests and child tools with temporary HOME and tool roots under `/tmp`.
+  Limit Herdr layouts to three panes per tab. (#504, #518, #496)
+- Deduplicate historical upgrade fixtures through verified Git blobs. Preserve
+  every release file byte, mode, path, and provenance check. (#525)
+- Record scheduler retirement guidance and OAR session resume ownership.
+  These documents do not establish live provider or deployment acceptance.
+  (#478, #479, #485)
+
+- Migrate pending post-edit journal v1 events with
+  `repo-harness state migrate-post-edit-journal-v1 --json`. Hooks keep v1 files
+  until this explicit migration runs.
+
+- Remove empty skill lifecycle hooks, `assets/skill-hooks.json`, and `scripts/run-skill-hook.ts`. Scaffold and template assembly call their tasks directly.
+- Remove `scripts/setup-plugins.sh`. Use `repo-harness install`.
+- Remove initializer question packs v2 and v3. The loader accepts v4 only.
+- Remove `state migrate-legacy-active-plan`. Repository adoption keeps its transactional marker migration.
+- Remove `engineer runtime-effect migrate-v1`. An unmigrated provider-thread V1 store stays blocked. This version has no path to unblock it. Migrate with v0.19.0 through v0.19.5 before upgrading.
+- Remove the full-disk MCP policy option. Setup still detects and disables old full-disk settings.
+- Remove init flags `--configure-codegraph`, `--brain-root`, `--brain-mode`, and `--interactive`. Remove update flags `--repo`, `--dry-run`, and `--interactive`. The CLI uses its standard unknown-option error.
+- Remove the `context-contract-sync` helper and script. Remove the no-op `capability-config --no-sync-contracts` option.
+- Remove `check-task-sync --validate-waivers-only` and `check-task-workflow --strict`. Use `check-task-workflow` for read-only diagnostics. Old downstream strict calls fail with exit 2. Adoption or init removes only the exact `repo-harness run check-task-workflow --strict` package entry. Other forms need an explicit user edit. Custom commands stay unchanged.
+
 ### Fixed
+
+- Match complete historical installer hook commands during upgrade cleanup.
+  Keep user commands that only mention retired paths. Reject existing directories
+  and dangling symlinks in stage-owned-copy. Keep retained backups. (#520)
+- Check notify plugin inventory before config directory creation. Refuse invalid
+  or non-local sources. Stop foreign local ownership before link or enable.
+  Keep Herdr as the config-path authority. (#521)
+- Isolate the CI governance preflight fixture from shared-checkout context files.
+  Keep the real context scanner and the intended failure boundary. (#526)
+- Read exact legacy hashed check IDs at immutable validation and provenance
+  boundaries. Keep current plain-ID writes and all execution bindings. Historical
+  evidence does not bypass a current toolchain mismatch. (#527)
 
 - Sample the MCP working baseline after request delivery before accepting an idle
   observation, and keep observation cancellation separate from result collection.
 - Reap owned review providers after post-spawn setup failures and preserve CLI
   help section spacing.
+
+- Recognize owned task-session process exit states and release the automation
+  planning lock before final settlement. (#471, #475)
+- Remove only owned dangling skill links during install. (#501)
+- Reuse PR CI repair issues and retain report errors. (#502)
+- Escape Slack control text. Reject temporary paths through symlink aliases.
+  Replace notify source files through exclusive temporary copies. Repair damaged
+  debounce state and reject future timestamps. (#508)
+- Stabilize six load-sensitive checks without removing their coverage. (#516)
+- Keep Herdr test socket paths within native limits. Prevent the run-identity
+  fixture from leaving unrelated detached tooling work after teardown. (#524)
+
+- Keep and report a modified retired facade while selected runtime sync continues.
+
+### Removed
+
+- Remove `scripts/emit-verify-evidence.ts`, `verify-producer.ts`, and `checks-materializer.ts`. Remove the `.ai/harness/checks/latest.json` chain and `state repair-artifact`. Keep other check caches.
+- Acceptance, review, and current archive require an explicit native report under `.ai/harness/runs/`. State and task freeze evaluate the owning execution records. Empty or missing Verification Plans cannot pass.
+- Keep long Verification Plan check IDs intact. Old records that hashed an ID now read as missing. Execute that plan again to write an exact record. Keep the old ledger bytes.
+- Writing an acceptance projection to a tracked file changes the native source tree and makes its prior execution proof stale. Generic review uses an ignored session projection.
+- Publication receipts and PR receipt markers use V2. Old finalized V1 receipts, markers, and digests fail closed. This release has no automatic upgrade. Publication identity, create intent, and prepare remain V1.
+
+- Retire direct cross-review. Use `repo-harness review` in Herdr.
+  Drain old reviewer sessions with the previous package before update. (#484)
+
+- Remove unused AXR6/AXR7 proposal scripts and the global-hook canary script.
+- Remove the v1 initializer question pack and the unused v1/v3 schemas.
+- Remove unused scripts/lib context files, Operator Task Message modules,
+  and the old workflow contract install planner.
+- Remove the campaign CLI, engineer acquisition-cutover commands, auto-campaign Skill, container scripts, and Docker sources. Remove campaign fields from the Operator API and UI.
+- Budget board no longer counts campaign grants.
+- Remove campaign execution types and parsers. ProgramAuthorizationV2 uses protocol 2. Old grants require a new operator mint.
+
+Campaign execution moved to the existing [repo-harness](../SKILL.md), [repo-harness-product](../assets/skills/repo-harness-product/SKILL.md), and [repo-harness-check](../assets/skill-commands/repo-harness-check/SKILL.md) Bot skills. They use Herdr/OAR to dispatch and collect work.
+
+- Remove shipped research scripts: `axr7-consumer-e2e.ts`, `session-context-packet-panel.ts`, `benchmark-general-repo-reader.ts`, `run-bdd2-evals.ts`, `c9-collaboration-canary.ts`, `hook-dispatch-diet-report.ts`, `route-nl-vs-ts-eval.ts`, `loop-engine-cutover-gate.ts`, `run-debug-ground-truth-eval.ts`, `mcp-observability-report.ts`, and `akn00-native-execution-admission.ts`.
+- Remove `benchmark:mcp-reader`, `benchmark:debug`, and `check:route-eval`. Retire the BDD2, BDD3, and debug ground-truth data. Keep the hook telemetry reader, CI full-history check, scaffold loader, ME2B, and shared collaboration test dependencies.
+- Remove the six hidden hook commands from `repo-harness`: `circuit-breaker-record`,
+  `prompt-route`, `prompt-guard-decide`, `minimal-change`, `review-rubric`, and
+  `review-subject`. Use `repo-harness-hook` for these commands.
+
+### Upgrade limits
+
+- The removed provider-thread V1 migration has no replacement in this version.
+  Migrate that store with `0.19.0` through `0.19.5` before upgrade.
+- ProgramAuthorizationV2 uses protocol 2. Mint new operator grants for old grants.
+- `upgrade` reports leftovers by default. `--apply` changes files only after
+  ownership and byte checks. Normal update reports leftovers and does not clean.
+- Pipeline phase 1 records observations. Automatic dispatch, merge, cleanup,
+  test-slot control, and plugin delivery governance remain deferred.
+
+- The earlier long-ID restriction above describes the initial cutover.
+  Exact legacy-ID reads now supersede that restriction. Current execution,
+  snapshot, contract, and toolchain checks still apply. (#527)
+
+### Earlier merged work covered by this release
+
+- Persistent Herdr task-agent, task-goal, and protected result cutover. (#464)
+- Corrected 0.19.5 release history and the 0.20.0 preparation filing. (#465, #522)
+- Canonical host invariants, Pi extraction research, and fleet responsibility trace. (#466)
+- First-offer staleness coverage and trusted server-time observation preparation. (#467, #468)
+- Request-delivery working baselines and observed-idle completion checks. (#469)
+- Durable selected-acquisition receipts and earlier R2 campaign membership guards.
+  Campaign execution is retired in this release. (#470, #472)
+- Verified leftover inventory, proof-bound refresh, and explicit backup transactions. (#511)
+- Unused surfaces, research tools, hooks, migrations, flags, and campaign retirement.
+  Keep explicit post-edit migration and the published research archive.
+  (#510, #512, #513, #514, #517)
 
 ## [0.19.5] - 2026-09-30
 
@@ -337,7 +819,7 @@ it rather than beside it.
   A host with only tmux installed fails strict readiness after upgrading.
   Drain reviewers hosted by the previous runtime and rebind terminal endpoints
   before the upgrade — see
-  [`20260909-herdr-runtime-cutover.md`](researches/20260909-herdr-runtime-cutover.md).
+  [`20260909-herdr-runtime-cutover.md`](https://github.com/Ancienttwo/repo-harness/blob/archive/docs-researches-20261004/docs/researches/20260909-herdr-runtime-cutover.md).
 - **`tasks/current.md` is no longer a tracked file.** It was tracked but derived
   entirely from untracked local markers, so one session's snapshot could
   misrepresent itself as mainline truth. It is now untracked and gitignored, the

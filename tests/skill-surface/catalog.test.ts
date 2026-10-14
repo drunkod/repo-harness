@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import {
@@ -30,6 +31,7 @@ function codes(value: ReturnType<typeof validateSkillSurfaceCatalogValue>): stri
 const ROUTER = {
   name: "repo-harness",
   kind: "router",
+  audience: "bot",
   source: ".",
   provider: null,
   hosts: ["claude", "codex"],
@@ -45,6 +47,7 @@ const ROUTER = {
 const FACADE = {
   name: "repo-harness-plan",
   kind: "facade",
+  audience: "bot",
   source: "assets/skill-commands/repo-harness-plan",
   provider: null,
   hosts: ["claude", "codex"],
@@ -67,7 +70,7 @@ function computeExpectedProjections(packages: unknown[]): unknown {
   const provisional = { packages: wellFormed } as unknown as SkillSurfaceCatalog;
   const facadesByProfile: Record<string, readonly string[]> = {};
   const externalSkillsByProfile: Record<string, readonly string[]> = {};
-  const hostSkillPlacementsByProfile: Record<string, { claude: readonly string[]; codex: readonly string[] }> = {};
+  const hostSkillPlacementsByProfile: Record<string, { claude: readonly string[]; codex: readonly string[]; pi: readonly string[] }> = {};
   for (const profile of SKILL_SURFACE_PROFILES) {
     facadesByProfile[profile] = facadesForProfile(provisional, profile);
     externalSkillsByProfile[profile] = externalSkillsForProfile(provisional, profile);
@@ -90,6 +93,27 @@ function catalogValue(packages: unknown[], overrides: Record<string, unknown> = 
 }
 
 const VALID_BASE = catalogValue([ROUTER, FACADE]);
+
+test("retired package cleanup preserves exact proof records and rejects invalid ownership metadata", () => {
+  const cleanup = [{ actionId: "retired-skills", historicalFingerprints: [`sha256:${"a".repeat(64)}`] }];
+  const value = catalogValue([ROUTER, FACADE], { retiredPackages: [{ name: "old-skill", replacement: null, note: "Retired package.", cleanup }] });
+  const parsed = validateSkillSurfaceCatalogValue(value);
+  expect(parsed.status).toBe("valid");
+  if (parsed.status !== "valid") throw new Error("expected valid retirement proof");
+  expect(parsed.catalog.retiredPackages[0]!.cleanup).toEqual(cleanup);
+  for (const malformed of [
+    { actionId: "retired-skills", historicalFingerprints: [] },
+    { actionId: "retired-skills", historicalFingerprints: ["sha256:bad"] },
+    { actionId: "", historicalFingerprints: cleanup[0]!.historicalFingerprints },
+  ]) {
+    expect(validateSkillSurfaceCatalogValue(catalogValue([ROUTER, FACADE], {
+      retiredPackages: [{ name: "old-skill", replacement: null, note: "Retired package.", cleanup: [malformed] }],
+    })).status).toBe("invalid");
+  }
+  expect(validateSkillSurfaceCatalogValue(catalogValue([ROUTER, FACADE], {
+    retiredPackages: [{ name: "../outside", replacement: null, note: "Retired package.", cleanup }],
+  })).status).toBe("invalid");
+});
 
 describe("skill-surface catalog: absence vs. declared-missing", () => {
   test("steady-state catalog exposes only minimal and full profiles", () => {
@@ -124,6 +148,30 @@ describe("skill-surface catalog: every validation rejection, proven on a bad fix
 
   test("PACKAGE_NOT_OBJECT: a package entry is not an object", () => {
     expect(codes(validateSkillSurfaceCatalogValue(catalogValue([null])))).toContain("PACKAGE_NOT_OBJECT");
+  });
+
+  test("PACKAGE_NOT_OBJECT: entries before valid packages keep dependency checks on their own packages", () => {
+    const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf-8")) as { packages: unknown[] };
+    const real = validateSkillSurfaceCatalogValue({ ...manifest, packages: [null, ...manifest.packages] });
+    expect(real.status).toBe("invalid");
+    expect(real.diagnostics.map((d) => `${d.code} ${d.path}`)).toEqual(["PACKAGE_NOT_OBJECT packages[0]"]);
+
+    const unknownRequirement = { ...FACADE, requires: ["missing-skill"] };
+    const left = { ...FACADE, name: "left", source: "assets/skill-commands/left", requires: ["right"] };
+    const right = { ...FACADE, name: "right", source: "assets/skill-commands/right", requires: ["left"] };
+    const retiring = { ...FACADE, name: "retiring", source: "assets/skill-commands/retiring", retirementCandidate: { replacement: "gone", note: "n" } };
+    const interleaved = validateSkillSurfaceCatalogValue(
+      catalogValue([null, ROUTER, 42, unknownRequirement, "x", left, right, retiring]),
+    );
+    expect(interleaved.status).toBe("invalid");
+    expect(interleaved.diagnostics.map((d) => `${d.code} ${d.path}`)).toEqual([
+      "PACKAGE_NOT_OBJECT packages[0]",
+      "PACKAGE_NOT_OBJECT packages[2]",
+      "PACKAGE_NOT_OBJECT packages[4]",
+      "UNKNOWN_REQUIREMENT packages[3].requires[0]",
+      "RETIREMENT_REPLACEMENT_UNKNOWN packages[7].retirementCandidate.replacement",
+      "CYCLIC_REQUIREMENT packages[5].requires",
+    ]);
   });
 
   test("FIELD_REQUIRED: a required string field is missing or blank", () => {
@@ -325,15 +373,15 @@ describe("skill-surface catalog: the real manifest.json on disk", () => {
   });
 
   // Current closed catalog excludes the retired headless plan skill.
-  test("covers all 13 repo-owned sources plus the 8 external skills (21 packages)", () => {
+  test("covers all 13 repo-owned entries plus the 9 external skills (22 packages)", () => {
     if (resolution.status !== "valid") throw new Error("expected valid catalog");
-    expect(resolution.catalog.packages.length).toBe(21);
+    expect(resolution.catalog.packages.length).toBe(22);
     const repoOwned = resolution.catalog.packages.filter((p) => p.kind !== "external");
     expect(repoOwned.length).toBe(13);
     expect(repoOwned.map(p => p.name)).not.toContain("claude-plan");
     const external = resolution.catalog.packages.filter((p) => p.kind === "external");
     expect(external.map((p) => p.name).sort()).toEqual([
-      "check", "health", "hunt", "mermaid", "obsidian-cli", "obsidian-markdown", "reverse-skill-router", "think",
+      "check", "health", "herdr", "hunt", "mermaid", "obsidian-cli", "obsidian-markdown", "reverse-skill-router", "think",
     ]);
   });
 
@@ -355,10 +403,10 @@ describe("skill-surface catalog: the real manifest.json on disk", () => {
     }
   });
 
-  test("retiredPackages records all 19 retired names with a live or null replacement", () => {
+  test("retiredPackages records all 20 retired names with a live or null replacement", () => {
     if (resolution.status !== "valid") throw new Error("expected valid catalog");
     const catalog = resolution.catalog;
-    expect(catalog.retiredPackages.length).toBe(19);
+    expect(catalog.retiredPackages.length).toBe(20);
     const liveNames = new Set(catalog.packages.map((p) => p.name));
     for (const entry of catalog.retiredPackages) {
       expect(entry.note.length).toBeGreaterThan(0);
@@ -407,11 +455,11 @@ describe("skill-surface catalog: target post-cutover discovery matrix", () => {
 
   test("facadesForProfile matches the target discovery matrix for every profile", () => {
     expect(facadesForProfile(catalog, "minimal")).toEqual([
-      "repo-harness-plan", "repo-harness-check", "obsidian-memory",
+      "repo-harness-check", "obsidian-memory", "windows-python-first",
     ]);
     expect(facadesForProfile(catalog, "full")).toEqual([
-      "repo-harness-plan", "repo-harness-check", "repo-harness-test", "repo-harness-product", "repo-harness-ship",
-      "obsidian-memory", "auto-campaign",
+      "repo-harness-check", "repo-harness-test", "repo-harness-product", "repo-harness-ship",
+      "obsidian-memory", "windows-python-first",
     ]);
   });
 
@@ -430,16 +478,17 @@ describe("skill-surface catalog: target post-cutover discovery matrix", () => {
   });
 
   test("hostSkillPlacements: full places repo-harness-cross-review on both hosts without retired plan skill", () => {
-    expect(hostSkillPlacements(catalog, "minimal")).toEqual({ claude: [], codex: [] });
+    expect(hostSkillPlacements(catalog, "minimal")).toEqual({ claude: [], codex: [], pi: [] });
     expect(hostSkillPlacements(catalog, "full")).toEqual({
       claude: ["repo-harness-cross-review"],
       codex: ["repo-harness-cross-review"],
+      pi: [],
     });
   });
 
   test("hostSkillPlacements without a profile (init.ts's init flow) is the unconditional full-tier bundle", () => {
     const unconditional = hostSkillPlacements(catalog);
-    expect(unconditional).toEqual({ claude: ["repo-harness-cross-review"], codex: ["repo-harness-cross-review"] });
+    expect(unconditional).toEqual({ claude: ["repo-harness-cross-review"], codex: ["repo-harness-cross-review"], pi: [] });
   });
 
   test("explicit ChatGPT setup is never implied by either install profile", () => {
@@ -525,11 +574,11 @@ describe("skill-surface catalog: target post-cutover discovery matrix", () => {
   test("mutationPathSkillNames covers every package path that can be host-synced post-cutover", () => {
     const { repoHarnessSkills, externalSkills } = mutationPathSkillNames(catalog);
     expect(repoHarnessSkills).toEqual([
-      "repo-harness", "repo-harness-plan", "repo-harness-check", "repo-harness-test", "repo-harness-product",
-      "repo-harness-ship", "obsidian-memory", "auto-campaign",
+      "repo-harness", "repo-harness-check", "repo-harness-test", "repo-harness-product",
+      "repo-harness-ship", "obsidian-memory", "windows-python-first",
     ]);
     expect(externalSkills).toEqual([
-      "repo-harness-cross-review", "think", "hunt", "check", "health", "mermaid", "reverse-skill-router",
+      "repo-harness-cross-review", "herdr", "think", "hunt", "check", "health", "mermaid", "reverse-skill-router",
       "obsidian-markdown", "obsidian-cli",
     ]);
   });
@@ -545,8 +594,93 @@ describe("skill-surface catalog: target post-cutover discovery matrix", () => {
     expect(expectations.planningSkillNames).toEqual(["think", "hunt", "check", "health", "mermaid"]);
     expect(expectations.planningCapabilityPaths).toEqual([
       "assets/skills/repo-harness-product/SKILL.md",
-      "assets/skills/auto-campaign/SKILL.md",
     ]);
     expect(expectations.crossModel).toEqual(["repo-harness-cross-review"]);
   });
+});
+
+// `explicit-only` is the "installed but not model-auto-routed" tier. The
+// manifest is the single source of truth; the committed host-native switches
+// (Claude SKILL.md `disable-model-invocation`, Codex agents/openai.yaml
+// `allow_implicit_invocation`) are projections that must never drift from it.
+describe("skill-surface catalog: explicit-only projection onto host-native switches", () => {
+  const resolution = parseSkillSurfaceCatalog(readFileSync(MANIFEST_PATH, "utf-8"), { declared: true, profileComponents: PROFILE_COMPONENTS });
+  if (resolution.status !== "valid") throw new Error("expected the real manifest to be a valid catalog");
+  const catalog = resolution.catalog;
+  const facades = catalog.packages.filter((pkg) => pkg.kind === "facade" && pkg.source !== null);
+
+  function claudeDisablesModelInvocation(source: string): boolean {
+    const frontmatter = readFileSync(join(ROOT, source, "SKILL.md"), "utf-8").match(/^---\n([\s\S]*?)\n---/)?.[1] ?? "";
+    return /^disable-model-invocation:\s*true\s*$/m.test(frontmatter);
+  }
+
+  function codexDisablesImplicitInvocation(source: string): boolean {
+    const path = join(ROOT, source, "agents", "openai.yaml");
+    return existsSync(path) && /^\s*allow_implicit_invocation:\s*false\s*$/m.test(readFileSync(path, "utf-8"));
+  }
+
+  test("the explicit-only set is exactly repo-harness-ship and obsidian-memory", () => {
+    expect(facades.filter((pkg) => pkg.discoverability === "explicit-only").map((pkg) => pkg.name).sort()).toEqual([
+      "obsidian-memory", "repo-harness-ship",
+    ]);
+  });
+
+  test("every facade carries both host switches iff the manifest declares it explicit-only", () => {
+    for (const pkg of facades) {
+      const explicitOnly = pkg.discoverability === "explicit-only";
+      expect([pkg.name, claudeDisablesModelInvocation(pkg.source as string)]).toEqual([pkg.name, explicitOnly]);
+      expect([pkg.name, codexDisablesImplicitInvocation(pkg.source as string)]).toEqual([pkg.name, explicitOnly]);
+    }
+  });
+
+  test("explicit-only facades stay installed: facade selection filters kind and profile, never discoverability", () => {
+    expect(facadesForProfile(catalog, "minimal")).toContain("obsidian-memory");
+    for (const name of ["repo-harness-ship", "obsidian-memory"]) expect(facadesForProfile(catalog, "full")).toContain(name);
+  });
+});
+
+
+describe("skill audiences", () => {
+  test("rejects missing or invalid audience", () => {
+    for (const audience of [undefined, "mixed"]) {
+      const result = validateSkillSurfaceCatalogValue(catalogValue([ROUTER, { ...FACADE, audience }]));
+      expect(result.status).toBe("invalid");
+      expect(result.diagnostics.some((entry) => entry.path.endsWith(".audience"))).toBe(true);
+    }
+  });
+
+  test("every shipped entrypoint states its catalog audience and the merged name is retired", () => {
+    const result = parseSkillSurfaceCatalog(readFileSync(MANIFEST_PATH, "utf-8"), { declared: true });
+    if (result.status !== "valid") throw new Error("invalid real catalog");
+    for (const pkg of result.catalog.packages.filter((pkg) => pkg.source !== null)) {
+      const body = readFileSync(join(ROOT, pkg.source!, "SKILL.md"), "utf-8");
+      expect(body.toLowerCase()).toContain(`${pkg.audience} entrypoint`);
+
+    }
+    expect(result.catalog.packages.some((pkg) => pkg.name === "repo-harness-plan")).toBe(false);
+    expect(result.catalog.retiredPackages.find((pkg) => pkg.name === "repo-harness-plan")?.replacement).toBe("repo-harness-check");
+  });
+});
+
+
+test("audience source selection returns disjoint complete load groups and rejects unknown roles", () => {
+  const select = (role: string) => spawnSync(process.execPath, [join(ROOT, "scripts/skill-surface-select.ts"), "audience-sources", role], { cwd: ROOT, encoding: "utf-8" });
+  const bot = select("bot");
+  const worker = select("worker");
+  expect(bot.status).toBe(0);
+  expect(worker.status).toBe(0);
+  const lines = (body: string) => body.trim().split("\n");
+  expect(lines(bot.stdout).map((line) => line.split("\t")[0])).toEqual([
+    "repo-harness", "repo-harness-check", "repo-harness-product", "repo-harness-ship",
+    "obsidian-memory", "repo-harness-cross-review", "repo-harness-chatgpt", "repo-harness-strategy",
+  ]);
+  expect(lines(worker.stdout).map((line) => line.split("\t")[0])).toEqual([
+    "repo-harness-setup", "repo-harness-test", "repo-harness-architecture", "windows-python-first",
+  ]);
+  for (const line of [...lines(bot.stdout), ...lines(worker.stdout)]) {
+    expect(existsSync(join(ROOT, line.split("\t")[1], "SKILL.md"))).toBe(true);
+  }
+  const invalid = select("mixed");
+  expect(invalid.status).not.toBe(0);
+  expect(invalid.stdout).toBe("");
 });

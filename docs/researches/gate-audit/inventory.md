@@ -1,5 +1,8 @@
 # repo-harness 门禁盘点与分类
 
+> Retirement note (2026-10-04): The batch C research and evaluation tools are retired. Commands for those retired tools describe history. They are not current execution instructions. Other tools keep their own current status. Use the [pre-retirement source](https://github.com/Ancienttwo/repo-harness/tree/bb6a657204a7dc4aef1ddfe069c92ec0207f40a4) for removed paths.
+> Historical record. Campaign execution moved to the existing Bot skills on 2026-10-04. Use [repo-harness](../../../SKILL.md) to dispatch and collect work through Herdr/OAR. Use [repo-harness-product](../../../assets/skills/repo-harness-product/SKILL.md) for planning and [repo-harness-check](../../../assets/skill-commands/repo-harness-check/SKILL.md) for scope and verification. repo-harness has no campaign runtime.
+
 > 状态：#483 源码实施完成、Draft待用户审阅；历史盘点基线保持不变，下面的实施摘要区分已改代码与运行限制。任务依据：Aimpact 05:14 批准的文档盘点；观察日期 2026-10-03（Asia/Singapore）。源码基线 `cc1fc8ee8eaec3f52c0eb0636b53133f7162b105`，分支 `codex/gate-audit`。实施见 [PLAN.md](PLAN.md)。
 
 ## 结论与统计口径
@@ -59,7 +62,7 @@
 | C03 | check:hooks — [scripts/sync-hook-sources.ts](../../../scripts/sync-hook-sources.ts) | hook authoring/projection 漂移 | 无证据 | 无证据 | 降级为只记录 | 生成 hook 变更时验证一次；普通变更只记录/每日检查 |
 | C04 | check:helpers — [scripts/sync-helper-sources.ts](../../../scripts/sync-helper-sources.ts) | source helpers 与安装投影漂移 | 无证据 | 无证据 | 降级为只记录 | helper 变更时验证一次 |
 | C05 | check:reference-configs — [scripts/sync-reference-configs.ts](../../../scripts/sync-reference-configs.ts) | 运行指南与 assets 模板不同步 | 无证据 | 无证据 | 降级为只记录 | 指南变更时验证一次 |
-| C06 | check:route-eval — [scripts/route-nl-vs-ts-eval.ts](../../../scripts/route-nl-vs-ts-eval.ts) | TS/NL routing 判定差异 | 无证据 | 无证据 | 删除 | 旧 evals/checks p4：拆除中；删除旧闸，保留必要 routing 回归于受影响测试 |
+| C06 | check:route-eval — [scripts/route-nl-vs-ts-eval.ts](https://github.com/Ancienttwo/repo-harness/blob/bb6a657204a7dc4aef1ddfe069c92ec0207f40a4/scripts/route-nl-vs-ts-eval.ts) | TS/NL routing 判定差异 | 无证据 | 无证据 | 删除 | 旧 evals/checks p4：拆除中；删除旧闸，保留必要 routing 回归于受影响测试 |
 | C07 | check:deploy-sql / SQL order — [scripts/check-deploy-sql-order.sh](../../../scripts/check-deploy-sql-order.sh) | SQL 序号、根路径、布局错误 | 无证据 | 无证据 | 降级为只记录 | deploy SQL 改动时并入 H01；真正执行属于 H04 |
 | C08 | check:context-files — [scripts/check-context-files.sh](../../../scripts/check-context-files.sh) | agent context 尺寸与受控结构失真 | 无证据 | 无证据 | 降级为只记录 | 超长/结构变更写报告，不阻日常编辑 |
 | C09 | check:architecture-sync — [scripts/check-architecture-sync.sh](../../../scripts/check-architecture-sync.sh) | pending drift 与索引失配 | ≥1次真实状态漂移拒绝（E04；非产品bug） | 无证据 | 降级为只记录 | drift 自动队列；相关模型消费者回归归 H01；不等人归档才能 Stop |
@@ -84,8 +87,8 @@
 | C28 | check-skill-version — [scripts/check-skill-version.ts](../../../scripts/check-skill-version.ts) | manifest/版本stamp错配 | 无证据 | 无证据 | 降级为只记录 | 版本改动归一次 H01；发布readback归 H04 |
 | C29 | benchmark:skills / effectiveness authority — [scripts/run-skill-evals.ts](../../../scripts/run-skill-evals.ts) | dry-run冒充效果证据 | 无证据 | 无证据 | 删除 | 旧 evals/checks p4：拆除中；删除旧流程闸，保留按需效果评测而非日常阻断 |
 | C30 | benchmark:harness / report validation — [scripts/validate-harness-profile-benchmark.ts](../../../scripts/validate-harness-profile-benchmark.ts) | 部分矩阵、伪造 subject或 stale benchmark | 无证据 | 无证据 | 删除 | 旧 evals/checks p4：拆除中；移除验收必跑矩阵，历史数据仍注明原证据限制 |
-| C31 | benchmark:debug / truth / routing evals — [scripts/run-debug-ground-truth-eval.ts](../../../scripts/run-debug-ground-truth-eval.ts) | 无真实复现/ground-truth污染 | 无证据 | 无证据 | 删除 | 旧 evals/checks p4：拆除中；debug按需复现，不凭命名扩大删除范围 |
-| C32 | loop-engine cutover gate — [scripts/loop-engine-cutover-gate.ts](../../../scripts/loop-engine-cutover-gate.ts) | cutover parity或样本不足 | 无证据 | 无证据 | 删除 | 一次性切换证据按风险选；完成后删除常驻gate要求 |
+| C31 | benchmark:debug / truth / routing evals — [scripts/run-debug-ground-truth-eval.ts](https://github.com/Ancienttwo/repo-harness/blob/bb6a657204a7dc4aef1ddfe069c92ec0207f40a4/scripts/run-debug-ground-truth-eval.ts) | 无真实复现/ground-truth污染 | 无证据 | 无证据 | 删除 | 旧 evals/checks p4：拆除中；debug按需复现，不凭命名扩大删除范围 |
+| C32 | loop-engine cutover gate — [scripts/loop-engine-cutover-gate.ts](https://github.com/Ancienttwo/repo-harness/blob/bb6a657204a7dc4aef1ddfe069c92ec0207f40a4/scripts/loop-engine-cutover-gate.ts) | cutover parity或样本不足 | 无证据 | 无证据 | 删除 | 一次性切换证据按风险选；完成后删除常驻gate要求 |
 | C33 | factor-lab-check — [scripts/factor-lab-check.sh](../../../scripts/factor-lab-check.sh) | 候选因子资料/registry不一致 | 无证据 | 无证据 | 降级为只记录 | 仅该领域显式报告，不作为repo全局闸 |
 | G01 | primary WorktreeGuard — [src/cli/hook/mutation-guard.ts](../../../src/cli/hook/mutation-guard.ts) | 主checkout编辑与其他任务冲突 | 无证据 | 无证据 | 删除 | 删除 primary 一律禁写；冲突才自动隔离；H01保证主线 publication |
 | G02 | MainLoopDispatchGuard — [src/cli/hook/mutation-guard.ts](../../../src/cli/hook/mutation-guard.ts) | parent亲写代码绕过指定worker | 无证据 | 无证据 | 删除 | 按责任记录，无强制角色层级 |
@@ -96,7 +99,7 @@
 | G07 | WorkflowProfile / unstable resolution guards — [src/cli/hook/mutation-guard.ts](../../../src/cli/hook/mutation-guard.ts) | 投影无法稳定导致错误工作流许可 | 无证据 | 无证据 | 降级为只记录 | 提示来源失效，不把profile解析作为所有编辑前提；共享写入仍拒绝坏数据 |
 | G08 | ContractScopeGuard / allowed_paths — [src/cli/hook/mutation-guard.ts](../../../src/cli/hook/mutation-guard.ts) | worker越出任务范围 | 无证据 | 无证据 | 降级为只记录 | 任务包保留scope约束；记录越界并在H01 diff检测，不新增scope审批轮次 |
 | G09 | EditPlanGate / SpecGuard — [src/cli/hook/mutation-guard.ts](../../../src/cli/hook/mutation-guard.ts) | 无Approved plan/spec就实现 | 无证据 | 无证据 | 删除 | 批准/annotation不是常驻编辑许可证；需求歧义才问用户 |
-| G10 | StrictContractGuard / StrictWorktreeGuard — [src/cli/hook/mutation-guard.ts](../../../src/cli/hook/mutation-guard.ts) | 高profile缺contract或linked worktree | 无证据 | 无证据 | 删除 | 按实际并发风险选worktree；不按profile齐套 |
+| G10 | 按 profile 强制 contract / linked worktree 的旧守卫 — [src/cli/hook/mutation-guard.ts](../../../src/cli/hook/mutation-guard.ts) | 高profile缺contract或linked worktree | 无证据 | 无证据 | 删除 | 按实际并发风险选worktree；不按profile齐套 |
 | G11 | PlanTransitionGuard / annotations — [src/cli/hook/mutation-guard.ts](../../../src/cli/hook/mutation-guard.ts) | status跳步、有NOTE仍批准 | 无证据 | 无证据 | 删除 | 保留状态记录，不以阶段顺序拦本地工作 |
 | G12 | Asset-layer / DeployAsset / TDD / BDD reminders — [src/cli/hook/mutation-guard.ts](../../../src/cli/hook/mutation-guard.ts) | 漏投影/测试/SQL规范 | 无证据 | 无证据 | 降级为只记录 | 当前已有advisory；继续按实际影响选验证 |
 | G13 | Done / Evidence Contract / review freshness gates — [src/cli/hook/prompt-handler.ts](../../../src/cli/hook/prompt-handler.ts) | 模型声明done但契约或证据不全 | 无证据 | 无证据 | 删除 | 保留诚实完成报告；exact check freshness只在H01消费，不阻自然语言/Stop |
@@ -125,7 +128,7 @@
 | L02 | exclusive-directory lock / token / PID / inode — [src/effects/locking/exclusive-directory-lock.ts](../../../src/effects/locking/exclusive-directory-lock.ts) | 并发writer、误删活锁、path替换 | 无证据 | 无证据 | 降级为只记录 | 默认wait 5s、stale空目录30s是配置常量，不是平均卡时；保留fencing |
 | L03 | expensive-run common-dir lock — [src/effects/expensive-run-lock.ts](../../../src/effects/expensive-run-lock.ts) | 多worktree昂贵run并发、孤儿PGID仍活 | 无证据 | 无证据 | 降级为只记录 | 当前reclaimStaleOwner=false；先证明owner与整个supervised进程组死亡，才自动回收 |
 | L04 | Task Lease / liveness / generation / reclaim — [src/effects/state/coordination-lease-reclaim.ts](../../../src/effects/state/coordination-lease-reclaim.ts) | 双owner、stale heartbeat误偷、reviewing/completing被打断 | 无证据 | 无证据 | 降级为只记录 | 复用automaticReclaimLease；锁内重读claim/generation/renewal/evidence，禁止TTL单独释放 |
-| L05 | campaign/group planning/dispatch/budget locks — [src/effects/automation/campaign-planning-store.ts](../../../src/effects/automation/campaign-planning-store.ts) | 重复规划/dispatch、超预算或重入死锁 | 无证据；E05证明1个锁缺陷，非防住事故 | 无证据；hold 6092ms（E05） | 降级为只记录 | 孤儿回收/锁内只做短事务；未drain的legacy state不删，campaign退役另有owner |
+| L05 | campaign/group planning/dispatch/budget locks — src/effects/automation/campaign-planning-store.ts (retired historical path `src/effects/automation/campaign-planning-store.ts`) | 重复规划/dispatch、超预算或重入死锁 | 无证据；E05证明1个锁缺陷，非防住事故 | 无证据；hold 6092ms（E05） | 降级为只记录 | 孤儿回收/锁内只做短事务；未drain的legacy state不删，campaign退役另有owner |
 | L06 | automation grant / budget / reservations — [src/effects/automation/budget-store.ts](../../../src/effects/automation/budget-store.ts) | 未授权长期运行、资源双占/成本失控 | 无证据 | 无证据 | 降级为只记录 | 保留成本上限自动停/settle；只有权限扩大需H03用户批 |
 | L07 | collaboration Principal/Binding/Decision/freeze admission — [src/effects/engineers/verified-context-store.ts](../../../src/effects/engineers/verified-context-store.ts) | 伪身份、旧授权、重复执行、越任务写 | 无证据 | 无证据 | 降级为只记录 | 权限授权归H03；任务决策、R2/freeze前置降为记录，shared writes保持CAS |
 | L08 | publication / inbox / events / adoption / review store locks — [src/effects/locking/exclusive-directory-lock.ts](../../../src/effects/locking/exclusive-directory-lock.ts) | JSON/events写坏、重复提交/收件、锁被替换 | 无证据 | 无证据 | 降级为只记录 | 共享lock primitive的消费者族；保留atomic/fsync/idempotency，自动回收真实孤儿 |
@@ -161,7 +164,7 @@
 | E05 | [planning-lock notes](../../../tasks/archive/gate-audit-20261003/notes/20261002-1758-brc10-planning-lock-timeout.notes.md)，45–58行；修复[1d3c2f01](https://github.com/Ancienttwo/repo-harness/commit/1d3c2f017fa867cfbaf3cd61873395b4945e6f04)。两个OS caller执行真实production recovery，group锁含慢settlement令peer超5s；修后相同generation | L05：1个确证root-cause复现；来自测试，不算门禁防住用户风险次数。review100–107行未声称独立acceptance | observed lock hold6092ms，settlement1514ms；修后3970/3029ms，均非用户等待均值 |
 | E06 | [campaign retry notes](../../../tasks/archive/gate-audit-20261003/notes/20260910-2258-campaign-preparation-retry.notes.md)，35–36行：node_modules archctx0.5.9，pin0.5.10；安装刷新后通过 | 环境stale导致一次假红，不能记C09拦住产品bug | 无证据 |
 | E07 | [b456121a](https://github.com/Ancienttwo/repo-harness/commit/b456121ac2e950700c20c8744132c54a74a626fb)（issue196/PR197）：ship cleanup仅ancestry，拒识squash-absorbed，downstream积累100+目录；改用[共享merge predicate](../../../scripts/worktree-merge-lib.sh) | H02的假阴性历史缺陷，说明保留单一正确predicate；不当作安全删除guard防住真问题 | 无证据 |
-| E08 | [execution-boundary research](../../researches/20260905-review-boundary-repairs.md)，末节：state-boundaries观察3个EFFECTS_REVERSE_IMPORT，修后0；新criterion消费此guard | C02的静态缺陷证据；未找到该gate实际阻止哪一次主线effect的记录，表中仍无可信拦截次数 | 无证据 |
+| E08 | [execution-boundary research](https://github.com/Ancienttwo/repo-harness/blob/archive/docs-researches-20261004/docs/researches/20260905-review-boundary-repairs.md)，末节：state-boundaries观察3个EFFECTS_REVERSE_IMPORT，修后0；新criterion消费此guard | C02的静态缺陷证据；未找到该gate实际阻止哪一次主线effect的记录，表中仍无可信拦截次数 | 无证据 |
 
 本次日志快照固定在audit启动之前（UTC `2026-10-02T21:15:55.950Z`）。当前worktree hook-events在此cutoff之前0条，启动后记录属于本次盘点，不能当历史。primary `repo-harness/.ai/harness/runs/hook-events.jsonl` 的cutoff前样本6855条（UTC `2026-09-30T21:16:57.762Z`至`2026-10-02T21:15:36.312Z`），22条`blocked=true`、6条nonzero；不能仅据aggregate判断防住了22次真实问题。缓存持续增长，所以统计必须带cutoff。
 

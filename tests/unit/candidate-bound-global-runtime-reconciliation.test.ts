@@ -1,10 +1,11 @@
-import { describe, expect, test } from 'bun:test';
-import { chmodSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { afterAll, describe, expect, test } from 'bun:test';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { basename, join } from 'path';
+import { join } from 'path';
 import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 
+import { copyPackageRuntimeFixture } from '../helpers/repo-fixture';
 import { buildManagedHooks } from '../../src/cli/installer/managed-entries';
 import { beginInstallHostTransaction, PROFILE_COMPONENTS, readInstalledProfile, rollbackInstallHostTransaction } from '../../src/cli/installer/install-profile';
 import {
@@ -15,6 +16,7 @@ import {
   publishCandidateReconciliationCapability,
   routeRegistryDigest,
   sha256,
+  type CandidatePackageIdentity,
   type CandidateReconciliationRequest,
   type CandidateReconciliationReceipt,
 } from '../../src/cli/runtime/candidate-reconciliation';
@@ -34,10 +36,7 @@ function copyRuntimeFixture(
   stopTimeout: 30 | 150,
   legacyParent = false,
 ): string {
-  cpSync(ROOT, destination, {
-    recursive: true,
-    filter: (source) => !['.git', '.codegraph', 'node_modules', '_ops'].includes(basename(source)),
-  });
+  copyPackageRuntimeFixture(ROOT, destination);
   const manifestPath = join(destination, 'package.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { version?: string };
   manifest.version = version;
@@ -71,13 +70,16 @@ function writeCandidateSwitchingBun(
   logPath: string,
   globalPackagePath: string,
   candidateRoot: string,
+  replacedPredecessorAsset?: string,
 ): void {
   const canonicalCandidateRoot = realpathSync(candidateRoot);
+  // Bun replaces package files in place; the predecessor then sees assets it cannot parse.
+  const replaceAsset = replacedPredecessorAsset ? `printf '{}' > "${replacedPredecessorAsset}"; ` : '';
   writeExecutable(path, [
     '#!/bin/bash',
     `printf '%s\\n' "$*" >> "${logPath}"`,
     'if [[ "${1:-}" == "--version" ]]; then echo 1.4.0; exit 0; fi',
-    `if [[ "$1" == "add" && "$2" == "-g" ]]; then rm -rf "${globalPackagePath}"; ln -s "${candidateRoot}" "${globalPackagePath}"; exit 0; fi`,
+    `if [[ "$1" == "add" && "$2" == "-g" ]]; then ${replaceAsset}rm -rf "${globalPackagePath}"; ln -s "${candidateRoot}" "${globalPackagePath}"; exit 0; fi`,
     `if [[ "$1" == "${canonicalCandidateRoot}/src/cli/index.ts" ]]; then exec "${process.execPath}" "$@"; fi`,
     'exit 0',
     '',
@@ -97,8 +99,18 @@ function writeMinimalInstallState(home: string): void {
   }, null, 2)}\n`);
 }
 
-function candidateReceipt(adapterDigest: string): CandidateReconciliationReceipt {
-  const identity = candidatePackageIdentity(import.meta.dir + '/../..');
+const candidateRoots: string[] = [];
+afterAll(() => { for (const root of candidateRoots) rmSync(root, { recursive: true, force: true }); });
+
+// Agent trace writes change the live checkout. Each test owns immutable candidate code.
+function fixtureCandidate(ownerRoot?: string): CandidatePackageIdentity {
+  const root = ownerRoot ?? mkdtempSync(join(tmpdir(), 'repo-harness-candidate-identity-'));
+  if (!ownerRoot) candidateRoots.push(root);
+  const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8')).version;
+  return candidatePackageIdentity(copyRuntimeFixture(join(root, 'candidate'), version, 150));
+}
+
+function candidateReceipt(identity: CandidatePackageIdentity, adapterDigest: string): CandidateReconciliationReceipt {
   return {
     protocol: 1,
     transaction_id: 'transaction-fixture',
@@ -119,7 +131,7 @@ function invokeCandidateChild(
   env: NodeJS.ProcessEnv,
 ): ReturnType<typeof spawnSync> {
   return spawnSync(process.execPath, [
-    CLI,
+    join(request.candidate.root, 'src', 'cli', 'index.ts'),
     '__reconcile-installed-runtime',
     '--request',
     encodeCandidateRequest(request),
@@ -157,6 +169,7 @@ function runCandidateChild(
 
 describe('candidate-bound global runtime reconciliation', () => {
   test('rejects a predecessor Stop timeout projection even when the route count is unchanged', () => {
+    const identity = fixtureCandidate();
     const candidate = buildManagedHooks('codex', 'full');
     const predecessor = structuredClone(candidate);
     const stop = predecessor.Stop?.find((entry) => entry.hooks[0]?.command.includes(' Stop --route default'));
@@ -165,9 +178,9 @@ describe('candidate-bound global runtime reconciliation', () => {
 
     expect(candidate.Stop?.[0]?.hooks[0]?.timeout).toBe(150);
     expect(managedProjectionDigest(predecessor)).not.toBe(managedProjectionDigest(candidate));
-    expect(() => assertCandidateReconciliationReceipt(candidateReceipt(managedProjectionDigest(predecessor)), {
+    expect(() => assertCandidateReconciliationReceipt(candidateReceipt(identity, managedProjectionDigest(predecessor)), {
       transaction_id: 'transaction-fixture',
-      candidate: candidatePackageIdentity(import.meta.dir + '/../..'),
+      candidate: identity,
       target: 'codex',
       profile: 'full',
       require_complete: true,
@@ -175,10 +188,11 @@ describe('candidate-bound global runtime reconciliation', () => {
   });
 
   test('accepts the candidate projection and binds its package identity to the transaction receipt', () => {
+    const identity = fixtureCandidate();
     const candidate = buildManagedHooks('codex', 'full');
-    expect(() => assertCandidateReconciliationReceipt(candidateReceipt(managedProjectionDigest(candidate)), {
+    expect(() => assertCandidateReconciliationReceipt(candidateReceipt(identity, managedProjectionDigest(candidate)), {
       transaction_id: 'transaction-fixture',
-      candidate: candidatePackageIdentity(import.meta.dir + '/../..'),
+      candidate: identity,
       target: 'codex',
       profile: 'full',
       require_complete: true,
@@ -189,7 +203,7 @@ describe('candidate-bound global runtime reconciliation', () => {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-candidate-runtime-'));
     const home = join(root, 'home');
     const cwd = join(root, 'repo');
-    const candidate = candidatePackageIdentity(import.meta.dir + '/../..');
+    const candidate = fixtureCandidate(root);
     const token = 'a'.repeat(64);
     const env = {
       ...process.env,
@@ -250,7 +264,7 @@ describe('candidate-bound global runtime reconciliation', () => {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-candidate-capability-'));
     const home = join(root, 'home');
     const cwd = join(root, 'repo');
-    const candidate = candidatePackageIdentity(import.meta.dir + '/../..');
+    const candidate = fixtureCandidate(root);
     const token = 'c'.repeat(64);
     const env = { ...process.env, HOME: home, BUN_INSTALL: join(home, '.bun') };
     try {
@@ -328,7 +342,7 @@ describe('candidate-bound global runtime reconciliation', () => {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-candidate-ledger-'));
     const home = join(root, 'home');
     const cwd = join(root, 'repo');
-    const candidate = candidatePackageIdentity(import.meta.dir + '/../..');
+    const candidate = fixtureCandidate(root);
     const token = 'b'.repeat(64);
     const env = {
       ...process.env,
@@ -440,6 +454,60 @@ describe('candidate-bound global runtime reconciliation', () => {
     }
   }, 30_000);
 
+  test('the leftover summary comes from candidate C after B assets change in place', () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-harness-candidate-leftovers-'));
+    const home = join(root, 'home');
+    const repo = join(root, 'repo');
+    const bin = join(root, 'bin');
+    const parentRoot = join(root, 'parent-b');
+    const candidateRoot = join(root, 'candidate-c');
+    const bunLog = join(root, 'bun.log');
+    try {
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(bin, { recursive: true });
+      copyRuntimeFixture(parentRoot, '0.17.0', 150);
+      copyRuntimeFixture(candidateRoot, '0.18.0', 150);
+      const globalPackagePath = join(home, '.bun', 'install', 'global', 'node_modules', 'repo-harness');
+      mkdirSync(join(home, '.bun', 'install', 'global', 'node_modules'), { recursive: true });
+      symlinkSync(parentRoot, globalPackagePath, 'dir');
+      writeMinimalInstallState(home);
+      writeCandidateSwitchingBun(
+        join(bin, 'bun'),
+        bunLog,
+        globalPackagePath,
+        candidateRoot,
+        join(parentRoot, 'assets', 'skill-commands', 'manifest.json'),
+      );
+
+      const result = spawnSync(process.execPath, [
+        join(parentRoot, 'src', 'cli', 'index.ts'),
+        'update',
+        '--target', 'codex',
+        '--no-sync-skill',
+        '--no-external-skills',
+        '--no-codegraph',
+        '--json',
+      ], {
+        cwd: repo,
+        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          HOME: home,
+          BUN_INSTALL: join(home, '.bun'),
+          PATH: `${bin}:${process.env.PATH ?? ''}`,
+          REPO_HARNESS_BUN_EXECUTABLE: join(bin, 'bun'),
+        },
+      });
+
+      expect(result.status, `${result.stderr}\n${result.stdout}`).toBe(0);
+      const runtime = JSON.parse(result.stdout) as { lines: string[] };
+      expect(runtime.lines.at(-1)).toMatch(/^\d+ leftovers \(\d+ removable\)\. Run: repo-harness upgrade$/);
+      expect(readFileSync(bunLog, 'utf-8')).toContain(`${candidateRoot}/src/cli/index.ts upgrade --json`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('frozen legacy B can only bootstrap C; an explicit second C update reconciles its predecessor projection', () => {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-candidate-legacy-migration-'));
     const home = join(root, 'home');
@@ -496,7 +564,9 @@ describe('candidate-bound global runtime reconciliation', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  }, 30_000);
+  // This test copies two runtimes and runs two complete updates.
+  // The full-suite run reached 32.5 seconds; one update is not the full budget.
+  }, 60_000);
 
   test('a candidate failure after projection restores the predecessor adapter through the parent transaction', () => {
     const root = mkdtempSync(join(tmpdir(), 'repo-harness-candidate-rollback-'));

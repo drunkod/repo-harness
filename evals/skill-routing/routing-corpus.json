@@ -76,28 +76,28 @@
       "lang": "zh",
       "kind": "positive",
       "prompt": "这个新功能想法有点复杂，先帮我出一份靠谱的执行方案吧。",
-      "expected_route": "repo-harness-plan"
+      "expected_route": "repo-harness-check"
     },
     {
       "id": "pos-plan-review-zh",
       "lang": "zh",
       "kind": "positive",
       "prompt": "帮我把这份草稿方案过一遍，看看设计上有没有漏洞。",
-      "expected_route": "repo-harness-plan"
+      "expected_route": "repo-harness-check"
     },
     {
       "id": "pos-plan-create-en",
       "lang": "en",
       "kind": "positive",
       "prompt": "Turn this rough idea into a proper, decision-complete plan before anyone touches code.",
-      "expected_route": "repo-harness-plan"
+      "expected_route": "repo-harness-check"
     },
     {
       "id": "pos-plan-review-en",
       "lang": "en",
       "kind": "positive",
       "prompt": "Take a pass over this draft plan and flag anything that isn't decision-complete yet.",
-      "expected_route": "repo-harness-plan"
+      "expected_route": "repo-harness-check"
     },
     {
       "id": "pos-product-prd-zh",
@@ -187,7 +187,7 @@
       "id": "pos-architecture-drift-zh",
       "lang": "zh",
       "kind": "positive",
-      "prompt": "这次改动跨了模块边界，帮我记一条架构漂移请求。",
+      "prompt": "这次改动把一个能力的职责移到了别的模块，帮我更新架构模型和投影出来的架构文档。",
       "expected_route": "repo-harness-architecture"
     },
     {
@@ -201,7 +201,7 @@
       "id": "pos-architecture-drift-en",
       "lang": "en",
       "kind": "positive",
-      "prompt": "This change crosses a module boundary — can you file an architecture drift request for it?",
+      "prompt": "This change moved a capability's responsibilities to another module — can you update the architecture model and the projected docs?",
       "expected_route": "repo-harness-architecture"
     },
     {
@@ -452,7 +452,7 @@
       "id": "status-architecture-request-zh",
       "lang": "zh",
       "kind": "status-only",
-      "prompt": "我们之前提的那个架构漂移请求，后来处理完了没？",
+      "prompt": "我们之前那个更新架构模型的 PR，后来合进去了没？",
       "expected_route": "none"
     },
     {

@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -204,11 +205,10 @@ describe("init command", () => {
       expect(applied.exitCode).toBe(0);
       expect(JSON.parse(readFileSync(configPath, "utf8"))).toMatchObject({
         brainRoot: "/existing/brain",
-        architecture: { projection_provider: "archctx", projection_apply: "automatic" },
-        refactor_recommendations: { enabled: true },
+        architecture: { projection_provider: "archctx", projection_apply: "manual" },
       });
+      expect(JSON.parse(readFileSync(configPath, "utf8")).refactor_recommendations).toBeUndefined();
       expect(applied.steps.find((step) => step.step === "global architecture projection")?.status).toBe("ok");
-      expect(applied.steps.find((step) => step.step === "global refactor recommendations")?.status).toBe("ok");
       const disabled = JSON.stringify({
         architecture: { projection_provider: "disabled", projection_apply: "disabled" },
         refactor_recommendations: { enabled: false },
@@ -256,8 +256,7 @@ describe("init command", () => {
       });
       expect(runInit(options).exitCode).toBe(0);
       expect(JSON.parse(readFileSync(configPath, "utf8"))).toMatchObject({
-        architecture: { projection_apply: "automatic" },
-        refactor_recommendations: { enabled: true },
+        architecture: { projection_apply: "manual" },
       });
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -333,7 +332,7 @@ describe("init command", () => {
     }
   });
 
-  test("runInit refreshes Codex handoff before outer workflow verification", () => {
+  test("runInit refreshes Codex handoff and checks context without a plan file", () => {
     const tmp = join(tmpdir(), `repo-harness-init-handoff-${Date.now()}`);
     const source = join(tmp, "source");
     const repo = join(tmp, "repo");
@@ -358,6 +357,8 @@ describe("init command", () => {
       expect(result.exitCode).toBe(0);
       expect(result.steps.find((step) => step.step === "refresh handoff packet")?.status).toBe("ok");
       expect(result.steps.find((step) => step.step === "verify repo harness")?.status).toBe("ok");
+      expect(result.steps.find((step) => step.step === "verify repo harness")?.detail).toBe("repo-harness run check-context-files");
+      expect(existsSync(join(repo, ".ai", "harness", "active-plan"))).toBe(false);
       expect(readFileSync(join(repo, ".ai", "harness", "handoff", "current.md"), "utf-8")).toContain("repo-harness-init-verify");
       expect(readFileSync(join(repo, ".ai", "harness", "handoff", "resume.md"), "utf-8")).toContain("Codex Resume Packet");
     } finally {
@@ -609,15 +610,39 @@ describe("init command", () => {
     expect(res.stdout).toContain("--no-codegraph");
   }, 30_000);
 
-  test("CLI update rejects repo refresh flags with an init hint", () => {
+  test("CLI update rejects retired repo refresh flags", () => {
     const res = spawnSync("bun", [CLI, "update", "--repo", ".", "--json"], {
       cwd: ROOT,
       encoding: "utf-8",
     });
 
-    expect(res.status).toBe(2);
-    expect(res.stderr).toContain("repo-harness update no longer refreshes repositories");
-    expect(res.stderr).toContain("repo-harness init --repo <path>");
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("unknown option");
+  }, 30_000);
+
+  test.each([
+    ['init', '--configure-codegraph', []],
+    ['init', '--brain-root', ['unused']],
+    ['init', '--brain-mode', ['manifest-only']],
+    ['init', '--interactive', []],
+    ['update', '--repo', ['.']],
+    ['update', '--dry-run', []],
+    ['update', '--interactive', []],
+  ] as const)('retired %s %s fails before any repository or host write', (command, flag, values) => {
+    const tmp = join(tmpdir(), `retired-cli-option-${command}-${flag.slice(2)}-${Date.now()}`);
+    const repo = join(tmp, 'repo');
+    const home = join(tmp, 'home');
+    try {
+      mkdirSync(repo, { recursive: true }); mkdirSync(home);
+      const result = spawnSync('bun', [CLI, command, flag, ...values], {
+        cwd: repo, encoding: 'utf8', env: { ...process.env, HOME: home, REPO_HARNESS_HOME: join(home, '.repo-harness'), BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(tmp, 'bun-cache') },
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('unknown option');
+      expect(result.stderr).toContain(flag);
+      expect(readdirSync(repo)).toEqual([]);
+      expect(readdirSync(home)).toEqual([]);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
   }, 30_000);
 
   test("CLI init rejects user-level brain configuration flags", () => {
@@ -629,8 +654,8 @@ describe("init command", () => {
         encoding: "utf-8",
       });
 
-      expect(res.status).toBe(2);
-      expect(res.stderr).toContain("brain configuration writes user-level state");
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain("unknown option");
       expect(existsSync(join(tmp, ".repo-harness"))).toBe(false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });

@@ -1,3 +1,4 @@
+import { candidate } from '../../scripts/merge-gate';
 import { deriveShipJournalKey } from '../../src/effects/publication/publication-lifecycle';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync, spawnSync } from 'child_process';
@@ -58,7 +59,6 @@ const CLI = resolve(import.meta.dir, '../../src/cli/index.ts');
 const CLAIM = 'claim-feedback-cli';
 const SPRINT = 'plans/sprints/feedback-cli.sprint.md';
 const TASK = 'repair provider feedback from CLI';
-const REVIEW_SUBJECT = `sha256:${'3'.repeat(64)}`;
 
 const roots: string[] = [];
 
@@ -140,8 +140,6 @@ interface Fixture {
   readonly generation: number;
   readonly headSha: string;
   readonly baseSha: string;
-  readonly checksPath: string;
-  readonly sealPath: string;
 }
 
 function fixture(): Fixture {
@@ -166,24 +164,12 @@ function fixture(): Fixture {
   const taskRevision = deriveTaskRevision({ taskCell: TASK, taskId, modeCell: 'contract', acceptanceCell: 'provider feedback passes' });
   git(root, 'switch', '-c', 'codex/feedback-cli');
   writeFileSync(join(root, 'feature.txt'), 'feedback\n');
-  mkdirSync(join(root, '.ai/harness/checks'), { recursive: true });
-  const checksPath = join(root, '.ai/harness/checks/latest.json');
-  writeFileSync(checksPath, JSON.stringify({ status: 'pass', review_subject_sha256: REVIEW_SUBJECT }) + '\n');
   git(root, 'add', '.');
   git(root, 'commit', '-m', 'add feedback fixture change');
 
   const headSha = git(root, 'rev-parse', 'HEAD');
   const baseSha = git(root, 'rev-parse', 'main');
   const treeSha = git(root, 'rev-parse', 'HEAD^{tree}');
-  const sealPath = join(root, 'seal.json');
-  const sealBytes = `${JSON.stringify({
-    protocol: 1,
-    kind: 'repo-harness-merge-seal',
-    base_sha: baseSha,
-    head_sha: headSha,
-    acceptance_subject_sha256: REVIEW_SUBJECT,
-  })}\n`;
-  writeFileSync(sealPath, sealBytes);
 
   const receipt = buildPublicationReceipt({
     repo_id: publicationSha256(resolveGitCommonDirectory(root)),
@@ -196,9 +182,7 @@ function fixture(): Fixture {
     branch: 'codex/feedback-cli',
     head_sha: headSha,
     tree_sha: treeSha,
-    review_subject_sha256: REVIEW_SUBJECT,
-    verification_evidence_sha256: publicationSha256(readFileSync(checksPath)),
-    merge_seal_sha256: publicationSha256(sealBytes),
+    candidate_diff_fingerprint: candidate(root, 'main').diffFingerprint,
     provider: 'github',
     provider_repo_id: 'R_feedback_cli',
     pr_number: 7,
@@ -255,8 +239,6 @@ function fixture(): Fixture {
     generation: 1,
     headSha,
     baseSha,
-    checksPath,
-    sealPath,
   };
 }
 
@@ -291,9 +273,7 @@ function addAmbiguousReviewingPublication(subject: Fixture): void {
     branch: 'codex/feedback-cli-ambiguous',
     head_sha: source.head_sha,
     tree_sha: source.tree_sha,
-    review_subject_sha256: source.review_subject_sha256,
-    verification_evidence_sha256: source.verification_evidence_sha256,
-    merge_seal_sha256: source.merge_seal_sha256,
+    candidate_diff_fingerprint: source.candidate_diff_fingerprint,
     provider: source.provider,
     provider_repo_id: source.provider_repo_id,
     pr_number: source.pr_number + 1,
@@ -346,8 +326,6 @@ function runCli(fixture: Fixture, args: readonly string[], envOverrides: Record<
       ...process.env,
       REPO_HARNESS_GH_BIN: fixture.fakeGh,
       REPO_HARNESS_GIT_BIN: 'git',
-      REPO_HARNESS_PUBLICATION_SEAL_PATH: fixture.sealPath,
-      REPO_HARNESS_PUBLICATION_CHECKS_PATH: fixture.checksPath,
       GH_BODY_FILE: join(fixture.root, 'pr-body.md'),
       ...envOverrides,
     },
@@ -433,9 +411,7 @@ function prepareCompletionPublication(subject: Fixture) {
     branch: source.branch,
     head_sha: completionHead,
     tree_sha: completionTree,
-    review_subject_sha256: source.review_subject_sha256,
-    verification_evidence_sha256: source.verification_evidence_sha256,
-    merge_seal_sha256: source.merge_seal_sha256,
+    candidate_diff_fingerprint: source.candidate_diff_fingerprint,
     provider: source.provider,
     provider_repo_id: source.provider_repo_id,
     pr_number: source.pr_number,

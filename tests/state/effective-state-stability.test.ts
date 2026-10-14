@@ -23,7 +23,7 @@ import type { EffectiveState } from '../../src/core/state/types';
 // Root cause: resolveStableEffectiveState's stability contract
 // (src/effects/state/resolve-effective-state.ts) compares the FULL
 // source_hashes map -- including non-authority, high-churn surfaces such as
-// checks/latest.json, tasks/current.md, handoff/resume, and the
+// checks/change-assessment.latest.json, tasks/current.md, handoff/resume, and the
 // review_subject working-tree diff fingerprint -- between re-reads, and
 // throws `StateResolutionUnstableError` whenever any one of them differs. The
 // hook wrapper
@@ -37,10 +37,9 @@ import type { EffectiveState } from '../../src/core/state/types';
 // This guard proves both falsifier directions named in the task contract
 // (tasks/contracts/20260723-0620-hook-guard-stability.contract.md):
 //   (a) churn confined to a non-authority source must not abort resolution
-//       or surface as the unresolvable-profile block.
-//   (b) a genuine plan-contract conflict (the artifact-parsers
-//       planContractRelationshipConflicts shape) must still block with
-//       today's exact WorkflowProfileGuard message and exit code.
+//       or lose its resolved profile.
+//   (b) a genuine plan-contract conflict remains a state blocker and an edit
+//       observation, without gating ordinary edits.
 //
 // On unfixed code, direction (a) is expected to be RED (the resolution
 // throws under sustained non-authority churn, so `failure` is non-null and
@@ -48,7 +47,7 @@ import type { EffectiveState } from '../../src/core/state/types';
 // green across the fix. Only the DESIRED end state is asserted here -- no
 // assertion encodes today's bug as expected behavior.
 
-const CHECKS_RELATIVE_PATH = '.ai/harness/checks/latest.json';
+const CHECKS_RELATIVE_PATH = '.ai/harness/checks/change-assessment.latest.json';
 
 interface ContinuousMutator {
   readonly startedPath: string;
@@ -131,7 +130,7 @@ function waitForBarrier(path: string): void {
 }
 
 describe('Effective State stability contract: authority-only partition (hook-guard-stability)', () => {
-  test('sustained churn confined to a non-authority source (checks/latest.json) does not abort resolution', async () => {
+  test('sustained churn confined to a non-authority source (checks/change-assessment.latest.json) does not abort resolution', async () => {
     const fixture = createEffectiveStateFixture();
     try {
       const risk = { targetPaths: ['src/feature.ts'], operationKind: 'feature' } as const;
@@ -177,7 +176,7 @@ describe('Effective State stability contract: authority-only partition (hook-gua
     }
   }, 15_000);
 
-  test('a genuine plan-contract conflict still blocks with the exact WorkflowProfileGuard message and exit code', () => {
+  test('a genuine plan-contract conflict remains diagnosed while ordinary edits continue', () => {
     const fixture = createEffectiveStateFixture();
     try {
       // artifact-parsers' planContractRelationshipConflicts shape: the
@@ -185,8 +184,8 @@ describe('Effective State stability contract: authority-only partition (hook-gua
       // plan path, so resolveEffectiveState pushes
       // 'contract_plan_relationship' into conflictingSources, which
       // projectEffectiveState turns into the hard blocker
-      // 'conflict:contract_plan_relationship'. This is a genuinely blocked
-      // resolution (no throw at all) and must stay byte-identical.
+      // 'conflict:contract_plan_relationship'. State keeps the exact blocker;
+      // the ordinary edit adapter reports it as advice.
       const current = readFileSync(join(fixture.cwd, CONTRACT), 'utf-8');
       writeFixture(fixture.cwd, CONTRACT, current.replace(
         /^> \*\*Plan\*\*: .*$/m,
@@ -220,9 +219,9 @@ describe('Effective State stability contract: authority-only partition (hook-gua
         env: {},
       });
 
-      expect(result.exitCode).toBe(2);
-      expect(result.stdout).toContain('[WorkflowProfileGuard] Unable to resolve a deterministic workflow profile for src/feature.ts');
-      expect(result.stderr).toContain('[WorkflowProfileGuard] Deterministic workflow profile resolution failed for src/feature.ts.');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('[WorkflowObservation] conflict:contract_plan_relationship; edit may continue.');
+      expect(result.stderr).toBe('');
     } finally {
       fixture.cleanup();
     }

@@ -98,7 +98,7 @@ Complete this inventory before implementation. If any line is unknown, keep the 
 - Sprint review: `tasks/reviews/{{ARTIFACT_STEM}}.review.md`
 - Implementation notes: `tasks/notes/{{ARTIFACT_STEM}}.notes.md`
 - Deferred-goal ledger: `tasks/todos.md`
-- Current checks: `.ai/harness/checks/latest.json`
+- Verification: declare and execute a non-empty Verification Plan. Select its native report explicitly.
 - Run snapshots: `.ai/harness/runs/`
 - Scope authority: `tasks/contracts/{{ARTIFACT_STEM}}.contract.md` `allowed_paths`
 - Concurrency rule: `.ai/harness/active-plan` selects the active plan for this worktree when present; `.ai/harness/active-worktree` records the owning worktree. If another worktree already owns active work, open or switch to the matching worktree instead of serializing unrelated plans.
@@ -127,12 +127,12 @@ Complete this inventory before implementation. If any line is unknown, keep the 
 - Review file: `tasks/reviews/{{ARTIFACT_STEM}}.review.md`
 - Implementation notes file: `tasks/notes/{{ARTIFACT_STEM}}.notes.md`
 - Template: `.claude/templates/contract.template.md`
-- Verification command: `repo-harness run verify-contract --contract tasks/contracts/{{ARTIFACT_STEM}}.contract.md --strict`
+- Verification command: `repo-harness run verification-plan execute --repo . --contract tasks/contracts/{{ARTIFACT_STEM}}.contract.md --report-file .ai/harness/runs/{{ARTIFACT_STEM}}.report.json`
 - Active plan rule: `.ai/harness/active-plan` is authoritative for this worktree when present; `.ai/harness/active-worktree` records the owning worktree. Do not infer active execution from the latest non-archived plan.
 
 ## Handoff
 
-- Checks file: `.ai/harness/checks/latest.json`
+- Verification: declare and execute a non-empty Verification Plan. Select its native report explicitly.
 - Session handoff: `.ai/harness/handoff/current.md`
 
 ## Promotion Gate
@@ -166,7 +166,7 @@ PI_TEMPLATE_REVIEW=$(cat <<'EOF_TEMPLATE_REVIEW'
 > **Plan**: {{PLAN_FILE}}
 > **Contract**: {{CONTRACT_FILE}}
 > **Notes File**: {{NOTES_FILE}}
-> **Checks File**: {{CHECKS_FILE}}
+> **Verification**: Select the native execution report explicitly.
 > **Last Updated**: {{TIMESTAMP}}
 > **Recommendation**: fail
 > **Review Rubric Version**: 2
@@ -277,7 +277,7 @@ PI_TEMPLATE_IMPLEMENTATION_NOTES=$(cat <<'EOF_TEMPLATE_IMPLEMENTATION_NOTES'
 
 ## Evidence Links
 
-- Checks: `.ai/harness/checks/latest.json`
+- Verification: declare and execute a non-empty Verification Plan. Select its native report explicitly.
 - Run snapshots: `.ai/harness/runs/`
 
 ## Promotion Candidates
@@ -352,51 +352,20 @@ pi_write_hook_runtime_readme() {
 
   mkdir -p "$hooks_dir"
   cat > "$readme" <<'EOF_HOOK_README'
-# Repo-Local Workflow Helpers
+# Workflow Helpers
 
-Host events execute through the user-level `repo-harness-hook` typed runtime.
-Files under `.ai/hooks/lib/` are operator helper libraries only; no repo-local
-host-event dispatcher or route script is supported.
+Host events use the user-level `repo-harness-hook` typed runtime.
+Operator helpers use the installed package. Run `repo-harness hook-lib path`
+to locate `workflow-state.sh`. Use `repo-harness run <helper>` to run helpers.
+Init preserves legacy files under `.ai/hooks/lib/`.
+Run `repo-harness doctor` for migration guidance.
 EOF_HOOK_README
 }
 
 pi_install_hook_assets() {
   local target_dir="$1"
-  local hooks_assets_dir="$2"
-  local mode="${3:-apply}"
+  local mode="${2:-apply}"
   local hooks_dir="$target_dir/.ai/hooks"
-
-  if [[ ! -d "$hooks_assets_dir" ]]; then
-    echo "[project-init] Warning: hook assets not found at $hooks_assets_dir" >&2
-    echo "[project-init] User-level host adapters dispatch through repo-harness-hook packaged hooks." >&2
-    return 0
-  fi
-
-  if [[ "$mode" != "apply" ]]; then
-    echo "[dry-run] mkdir -p \"$hooks_dir\""
-  else
-    mkdir -p "$hooks_dir"
-  fi
-
-  if [[ "$mode" != "apply" ]]; then
-    echo "[dry-run] mkdir -p \"$hooks_dir/lib\""
-  else
-    mkdir -p "$hooks_dir/lib"
-  fi
-
-  if [[ -d "$hooks_assets_dir/lib" ]]; then
-    while IFS= read -r hook_lib; do
-      local lib_name
-      lib_name="$(basename "$hook_lib")"
-      if [[ "$mode" != "apply" ]]; then
-        echo "[dry-run] cp \"$hook_lib\" \"$hooks_dir/lib/$lib_name\""
-        continue
-      fi
-      cp "$hook_lib" "$hooks_dir/lib/$lib_name"
-      chmod +x "$hooks_dir/lib/$lib_name" 2>/dev/null || true
-    done < <(find "$hooks_assets_dir/lib" -maxdepth 1 -type f -name '*.sh' | sort)
-  fi
-
   pi_write_hook_runtime_readme "$hooks_dir" "$mode"
 }
 
@@ -685,21 +654,6 @@ for (const action of actions) {
 ' "$contract_file" "$action_filter" "$ownership_filter"
       ;;
   esac
-}
-
-pi_install_workflow_contract() {
-  local target_dir="$1"
-  local contract_asset="$2"
-  local mode="${3:-apply}"
-  local output_path="$target_dir/.ai/harness/workflow-contract.json"
-
-  if [[ "$mode" != "apply" ]]; then
-    echo "[dry-run] install workflow contract into $output_path"
-    return 0
-  fi
-
-  mkdir -p "$(dirname "$output_path")"
-  cp "$contract_asset" "$output_path"
 }
 
 pi_install_templates() {
@@ -1452,6 +1406,7 @@ pi_write_harness_policy() {
   local output_file="$target_dir/.ai/harness/policy.json"
   local default_file
   local merged_file
+  local worktree_template
 
   if [[ "$mode" != "apply" ]]; then
     echo "[dry-run] write $output_file"
@@ -1461,6 +1416,7 @@ pi_write_harness_policy() {
   mkdir -p "$(dirname "$output_file")"
   default_file="$(mktemp)"
   merged_file="$(mktemp)"
+  worktree_template="$(bun -e 'import {pathToFileURL} from "node:url"; const {DEFAULT_WORKTREE_TEMPLATE}=await import(pathToFileURL(process.argv[1]).href); console.log(JSON.stringify(DEFAULT_WORKTREE_TEMPLATE));' "${BASH_SOURCE[0]%/*}/../../src/core/worktree-location.mjs")" || return $?
   cat > "$default_file" <<EOF_POLICY
 {
   "version": 1,
@@ -1503,10 +1459,6 @@ pi_write_harness_policy() {
     "statuses": ["Draft", "Approved", "Executing", "Done", "Archived"],
     "rule": "PRDs live in plans/prds as the upper planning layer. Sprints live in plans/sprints as long-task execution backlogs; each sprint row is expanded with Waza \$think into a detailed plans/plan-*.md before the plan -> contract -> worktree flow; tasks/todos.md stays the deferred-goal ledger"
   },
-  "development_campaign": {
-    "version": 1,
-    "mode": "off"
-  },
   "reference_material": {
     "dir": "_ref",
     "mode": "external-ignored",
@@ -1538,44 +1490,12 @@ pi_write_harness_policy() {
   },
   "harness": {
     "policy_file": ".ai/harness/policy.json",
-    "checks_file": ".ai/harness/checks/latest.json",
     "handoff_file": ".ai/harness/handoff/current.md",
     "failure_log_file": ".ai/harness/failures/latest.jsonl",
     "events_file": ".ai/harness/events.jsonl",
-    "architecture_events_file": ".ai/harness/architecture/events.jsonl",
     "runs_dir": ".ai/harness/runs",
     "helper_runtime_dir": "package:scripts",
     "helper_source": "package"
-  },
-  "architecture": {
-    "index_file": "docs/architecture/index.md",
-    "requests_dir": "docs/architecture/requests",
-    "snapshots_dir": "docs/architecture/snapshots",
-    "diagrams_dir": "docs/architecture/diagrams",
-    "domains_dir": "docs/architecture/domains",
-    "modules_dir": "docs/architecture/modules",
-    "diagram_skill": "mermaid",
-    "diagram_skill_source": "~/.codex/skills/mermaid",
-    "vendoring_policy": "do-not-vendor-diagram-skill-assets",
-    "freshness_gate": "advisory",
-    "gate_min_severity": "medium",
-    "pending_card_scope": "capability",
-    "pending_block_begin": "<!-- BEGIN ARCHITECTURE PENDING REQUESTS -->",
-    "pending_block_end": "<!-- END ARCHITECTURE PENDING REQUESTS -->",
-    "queue_script": "repo-harness run architecture-queue",
-    "contract_block_begin": "<!-- BEGIN ARCHITECTURE CONTRACT -->",
-    "contract_block_end": "<!-- END ARCHITECTURE CONTRACT -->",
-    "rule": "hooks record architecture queue cards and sync controlled local context blocks; agents author semantic snapshots and diagrams"
-  },
-  "refactor": {
-    "mode": "off",
-    "provider": "archctx",
-    "stages": {
-      "scan": { "provider_version": "0.6.1", "required_features": ["module-statistics-v1", "refactor-assessment-v1", "recommendation-v3"] },
-      "verify": { "provider_version": "0.6.1", "required_features": ["refactor-resolution-v1"] }
-    },
-    "require_cutover_closure": true,
-    "require_post_merge_measurement": false
   },
   "workstreams": {
     "dir": "tasks/workstreams",
@@ -1591,13 +1511,12 @@ pi_write_harness_policy() {
       "promotion": "archive on workflow close; promote only repeated or durable findings"
     },
     "evidence": {
-      "latest": ".ai/harness/checks/latest.json",
       "snapshots_dir": ".ai/harness/runs",
       "cache_globs": [".ai/harness/checks/*.latest.json", ".ai/harness/checks/*.latest.md"],
       "purpose": "raw verification records used to audit notes, reviews, and future promotion; checks latest reports and run snapshots are ignored runtime cache unless distilled into reviews, contracts, notes, or research"
     },
     "assets": {
-      "sources": [".ai/harness/policy.json", ".ai/harness/workflow-contract.json", ".ai/hooks/", "package:scripts", "docs/reference-configs/"],
+      "sources": [".ai/harness/policy.json", "package:assets/workflow-contract.v1.json", ".ai/hooks/", "package:scripts", "docs/reference-configs/"],
       "promotion_rule": "only promote patterns after verified reuse across tasks or fixtures"
     },
     "memory": {
@@ -1682,7 +1601,7 @@ pi_write_harness_policy() {
     "branch_prefix": "codex/",
     "base_branch": "main",
     "review_base": "main",
-    "worktree_dir_template": "../{{repo}}-wt-{{slug}}",
+    "worktree_dir_template": $worktree_template,
     "start_script": "repo-harness run contract-worktree start --plan <plan-file>",
     "finish_script": "repo-harness run contract-worktree finish",
     "cleanup_script": "repo-harness run contract-worktree cleanup --slug <slug>",
@@ -1709,7 +1628,7 @@ pi_write_harness_policy() {
       "remove": "delete only workflow-contract actions marked ownership=known_generated"
     },
     "cleanup": {
-      "source": ".ai/harness/workflow-contract.json#migrations.upgrade.actions",
+      "source": "package:assets/workflow-contract.v1.json#migrations.upgrade.actions",
       "remove_only_ownership": "known_generated",
       "unknown_files": "preserve-or-archive",
       "custom_hooks": "preserve",
@@ -1814,11 +1733,19 @@ pi_write_harness_policy() {
       "capability_source_key": ".ai/harness/policy.json#context.capability_source"
     },
     "herdr": {
-      "min_version": "0.9.0",
+      "min_version": "0.9.3",
       "release_assets": {
         "linux-x86_64": {
-          "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-linux-x86_64",
-          "sha256": "4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f"
+          "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.3/herdr-linux-x86_64",
+          "sha256": "18a8dc65f1c2fa485884344356dea1cfd911c6f06cf46fa78e193f4087f4dba7"
+        },
+        "macos-aarch64": {
+          "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.3/herdr-macos-aarch64",
+          "sha256": "5173a3e0ae42d5d1ab7ebfa5d5e6329f7c3d23f8e1a3677c7ce3231da2884157"
+        },
+        "macos-x86_64": {
+          "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.3/herdr-macos-x86_64",
+          "sha256": "db62d548ff3e832b087a96b1894a08d26be3905f1830309cd556783f215d4054"
         }
       }
     }
@@ -1976,8 +1903,8 @@ Generality: These are general working rules. Do not tailor behavior to any speci
 ## Root Workflow Contract
 
 - Keep sibling `CLAUDE.md` and `AGENTS.md` files aligned. Claude Code consumes `CLAUDE.md`; Codex consumes `AGENTS.md`.
-- Prefer repo-local workflow artifacts over tool-specific chat memory.
-- Treat `docs/spec.md` as stable product truth, `tasks/current.md` as a derived status snapshot, and `tasks/todos.md` as the deferred-goal ledger; current execution stays in the active plan's `## Task Breakdown`.
+- Write a plan before cross-module changes, architecture changes, and dependency upgrades. Small changes do not need a plan.
+- Treat `docs/spec.md` as stable product truth, `tasks/current.md` as a derived status snapshot, and `tasks/todos.md` as the deferred-goal ledger.
 - Treat `docs/researches/`, `tasks/lessons.md`, `tasks/notes/`, `.ai/harness/policy.json`, and `.ai/harness/handoff/current.md` as durable workflow context.
 - Use `.ai/context/context-map.json` and `.ai/context/capabilities.json` to discover functional-block contracts before adding local agent files.
 - Do not infer local `CLAUDE.md` or `AGENTS.md` files from broad physical layouts such as `apps/*`, `packages/*`, or `services/*`.
@@ -2008,12 +1935,12 @@ Generality: These are general working rules. Do not tailor behavior to any speci
 ## Execution And Verification
 
 - Prefer platform or standard-library features, then existing dependencies and repo patterns, before adding dependencies, files, or abstractions.
-- Preserve user-authored files; do not overwrite existing `CLAUDE.md` or `AGENTS.md` except when explicitly applying an approved scaffold or syncing the controlled architecture block.
+- Preserve user-authored files; do not overwrite existing `CLAUDE.md` or `AGENTS.md` except when explicitly applying an approved scaffold.
 - Do not run the full suite for every small change. Select checks from the complete diff, repo commands, active contract, and CI; report the selected scope, reason, exact commands, and results.
 - For docs-only or ledger-closeout changes with no executable impact, check diff hygiene, affected links/paths, and task-sync/workflow consistency when workflow artifacts changed. No full suite or typecheck is required solely for closeout.
 - For isolated code changes, run the regression and affected suites, plus relevant type/lint/build checks. For generator or template changes, generate a fixture and check the affected mirrors.
 - High-risk, cross-module, or release changes require the full repo verification set; this includes shared contracts, auth, publication, migrations, and hooks/runtime. Use full verification when the impact boundary is uncertain, and never weaken explicit contract or CI criteria.
-- Run `bash scripts/check-task-sync.sh` and `bash scripts/check-task-workflow.sh --strict` when workflow artifacts changed and those scripts exist. A passed suite need not be repeated for a subsequent docs/ledger-only closeout against unchanged executable source.
+- Run `repo-harness run check-task-sync` when workflow artifacts change. A passed suite need not be repeated for a subsequent docs/ledger-only closeout against unchanged executable source.
 - Report what changed, why it was the smallest coherent change, verification evidence, and any concrete residual risk.
 EOF_ROOT_CONTEXT
 }
@@ -2131,24 +2058,19 @@ pi_ensure_harness_state_surface() {
     "$target_dir/.ai/harness/security" \
     "$target_dir/.ai/harness/planning" \
     "$target_dir/.ai/harness/delegation" \
-    "$target_dir/.ai/harness/architecture" \
     "$target_dir/.ai/harness/worktrees" \
     "$target_dir/.ai/harness/triage" \
     "$target_dir/docs/researches" \
     "$target_dir/docs/architecture/domains" \
     "$target_dir/docs/architecture/modules" \
-    "$target_dir/docs/architecture/requests" \
     "$target_dir/docs/architecture/snapshots" \
     "$target_dir/docs/architecture/diagrams" \
     "$target_dir/.ai/harness/runs"
 
-  [[ -f "$target_dir/.ai/harness/checks/latest.json" ]] || printf "{}\n" > "$target_dir/.ai/harness/checks/latest.json"
   [[ -f "$target_dir/.ai/harness/handoff/current.md" ]] || printf "# Harness Handoff\n\n> **Reason**: bootstrap\n" > "$target_dir/.ai/harness/handoff/current.md"
   [[ -f "$target_dir/.ai/harness/handoff/resume.md" ]] || printf "# Codex Resume Packet\n\n> **Reason**: bootstrap\n" > "$target_dir/.ai/harness/handoff/resume.md"
   [[ -f "$target_dir/.ai/context/capability-source-map.json" ]] || printf '{\n  "version": 1,\n  "capabilities": {}\n}\n' > "$target_dir/.ai/context/capability-source-map.json"
   [[ -f "$target_dir/.ai/harness/events.jsonl" ]] || : > "$target_dir/.ai/harness/events.jsonl"
-  [[ -f "$target_dir/.ai/harness/architecture/events.jsonl" ]] || : > "$target_dir/.ai/harness/architecture/events.jsonl"
-  [[ -f "$target_dir/.ai/harness/architecture/.gitkeep" ]] || : > "$target_dir/.ai/harness/architecture/.gitkeep"
   [[ -f "$target_dir/.ai/harness/failures/latest.jsonl" ]] || : > "$target_dir/.ai/harness/failures/latest.jsonl"
   [[ -f "$target_dir/.ai/harness/security/.gitkeep" ]] || : > "$target_dir/.ai/harness/security/.gitkeep"
   [[ -f "$target_dir/.ai/harness/planning/.gitkeep" ]] || : > "$target_dir/.ai/harness/planning/.gitkeep"
@@ -2189,34 +2111,25 @@ CURRENT_STATUS_EOF
   fi
   [[ -f "$target_dir/docs/architecture/domains/.gitkeep" ]] || : > "$target_dir/docs/architecture/domains/.gitkeep"
   [[ -f "$target_dir/docs/architecture/modules/.gitkeep" ]] || : > "$target_dir/docs/architecture/modules/.gitkeep"
-  [[ -f "$target_dir/docs/architecture/requests/.gitkeep" ]] || : > "$target_dir/docs/architecture/requests/.gitkeep"
   [[ -f "$target_dir/docs/architecture/snapshots/.gitkeep" ]] || : > "$target_dir/docs/architecture/snapshots/.gitkeep"
   [[ -f "$target_dir/docs/architecture/diagrams/.gitkeep" ]] || : > "$target_dir/docs/architecture/diagrams/.gitkeep"
   if [[ ! -f "$target_dir/docs/architecture/index.md" ]]; then
     cat > "$target_dir/docs/architecture/index.md" <<'ARCHITECTURE_INDEX_EOF'
 # Architecture Index
 
-> Umbrella architecture ledger for current boundaries, drift requests, snapshots, and diagrams.
+> Umbrella architecture ledger for current boundaries, snapshots, and diagrams.
 
 ## Current Snapshot
 
 - Latest snapshot: (none yet)
 - Semantic diagram source: (none yet)
 
-## Architecture Drift Flow
+## Architecture Flow
 
-- `repo-harness run architecture-queue` records architecture-sensitive edits as requests.
-- `repo-harness run archive-architecture-request` archives handled requests after an agent records the resolution status and linked artifacts; `Resolved` requires the request's declared architecture module as an existing durable artifact.
-- `repo-harness run context-contract-sync` keeps only the controlled architecture block in functional-block `AGENTS.md` and `CLAUDE.md` files aligned.
+- Read architecture documents on demand. Update real boundaries explicitly.
 - `repo-harness run workstream-sync` keeps durable multi-session progress under `tasks/workstreams/<domain>/<capability>/` and projects only pointers into local contracts.
 - Semantic architecture diagrams live as Mermaid fenced blocks in the relevant module or snapshot Markdown.
 - Markdown Mermaid fenced blocks are the only architecture diagram artifacts; do not generate standalone HTML.
-
-## Pending Requests
-
-<!-- BEGIN ARCHITECTURE PENDING REQUESTS -->
-- (none)
-<!-- END ARCHITECTURE PENDING REQUESTS -->
 
 ARCHITECTURE_INDEX_EOF
   fi
@@ -2449,9 +2362,7 @@ pi_ensure_task_sync() {
     "check:brain-manifest": "repo-harness run check-brain-manifest",
     "check:context-files": "repo-harness run check-context-files",
     "check:deploy-sql": "repo-harness run check-deploy-sql-order",
-    "check:architecture-sync": "repo-harness run check-architecture-sync",
     "check:task-sync": "repo-harness run check-task-sync",
-    "check:task-workflow": "repo-harness run check-task-workflow --strict",
     "sync:brain-docs": "repo-harness run sync-brain-docs --all"
   }
 }
@@ -2474,9 +2385,13 @@ pkg.scripts ??= {};
 pkg.scripts["check:brain-manifest"] = "repo-harness run check-brain-manifest";
 pkg.scripts["check:context-files"] = "repo-harness run check-context-files";
 pkg.scripts["check:deploy-sql"] = "repo-harness run check-deploy-sql-order";
-pkg.scripts["check:architecture-sync"] = "repo-harness run check-architecture-sync";
 pkg.scripts["check:task-sync"] = "repo-harness run check-task-sync";
-pkg.scripts["check:task-workflow"] = "repo-harness run check-task-workflow --strict";
+if (pkg.scripts["check:task-workflow"] === "repo-harness run check-task-workflow --strict") {
+  delete pkg.scripts["check:task-workflow"];
+}
+if (pkg.scripts["check:architecture-sync"] === "repo-harness run check-architecture-sync") {
+  delete pkg.scripts["check:architecture-sync"];
+}
 pkg.scripts["sync:brain-docs"] = "repo-harness run sync-brain-docs --all";
 fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");
 ' "$package_file"

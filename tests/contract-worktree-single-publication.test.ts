@@ -129,18 +129,9 @@ function installFixture(container: string): { primary: string; linked: string } 
   writeFileSync(
     join(primary, "src/cli/index.ts"),
     [
-      'import { mkdirSync, writeFileSync } from "fs";',
-      'import { join } from "path";',
       'const args = process.argv.slice(2);',
-      'if (args[0] === "architecture-projection" && args[1] === "policy") { console.log(JSON.stringify({ provider: "archctx", applyMode: "automatic" })); process.exit(0); }',
-      'if (args[0] !== "architecture-projection" || args[1] !== "acknowledge-publication") process.exit(64);',
-      'const shaIndex = args.indexOf("--publication-sha");',
-      'const publicationSha = shaIndex >= 0 ? args[shaIndex + 1] : "";',
-      'if (!/^[0-9a-f]{40}$/.test(publicationSha)) process.exit(65);',
-      'const stateDir = join(process.cwd(), ".ai/harness/state");',
-      'mkdirSync(stateDir, { recursive: true });',
-      'writeFileSync(join(stateDir, "architecture-drift-cursor.json"), JSON.stringify({ head_sha: publicationSha }) + "\\n");',
-      'process.stdout.write(JSON.stringify({ publicationSha }) + "\\n");',
+      'if (args[0] === "architecture-projection" && args[1] === "policy") { console.log(JSON.stringify({ provider: "archctx", applyMode: "manual" })); process.exit(0); }',
+      'process.exit(64);',
       "",
     ].join("\n"),
   );
@@ -150,7 +141,7 @@ function installFixture(container: string): { primary: string; linked: string } 
   );
   writeFileSync(
     join(primary, ".ai/harness/policy.json"),
-    `${JSON.stringify({ architecture: { projection_apply: "automatic" }, worktree_strategy: { review_base: "main", merge_back: { target: "main" } } }, null, 2)}\n`,
+    `${JSON.stringify({ worktree_strategy: { review_base: "main", merge_back: { target: "main" } } }, null, 2)}\n`,
   );
   writeFileSync(join(primary, ".gitignore"), ".ai/harness/state/\n");
   writeFileSync(join(primary, "docs/architecture/index.md"), "# Architecture Index\n\n## Pending Requests\n\n- (none)\n");
@@ -280,7 +271,6 @@ describe("contract-worktree single publication commit", () => {
         .toBe('{"projection":"reviewed-with-contract"}\n');
       expect(run("git", ["show", "--pretty=format:", "--name-only", "main"], primary).stdout)
         .toContain("docs/architecture/.projection-manifest.json");
-      expect(existsSync(join(primary, ".ai/harness/state/architecture-drift-cursor.json"))).toBe(false);
       expect(existsSync(join(primary, "plans/archive"))).toBe(true);
 
       const attempts = finishAttempts(primary);
@@ -595,4 +585,29 @@ describe("contract-worktree finish cleans up the merged worktree", () => {
       rmSync(container, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+
+describe('W3 start to finish publication', () => {
+  test('a real start-created marker is released by finish after proven merge', () => {
+    const container = realpathSync(mkdtempSync(join(tmpdir(), 'start-finish-publish-')));
+    try {
+      const { primary, linked } = installFixture(container);
+      expect(run('git', ['worktree', 'remove', linked], primary).status).toBe(0);
+      expect(run('git', ['branch', '-d', 'codex/demo'], primary).status).toBe(0);
+      // This old fixture tracks runtime markers; start intentionally transfers them.
+      run('git', ['rm', '--cached', '--ignore-unmatch', '.ai/harness/active-plan', '.ai/harness/active-worktree'], primary);
+      writeFileSync(join(primary, '.gitignore'), readFileSync(join(primary, '.gitignore'), 'utf8') + '.ai/harness/active-*\n');
+      commitAll(primary, 'ignore local start markers');
+      const start = run('bash', ['scripts/contract-worktree.sh', 'start', '--plan', PLAN, '--path', linked, '--branch', 'codex/demo', '--no-plan-to-todo'], primary);
+      expect(start.status, start.stderr).toBe(0);
+      expect(readFileSync(join(linked, '.ai/harness/active-worktree'), 'utf8').trim()).toBe(linked);
+      mkdirSync(join(linked, 'src'), { recursive: true }); writeFileSync(join(linked, 'src/change.ts'), 'export const changed = true;\n');
+      commitAll(linked, 'task change');
+      const finish = run('bash', ['scripts/contract-worktree.sh', 'finish', '--merge'], linked);
+      expect(finish.status, finish.stderr).toBe(0); expect(existsSync(linked)).toBe(false);
+      expect(run('git', ['branch', '--list', 'codex/demo'], primary).stdout.trim()).toBe('');
+      expect(readFileSync(join(primary, 'src/change.ts'), 'utf8')).toContain('true');
+    } finally { rmSync(container, { recursive: true, force: true }); }
+  }, 30000);
 });

@@ -172,15 +172,15 @@ run_workflow_check() {
   fi
 
   set +e
-  output="$(bash "$check_script" --strict 2>&1)"
+  output="$(bash "$check_script" 2>&1)"
   status=$?
   set -e
 
   if [[ "$status" -eq 0 ]]; then
-    add_entry "workflow-check" "pass" "check-task-workflow.sh --strict passed" "$output"
+    add_entry "workflow-check" "pass" "check-task-workflow.sh passed" "$output"
   else
     summary="$(first_line <<<"$output")"
-    add_entry "workflow-check" "fail" "${summary:-check-task-workflow.sh --strict failed}" "$output"
+    add_entry "workflow-check" "fail" "${summary:-check-task-workflow.sh failed}" "$output"
   fi
 }
 
@@ -261,23 +261,6 @@ run_sprint_next() {
   fi
 }
 
-run_drift_requests() {
-  local details count
-  if [[ ! -d "docs/architecture/requests" ]]; then
-    add_entry "drift-requests" "pass" "no architecture request directory" ""
-    return 0
-  fi
-
-  details="$(find docs/architecture/requests -maxdepth 1 -type f ! -name '.gitkeep' | sort)"
-  if [[ -z "$details" ]]; then
-    add_entry "drift-requests" "pass" "no pending architecture drift requests" ""
-    return 0
-  fi
-
-  count="$(printf '%s\n' "$details" | sed '/^$/d' | wc -l | xargs)"
-  add_entry "drift-requests" "action" "${count} pending architecture drift request(s)" "$details"
-}
-
 write_json_snapshot() {
   local target="$1"
   local idx
@@ -343,7 +326,6 @@ write_inbox() {
 adoption_review_due="$(date_plus_14_days)"
 run_workflow_check
 run_sprint_next
-run_drift_requests
 write_json_snapshot "$run_file"
 write_inbox
 
