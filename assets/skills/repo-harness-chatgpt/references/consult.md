@@ -10,7 +10,7 @@ API. Oracle is the default provider; native (Chrome CDP) is deprecated and
 kept only for diagnostics. Never route through the removed Chrome
 extension/`browser-bind` provider.
 
-Plan and Review use the pinned Oracle 0.20.0 browser transport. Ordinary
+Plan and Review use the pinned Oracle 0.21.3 browser transport. Ordinary
 consult and follow-up commands accept optional `--chatgpt-app <serverName>`
 preselection and fail closed if Oracle lacks `--browser-app` support.
 Follow-ups inherit the source selection unless overridden or cleared with

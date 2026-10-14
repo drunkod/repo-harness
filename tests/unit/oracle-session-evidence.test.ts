@@ -9,8 +9,8 @@ function fixture(overrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'oracle-evidence-')); roots.push(root);
   const path = join(root, 'handle.json');
   mkdirSync(join(root, 'sessions', 'allocated-2'), { recursive: true });
-  writeFileSync(path, JSON.stringify({ protocol: 1, kind: 'oracle-session', sessionId: 'allocated-2', parentSessionId: null, ...overrides }));
-  writeFileSync(join(root, 'sessions', 'allocated-2', 'meta.json'), JSON.stringify({ id: 'allocated-2', browser: { modelSelection: { strategy: 'current', resolvedLabel: '6 Pro', verified: false }, appSelection: { status: 'selected', app: 'GitHub', pluginId: 'plugin:real' } } }));
+  writeFileSync(path, JSON.stringify({ protocol: 1, kind: 'oracle-session', sessionId: 'allocated-2', parentSessionId: null, ...overrides }), { mode: 0o600 });
+  writeFileSync(join(root, 'sessions', 'allocated-2', 'meta.json'), JSON.stringify({ id: 'allocated-2', browser: { modelSelection: { strategy: 'current', resolvedLabel: '6 Pro', verified: false }, appSelection: { status: 'selected', app: 'GitHub', pluginId: 'plugin:real' } } }), { mode: 0o600 });
   return { root, path };
 }
 test('reads allocated session and observations without deriving backend verification', () => {

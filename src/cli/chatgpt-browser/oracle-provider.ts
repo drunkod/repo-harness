@@ -1,4 +1,4 @@
-import { readOracleSessionEvidence, readOracleNetworkCapture, readOracleConversationCapture, type OracleSessionEvidence } from './oracle-session-evidence';
+import { readOracleProviderSessionMetadata, readOracleProviderNativeCapture, readOracleSessionEvidence, readOracleNetworkCapture, readOracleConversationCapture, type OracleSessionEvidence } from './oracle-session-evidence';
 import { spawn, spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
@@ -49,6 +49,8 @@ export interface OracleCapabilities {
   conversationEvidence: boolean;
   chatgptUrl: boolean;
   heartbeat: boolean;
+  slug: boolean;
+  providerNativeCapture: boolean;
 }
 
 export interface OracleProbe {
@@ -66,7 +68,8 @@ export interface OracleProbe {
  * Oracle's browser command/output contract is release-specific. Keep this as the
  * single version authority for both consultation and browser-doctor diagnostics.
  */
-export const REQUIRED_ORACLE_VERSION = '0.20.0';
+export const REQUIRED_ORACLE_VERSION = '0.21.3';
+export const ORACLE_UPSTREAM_PROFILE = 'upstream-0213';
 
 const ORACLE_TERM_GRACE_MS = 5_000;
 
@@ -149,12 +152,14 @@ function detectCapabilities(helpText: string, runtimeFlagsAccepted: boolean): Or
     // Session-descriptor, evidence and thinking-time flags are only observable
     // through an argument-parse probe: the repo-harness Oracle fork accepts them,
     // upstream rejects them, and neither reliably lists them in `--help`.
-    browserThinkingTime: runtimeFlagsAccepted,
-    writeSession: runtimeFlagsAccepted,
-    networkEvidence: runtimeFlagsAccepted,
-    conversationEvidence: runtimeFlagsAccepted,
+    browserThinkingTime: false,
+    writeSession: false,
+    networkEvidence: false,
+    conversationEvidence: has('--browser-capture-provider-native'),
     chatgptUrl: has('--chatgpt-url'),
     heartbeat: has('--heartbeat'),
+    slug: has('--slug'),
+    providerNativeCapture: has('--browser-capture-provider-native'),
   };
 }
 
@@ -217,16 +222,11 @@ export function probeOracle(binary: string, checkedVersion?: string): OracleProb
  */
 export const ORACLE_RUNTIME_PROBE_CAPABILITIES: ReadonlyArray<{
   flag: string;
-  capability: 'writeSession' | 'networkEvidence' | 'conversationEvidence' | 'browserThinkingTime';
+  capability: 'writeSession' | 'networkEvidence' | 'conversationEvidence' | 'browserThinkingTime' | 'slug' | 'providerNativeCapture';
 }> = [
-  { flag: '--write-session', capability: 'writeSession' },
-  { flag: '--write-network-evidence', capability: 'networkEvidence' },
-  { flag: '--write-conversation-evidence', capability: 'conversationEvidence' },
-  { flag: '--browser-thinking-time', capability: 'browserThinkingTime' },
+  { flag: '--slug', capability: 'slug' },
+  { flag: '--browser-capture-provider-native', capability: 'providerNativeCapture' },
 ];
-
-/** Shared recovery for a resolved oracle that lacks the repo-harness fork flags. */
-export const ORACLE_FORK_FLAG_RECOVERY = 'The resolved oracle lacks the repo-harness fork flags (session descriptor and evidence capture). Point repo-harness at the fork build with --oracle-bin <path-to-fork-oracle> or REPO_HARNESS_ORACLE_BIN=<path-to-fork-oracle>, then rerun repo-harness chatgpt browser-doctor --provider oracle --json.';
 
 /**
  * Build the probe argument vector from `buildOracleCommand` itself so the probed
@@ -282,16 +282,14 @@ function probeRuntimeFlagAcceptance(binary: string): boolean {
  * is oracle's authoritative `--write-output` answer file (an internal managed path,
  * distinct from the user's repo-relative `--write-output` copy-out).
  */
-export function buildOracleCommand(input: BrowserConsultInput, answerPath?: string, sessionPath?: string, networkPath?: string, historyPath?: string): string[] {
-  const args = ['--engine', 'browser', '--browser-archive', 'never', '--prompt', input.prompt];
+export function buildOracleCommand(input: BrowserConsultInput, answerPath?: string, sessionPath?: string, networkPath?: string, historyPath?: string, invocationSlug?: string): string[] {
+  const slug = invocationSlug ?? makeOracleSlug();
+  const args = ['--engine', 'browser', '--browser-archive', 'never', '--prompt', input.prompt, '--slug', slug];
   if (answerPath) args.push('--write-output', answerPath);
-  if (sessionPath) args.push('--write-session', sessionPath);
-  if (networkPath) args.push('--wait', '--write-network-evidence', networkPath);
-  if (historyPath) args.push('--wait', '--write-conversation-evidence', historyPath);
+  args.push('--browser-capture-provider-native');
   if (input.providerSessionId) args.push('--followup', input.providerSessionId);
   if (input.model) args.push('--model', input.model, '--browser-model-strategy', 'select');
   else args.push('--browser-model-strategy', 'current');
-  if (input.thinking) args.push('--browser-thinking-time', input.thinking);
   if (input.chatgptApp) args.push('--browser-app', input.chatgptApp);
   if (input.chatgptUrl) args.push('--chatgpt-url', input.chatgptUrl);
   args.push('--heartbeat', String(input.heartbeatSeconds ?? 59));
@@ -302,6 +300,12 @@ export function buildOracleCommand(input: BrowserConsultInput, answerPath?: stri
   for (const file of input.files ?? []) args.push('--file', resolveOracleFilePath(input, file.path));
   for (const followup of input.followups ?? []) args.push('--browser-follow-up', followup);
   return args;
+}
+
+function makeOracleSlug(): string {
+  const words = ['amber', 'cedar', 'frost', 'harbor', 'maple', 'orbit', 'quartz', 'river', 'silent', 'violet'];
+  const random = () => words[Math.floor(Math.random() * words.length)];
+  return `${random()}-${random()}-${random()}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function resolveOracleFilePath(input: BrowserConsultInput, filePath: string): string {
@@ -528,6 +532,16 @@ function runOracleProcess(
 
 export async function runOracleProvider(input: BrowserConsultInput, bundle: PromptBundle): Promise<OracleProviderResult> {
   const resolution = resolveOracleBin(input);
+  if (input.thinking) return {
+    status: 'failed', output: 'Oracle 0.21.3 does not support managed thinking control.',
+    command: ['oracle', ...buildOracleCommand(input)],
+    error: { code: 'ORACLE_UNSUPPORTED_CONTROL', message: 'thinking is unsupported by the upstream-0213 Oracle profile' },
+  };
+  if (input.captureNetworkEvidence === true) return {
+    status: 'failed', output: 'Oracle 0.21.3 does not provide the requested network evidence contract.',
+    command: ['oracle', ...buildOracleCommand(input)],
+    error: { code: 'ORACLE_UNSUPPORTED_EVIDENCE', message: 'captureNetworkEvidence is unsupported by the upstream-0213 Oracle profile' },
+  };
   if (input.sourceSessionId && !input.providerSessionId) {
     return {
       status: 'failed',
@@ -579,9 +593,7 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
   const oracleBinary = resolution.binary;
   let cachedProbe: OracleProbe | undefined;
   const probeResolvedOracle = (): OracleProbe => (cachedProbe ??= probeOracle(oracleBinary, resolvedOracleVersion));
-  // The session descriptor and evidence flags exist only in the repo-harness
-  // Oracle fork. Without them the real command dies at argument parsing, so it is
-  // refused before the browser is ever launched.
+  // Validate the provider-native argument surface before opening a browser.
   const unsupportedRuntimeFlags = ORACLE_RUNTIME_PROBE_CAPABILITIES
     .filter(({ capability }) => probeResolvedOracle().capabilities[capability] !== true)
     .map(({ flag }) => flag);
@@ -589,14 +601,14 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
     const message = `oracle binary did not accept ${unsupportedRuntimeFlags.join(', ')}, which every browser consult sends`;
     return {
       status: 'failed',
-      output: `${message}. The resolved oracle lacks the repo-harness fork flags.`,
+      output: `${message}. The resolved Oracle is missing an upstream-required browser capability.`,
       command: [oracleBinary, ...buildOracleCommand(input)],
       oracleBinary,
       oracleVersion: resolvedOracleVersion,
       error: {
         code: 'ORACLE_RUNTIME_FLAGS_UNSUPPORTED',
         message,
-        recovery: ORACLE_FORK_FLAG_RECOVERY,
+        recovery: 'Install or select @steipete/oracle@0.21.3 with the upstream-0213 browser capability profile.',
       },
     };
   }
@@ -677,7 +689,11 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
     const capturePath = input.captureNetworkEvidence === true
       ? join(mkdtempSync(join(oracleHomeDir, 'response-capture-')), 'streams.jsonl') : undefined;
     const historyPath = input.captureConversationEvidence === true ? join(mkdtempSync(join(oracleHomeDir, 'history-capture-')), 'history.json') : undefined;
-    const args = buildOracleCommand(providerInput, answerPath, sessionPath, capturePath, historyPath);
+    const expectedSlug = makeOracleSlug();
+    const args = buildOracleCommand(providerInput, answerPath, sessionPath, capturePath, historyPath, expectedSlug);
+    if (existsSync(join(oracleHomeDir, 'sessions', expectedSlug))) {
+      return { status: 'failed', output: 'Oracle session slug collision detected before launch.', command: [resolution.binary, ...args], error: { code: 'ORACLE_SESSION_SLUG_COLLISION', message: 'invocation-owned Oracle session slug already exists' } };
+    }
     const command = [resolution.binary, ...args];
     const result = await runOracleProcess(resolution.binary, args, {
       cwd: runCwd,
@@ -688,10 +704,11 @@ export async function runOracleProvider(input: BrowserConsultInput, bundle: Prom
     const stderr = result.stderr?.trimEnd() ?? '';
     const log = [stdout, stderr ? `\n[stderr]\n${stderr}` : ''].filter(Boolean).join('\n').trimEnd();
     const oracleVersion = resolvedOracleVersion;
-    const conversationUrl = extractConversationUrl(log);
-    const evidence = readOracleSessionEvidence(sessionPath, oracleHomeDir, input.providerSessionId);
+    const evidence = readOracleProviderSessionMetadata(expectedSlug, oracleHomeDir, input.providerSessionId, result.timedOut === true);
+    const runtimeUrl = evidence.observation?.conversationUrl;
+    const conversationUrl = runtimeUrl ?? extractConversationUrl(log);
     const providerSessionId = evidence.providerSessionId;
-    if (historyPath) evidence.conversationCapture = readOracleConversationCapture(historyPath, providerSessionId, oracleHomeDir);
+    if (input.captureConversationEvidence && providerSessionId) evidence.conversationCapture = readOracleProviderNativeCapture(providerSessionId, oracleHomeDir);
     if (capturePath) evidence.networkCapture = readOracleNetworkCapture(capturePath, providerSessionId, new URL(input.chatgptUrl ?? 'https://chatgpt.com/').origin);
 
     if (result.error) {
