@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, lstatSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { basename, join } from 'path';
+import { dirname, join } from 'path';
 import { spawnSync } from 'child_process';
 import { PassThrough, Writable } from 'stream';
 import { createHash } from 'crypto';
 import { runGlobalRuntimeSetup, verifyInstalledManagedRuntime } from '../../src/cli/commands/global-runtime';
 import { resolveOptionalRuntimeDeps, runCli, runTransactionalRuntimeRefresh } from '../../src/cli/index';
-import { writeShellExecutableFixture } from '../helpers/repo-fixture';
+import { copyPackageRuntimeFixture, writeShellExecutableFixture } from '../helpers/repo-fixture';
 
 const ROOT = join(import.meta.dir, '..', '..');
 const CLI = join(ROOT, 'src/cli/index.ts');
@@ -176,17 +176,17 @@ function setupManagedRuntimeReadback(home: string, fakeBin: string, harnessVersi
   writeFileSync(join(harness, 'package.json'), JSON.stringify({
     name: 'repo-harness',
     version: harnessVersion,
-    dependencies: { archctx: '0.6.1', 'archctx-contracts': '0.6.1' },
+    dependencies: { archctx: '0.7.2', 'archctx-contracts': '0.7.2' },
   }));
   writeFileSync(join(archctx, 'package.json'), JSON.stringify({
     name: 'archctx',
-    version: '0.6.1',
+    version: '0.7.2',
     engines: { node: '>=22.22 <26' },
     bin: { archctx: './bin/archctx.mjs' },
     dependencies: { '@colbymchenry/codegraph': '1.6.1' },
   }));
   writeExecutable(join(archctx, 'bin', 'archctx.mjs'), '#!/usr/bin/env node\n');
-  writeFileSync(join(globalModules, 'archctx-contracts', 'package.json'), JSON.stringify({ name: 'archctx-contracts', version: '0.6.1' }));
+  writeFileSync(join(globalModules, 'archctx-contracts', 'package.json'), JSON.stringify({ name: 'archctx-contracts', version: '0.7.2' }));
   writeFileSync(join(globalModules, '@colbymchenry', 'codegraph', 'package.json'), JSON.stringify({ name: '@colbymchenry/codegraph', version: '1.6.1' }));
   const systemNode = spawnSync('node', ['-p', 'process.execPath'], { encoding: 'utf-8' }).stdout.trim();
   writeExecutable(join(fakeBin, 'node'), [
@@ -195,13 +195,13 @@ function setupManagedRuntimeReadback(home: string, fakeBin: string, harnessVersi
     `if [[ "\${1:-}" == *"/archctx/bin/archctx.mjs" && "\${2:-}" == "daemon" ]]; then printf '%s\\n' '{"schemaVersion":"archcontext.envelope/v1","ok":true,"data":{"running":false}}'; exit 0; fi`,
     `if [[ "\${1:-}" == *"/archctx/bin/archctx.mjs" ]]; then printf '%s\\n' '${JSON.stringify({
       schemaVersion: 'archcontext.capabilities/v1',
-      package: { name: 'archctx', version: '0.6.1' },
+      package: { name: 'archctx', version: '0.7.2' },
       protocols: {
         projectionRequest: 'archcontext.projection-request/v1',
         projectionResult: 'archcontext.projection-result/v2',
         architectureRefreshSignal: 'archcontext.architecture-refresh-signal/v1',
       },
-      renderers: { architectureDocs: 'archcontext.docs-renderer/v4', agentContext: 'archcontext.agent-context-renderer/v1' },
+      renderers: { architectureDocs: 'archcontext.docs-renderer/v5', agentContext: 'archcontext.agent-context-renderer/v1' },
       features: ['architecture-docs-renderer-v2', 'architecture-refresh-signal-v1', 'projection-apply-receipt-v1', 'projection-prior-committed-applies-v1', 'projection-protocol-v2'],
     })}'; exit 0; fi`,
     `exec "${systemNode}" "$@"`,
@@ -212,10 +212,7 @@ function setupManagedRuntimeReadback(home: string, fakeBin: string, harnessVersi
 function installCandidateRuntimeFixture(home: string, version: string): string {
   const candidate = join(home, '.bun', 'install', 'global', 'node_modules', 'repo-harness');
   rmSync(candidate, { recursive: true, force: true });
-  cpSync(ROOT, candidate, {
-    recursive: true,
-    filter: (source) => !['.git', '.codegraph', 'node_modules', '_ops'].includes(basename(source)),
-  });
+  copyPackageRuntimeFixture(ROOT, candidate);
   const manifestPath = join(candidate, 'package.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { version?: string };
   manifest.version = version;
@@ -284,10 +281,10 @@ describe('install command global runtime bootstrap', () => {
       });
       expect(readFileSync(bunLog, 'utf-8')).toBe('--version\nupgrade\n--version\n');
       expect(JSON.parse(readFileSync(join(home, '.repo-harness/config.json'), 'utf8')).architecture).toEqual({
-        projection_provider: 'archctx', projection_apply: 'automatic', projection_failure_gate: 'advisory', projection_timeout_ms: 120000,
+        projection_provider: 'archctx', projection_apply: 'manual', projection_timeout_ms: 120000,
       });
       expect(result.steps.find((step) => step.step === 'global architecture projection')?.status).toBe('ok');
-      expect(JSON.parse(readFileSync(join(home, '.repo-harness/config.json'), 'utf8')).refactor_recommendations).toEqual({ enabled: true });
+      expect(JSON.parse(readFileSync(join(home, '.repo-harness/config.json'), 'utf8')).refactor_recommendations).toBeUndefined();
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -405,6 +402,7 @@ describe('install command global runtime bootstrap', () => {
       mkdirSync(join(validatedBun, '..'), { recursive: true });
       symlinkSync(process.execPath, validatedBun);
       writeExecutable(join(fakeBin, 'bun'), '#!/bin/bash\nif [[ "${1:-}" == "--version" ]]; then echo 1.0.0; exit 0; fi\nexit 99\n');
+      writeExecutable(join(fakeBin, 'herdr'), '#!/bin/sh\nif [ "${1:-}" = --skill ]; then printf "%s\\n" "---" "name: herdr" "---" "Check HERDR_ENV before control."; else printf "herdr 0.9.3\\n"; fi\n');
       writeReadyOfficialCodexPluginCli(fakeBin, home);
 
       const result = runGlobalRuntimeSetup({
@@ -1400,7 +1398,7 @@ exit 0
           ...sanitizedChildEnv(),
           HOME: home,
           BUN_INSTALL: join(home, '.bun'),
-          PATH: `${fakeBin}:${join(process.env.HOME ?? '', '.bun', 'bin')}:/usr/bin:/bin`,
+          PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`,
           // Sabotaging PATH alone is not enough: resolveCompatibleNodeRuntime falls through to a
           // tier-3 scan of trusted machine paths (/usr/local/bin, hostedtoolcache, nvm) that finds a
           // real Node 24 on CI. Pin the tier-1 explicit authority at the incompatible fake so the
@@ -1854,6 +1852,29 @@ exit 0
     }
   });
 
+  test('candidate runtime fixture copies published inputs and excludes local state', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'candidate-package-boundary-'));
+    const source = join(tmp, 'source');
+    const destination = join(tmp, 'candidate');
+    try {
+      mkdirSync(join(source, 'src'), { recursive: true });
+      mkdirSync(join(source, '.ai/harness/runs'), { recursive: true });
+      mkdirSync(join(source, 'tests'), { recursive: true });
+      writeFileSync(join(source, 'package.json'), JSON.stringify({ files: ['src/', 'README.md'] }));
+      writeFileSync(join(source, 'src/entry.ts'), 'export const runtime = true;\n');
+      writeFileSync(join(source, 'README.md'), 'Published readme\n');
+      writeFileSync(join(source, '.ai/harness/runs/local.json'), '{"local":true}\n');
+      writeFileSync(join(source, 'tests/local.test.ts'), 'Local test\n');
+      copyPackageRuntimeFixture(source, destination);
+      expect(readFileSync(join(destination, 'src/entry.ts'), 'utf8')).toBe('export const runtime = true;\n');
+      expect(readFileSync(join(destination, 'README.md'), 'utf8')).toBe('Published readme\n');
+      expect(readFileSync(join(destination, 'package.json'), 'utf8')).toBe(readFileSync(join(source, 'package.json'), 'utf8'));
+      expect(existsSync(join(destination, '.ai'))).toBe(false);
+      expect(existsSync(join(destination, 'tests'))).toBe(false);
+      expect(existsSync(join(source, '.ai/harness/runs/local.json'))).toBe(true);
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+
   test('CLI update --version installs the requested package version', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-cli-update-version-'));
     const home = join(tmp, 'home');
@@ -2011,7 +2032,9 @@ exit 0
     expect(res.stdout).toContain('--with-obsidian-skills');
     expect(res.stdout).toContain('--configure-codegraph');
     expect(res.stdout).toContain('--no-cli');
-    expect(res.stdout).toContain('Deprecated: use repo-harness init --repo <path>');
+    expect(res.stdout).not.toContain('--repo <path>');
+    expect(res.stdout).not.toContain('--dry-run');
+    expect(res.stdout).not.toContain('--interactive');
   }, 30_000);
 
   test('CLI install defaults non-interactively to full with its selected optional ecosystems', () => {
@@ -2187,7 +2210,7 @@ test('managed runtime readback reports stale shared daemon after a successful pa
     writeFileSync(join(source, 'package.json'), JSON.stringify({ name: 'repo-harness', version: '9.9.9' }));
     const nodePath = join(fakeBin, 'node.fixture-body');
     const original = readFileSync(nodePath, 'utf8');
-    writeFileSync(nodePath, original.replace('"data":{"running":false}', '"data":{"running":true,"versionUnsupported":{"reason":"product-version-mismatch","expected":"0.6.1","received":"0.2.3","action":"upgrade-archctx-runtime","command":"archctx daemon upgrade"}}'));
+    writeFileSync(nodePath, original.replace('"data":{"running":false}', '"data":{"running":true,"versionUnsupported":{"reason":"product-version-mismatch","expected":"0.7.2","received":"0.2.3","action":"upgrade-archctx-runtime","command":"archctx daemon upgrade"}}'));
     const result = verifyInstalledManagedRuntime({ sourceRoot: source, cwd: tmp, env: {
       ...sanitizedChildEnv(), HOME: home, BUN_INSTALL: join(home, '.bun'),
       PATH: `${fakeBin}:${process.env.PATH ?? ''}`, REPO_HARNESS_BUN_EXECUTABLE: process.execPath,
@@ -2221,7 +2244,7 @@ test('daemon maintenance preserves the verified candidate and hoisted dependenci
     const result = runTransactionalRuntimeRefresh(options, (transactionOptions) => {
       setupManagedRuntimeReadback(home, fakeBin, '9.9.9');
       const body = join(fakeBin, 'node.fixture-body');
-      writeFileSync(body, readFileSync(body, 'utf8').replace('"data":{"running":false}', '"data":{"running":true,"versionUnsupported":{"reason":"product-version-mismatch","expected":"0.6.1","received":"0.2.3","action":"upgrade-archctx-runtime","command":"archctx daemon upgrade"}}'));
+      writeFileSync(body, readFileSync(body, 'utf8').replace('"data":{"running":false}', '"data":{"running":true,"versionUnsupported":{"reason":"product-version-mismatch","expected":"0.7.2","received":"0.2.3","action":"upgrade-archctx-runtime","command":"archctx daemon upgrade"}}'));
       return runGlobalRuntimeSetup(transactionOptions);
     });
     expect(result.exitCode).toBe(0);
@@ -2234,4 +2257,52 @@ test('daemon maintenance preserves the verified candidate and hoisted dependenci
     }
     expect(verifyInstalledManagedRuntime(options).status).toBe('failed');
   } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+describe('Codex Waza projection', () => {
+  for (const mode of ['relative', 'absolute', 'missing', 'unknown-directory'] as const) {
+    test(`Waza projection handles ${mode} paths without user-content deletion`, () => {
+      const tmp = mkdtempSync('/tmp/rh-waza-projection-');
+      const home = join(tmp, 'home');
+      const bin = join(tmp, 'bin');
+      try {
+        mkdirSync(bin, { recursive: true });
+        for (const name of ['think', 'hunt', 'check', 'health', 'mermaid']) {
+          const stage = join(home, '.agents/skills', name);
+          mkdirSync(stage, { recursive: true });
+          writeFileSync(join(stage, 'SKILL.md'), `---\nname: ${name}\n---\n# ${name}\n`);
+          const dest = join(home, '.codex/skills', name);
+          mkdirSync(dirname(dest), { recursive: true });
+          if (mode === 'relative') symlinkSync(`../../.agents/skills/${name}`, dest);
+          if (mode === 'absolute') symlinkSync(stage, dest);
+        }
+        const think = join(home, '.codex/skills/think');
+        if (mode === 'unknown-directory') {
+          mkdirSync(think); writeFileSync(join(think, 'SKILL.md'), 'user instructions\n');
+        }
+        // Only the runtime version probe is external. All skill bytes are staged.
+        writeExecutable(join(bin, 'bun'), '#!/bin/bash\nif [[ "$1" == "--version" ]]; then echo 1.4.0; exit 0; fi\nexit 9\n');
+        writeExecutable(join(bin, 'bunx'), '#!/bin/bash\nexit 9\n');
+        const env = { ...sanitizedChildEnv(), HOME: home, BUN_INSTALL: join(home, '.bun'), PATH: `${bin}:${process.env.PATH ?? ''}` };
+        const result = runGlobalRuntimeSetup({ sourceRoot: ROOT, cwd: tmp, target: 'codex', profile: 'minimal',
+          installCli: false, syncSkill: false, hostAdapters: false, externalSkills: true, codegraph: false, env });
+        const waza = result.steps.find(step => step.step === 'configure Waza skills');
+        expect(waza?.status).toBe(mode === 'unknown-directory' ? 'failed' : 'ok');
+        if (mode === 'unknown-directory') {
+          expect(result.exitCode).toBe(1);
+          expect(waza?.detail).toContain('refusing to refresh unowned host skill');
+          expect(waza?.detail).toContain('repo-harness install --profile full --target codex');
+          expect(lstatSync(think).isDirectory()).toBe(true);
+          expect(readFileSync(join(think, 'SKILL.md'), 'utf8')).toBe('user instructions\n');
+        } else {
+          expect(result.exitCode, result.stderr).toBe(0);
+          for (const name of ['think', 'hunt', 'check', 'health']) {
+            const dest = join(home, '.codex/skills', name);
+            expect(lstatSync(dest).isSymbolicLink()).toBe(true);
+            expect(readlinkSync(dest)).toBe(mode === 'relative' ? `../../.agents/skills/${name}` : join(home, '.agents/skills', name));
+          }
+        }
+      } finally { rmSync(tmp, { recursive: true, force: true }); }
+    });
+  }
 });

@@ -65,6 +65,9 @@ describe('mcp policy and paths', () => {
       });
 
       const executor = getMcpPolicy('executor');
+      expect(executor.allowAbsoluteRead).toBe(false);
+      expect(executor.readGlobs).not.toContain('**');
+      expect(executor.execution.fixedWorkflowCheck).toBe(true);
       expect(resolveMcpPath(tmp, 'tasks/secrets/token.txt', executor, 'read')).toMatchObject({ ok: false });
       expect(resolveMcpPath(tmp, '.ai/harness/nested/private.key', executor, 'read')).toMatchObject({ ok: false });
     } finally {
@@ -72,7 +75,7 @@ describe('mcp policy and paths', () => {
     }
   });
 
-  test('broad read policy keeps deny globs while accepting authorized absolute reads', () => {
+  test('scoped read policy keeps deny globs and permits workflow files', () => {
     const tmp = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-full-disk-'));
     const outside = mkdtempSync(join(tmpdir(), 'repo-harness-mcp-full-disk-outside-'));
     try {
@@ -84,14 +87,17 @@ describe('mcp policy and paths', () => {
       const normal = getMcpPolicy('planner');
       expect(resolveMcpPath(tmp, join(tmp, '.env'), normal, 'read')).toMatchObject({ ok: false });
 
-      const fullDisk = getMcpPolicy('planner', { fullDiskRead: true });
-      expect(resolveMcpPath(tmp, join(tmp, '.env'), fullDisk, 'read')).toMatchObject({ ok: false });
-      expect(resolveMcpPath(tmp, join(tmp, 'plans/prds/readme.md'), fullDisk, 'read')).toMatchObject({
+      const scoped = getMcpPolicy('planner');
+      expect(scoped.allowAbsoluteRead).toBe(false);
+      expect(scoped.readGlobs).not.toContain('**');
+      expect(scoped.execution.fixedWorkflowCheck).toBe(true);
+      expect(resolveMcpPath(tmp, join(tmp, '.env'), scoped, 'read')).toMatchObject({ ok: false });
+      expect(resolveMcpPath(tmp, 'plans/prds/readme.md', scoped, 'read')).toMatchObject({
         ok: true,
         relativePath: 'plans/prds/readme.md',
       });
-      expect(resolveMcpPath(tmp, join(tmp, 'plans/prds/new.md'), fullDisk, 'write')).toMatchObject({ ok: false });
-      expect(resolveMcpPath(tmp, join(outside, 'note.md'), fullDisk, 'read')).toMatchObject({ ok: false });
+      expect(resolveMcpPath(tmp, join(tmp, 'plans/prds/new.md'), scoped, 'write')).toMatchObject({ ok: false });
+      expect(resolveMcpPath(tmp, join(outside, 'note.md'), scoped, 'read')).toMatchObject({ ok: false });
     } finally {
       rmSync(tmp, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
@@ -179,6 +185,9 @@ describe('mcp policy and paths', () => {
       writeFileSync(join(tmp, '.ai/harness/handoff/task-goal.md'), '# Task Goal\n');
 
       const executor = getMcpPolicy('executor');
+      expect(executor.allowAbsoluteRead).toBe(false);
+      expect(executor.readGlobs).not.toContain('**');
+      expect(executor.execution.fixedWorkflowCheck).toBe(true);
       const executorTools = buildMcpToolDefinitions(executor).map((tool) => tool.name);
       expect(executor.capabilities).toMatchObject({
         workspaceReader: false,
@@ -191,7 +200,7 @@ describe('mcp policy and paths', () => {
       expect(executorTools).not.toContain('read_text');
       expect(executorTools).not.toContain('search_text');
       expect(executorTools).not.toContain('run_agent_goal');
-      expect(resolveMcpPath(tmp, '.ai/harness/checks/latest.json', executor, 'write')).toMatchObject({ ok: true });
+      expect(resolveMcpPath(tmp, '.ai/harness/checks/change-assessment.latest.json', executor, 'write')).toMatchObject({ ok: true });
       expect(resolveMcpPath(tmp, 'plans/prds/new.prd.md', executor, 'write')).toMatchObject({ ok: false });
       const executorWrite = await jsonTool(tmp, executor, 'write_prd', {
         title: 'Executor Write',
@@ -322,4 +331,26 @@ describe('mcp redaction and audit', () => {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+});
+
+test('shared token rules keep existing redaction and hide webhook and credential URLs', () => {
+  const cases = [
+    'Authorization: Bearer fake-value', 'sk-'+'a'.repeat(25), 'ghp_'+'a'.repeat(25),
+    'github_pat_'+'a'.repeat(35), 'AKIA'+'A'.repeat(16),
+    'eyJ'+'a'.repeat(12)+'.'+'b'.repeat(12)+'.'+'c'.repeat(12),
+    '-----BEGIN PRIVATE KEY-----fake-value-----END PRIVATE KEY-----',
+    'SECRET=sample-value', 'DATABASE_URL=postgres://example.invalid/db',
+    'https://hooks.slack.com/services/TTEST/BTEST/fake-value',
+    'https://discord.com/api/webhooks/123456/fake-value',
+    'https://user:pass@example.invalid/db', '123456789:'+'a'.repeat(35),
+  ];
+  for (const input of cases) {
+    const result = redactMcpText(input);
+    expect(result.text).not.toBe(input);
+    expect(result.text).toContain('REDACTED');
+    expect(result.redactions.length).toBeGreaterThan(0);
+  }
+  // MCP keeps its broad assignment rule. Only prompt detection narrows it.
+  expect(redactMcpText('tokens: null').text).toContain('REDACTED');
+  expect(redactMcpText('bound-task-abcdefghijklmnopqrstuv').text).toContain('REDACTED');
 });

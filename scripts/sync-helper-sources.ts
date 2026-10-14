@@ -105,8 +105,20 @@ function buildRecoveryProjection(): ProjectionFileRecord {
   };
 }
 
+function buildAcceptanceProjection(): ProjectionFileRecord {
+  const file = readProjectionFile(CANONICAL_ROOT, "acceptance-receipt.ts");
+  const source = file.bytes.toString("utf8");
+  const importPath = "from '../src/effects/state/readonly-observation';";
+  if (source.split(importPath).length !== 2) throw new Error("acceptance helper must import the canonical observation owner exactly once");
+  return { ...file, bytes: Buffer.from(source.replace(importPath, "from '../../../src/effects/state/readonly-observation';")) };
+}
+
 function main(): void {
   const mode = parseMode(process.argv.slice(2));
+  const locationSource = readFileSync(join(REPO_ROOT, 'src/core/worktree-location.mjs'));
+  const locationTarget = join(REPO_ROOT, 'assets/herdr/webhook-notify/worktree-location.mjs');
+  if (mode === 'write') writeProjectionFileAtomic(REPO_ROOT, locationTarget, locationSource, 0o644);
+  else if (!existsSync(locationTarget) || !sameProjectionBytes(readFileSync(locationTarget), locationSource)) throw new Error('Herdr worktree location projection drift');
   const contract = loadWorkflowContract(CONTRACT_PATH);
   const inventory = getHelperScripts(contract);
   const inventorySet = new Set(inventory);
@@ -122,7 +134,9 @@ function main(): void {
       ? buildCapabilityProjection()
       : name === "recovery-view-cli.ts"
         ? buildRecoveryProjection()
-        : readProjectionFile(CANONICAL_ROOT, name);
+        : name === "acceptance-receipt.ts"
+          ? buildAcceptanceProjection()
+          : readProjectionFile(CANONICAL_ROOT, name);
   }).filter((file) => file !== null);
 
   const targetFiles = existsSync(TARGET_ROOT) ? collectProjectionFiles(TARGET_ROOT) : [];
@@ -190,8 +204,7 @@ function main(): void {
   if (mode === "check" && drift.length > 0) {
     for (const item of drift) process.stderr.write(`[helpers] ${item}\n`);
     process.stderr.write("[helpers] Edit scripts/<helper>, then run bun run sync:helpers.\n");
-    process.stdout.write("[helpers] downstream template drift recorded; executable helpers use package:scripts.\n");
-    return;
+    process.exit(1);
   }
 
   if (mode === "write" && blockedDrift.length > 0) {

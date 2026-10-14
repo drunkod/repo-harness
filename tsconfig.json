@@ -13,8 +13,9 @@
     "strict": true,
     "skipLibCheck": true,
     "target": "ES2022",
-    "types": ["bun"]
+    "types": ["bun-types"]
   },
+  "exclude": ["tests/fixtures/upgrade-*/**"],
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",

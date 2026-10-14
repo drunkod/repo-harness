@@ -1,15 +1,247 @@
 import { afterEach, expect, test } from 'bun:test';
-import { readFileSync, rmSync } from 'fs';
+import { existsSync, lstatSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs';
+import { execFileSync, spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import { join } from 'path';
 import { REVIEW_MAX_ROUNDS, validateReviewOutput } from '../src/core/review/generic-review';
-import { reviewSessionOptions } from '../src/effects/review/generic-review';
-import { ensureSessionDirectory, nextSessionRound, writeSessionArtifact } from '../src/effects/terminal/task-session';
-import { tmpWorkspace, run } from './helpers/repo-fixture';
+import { composeReviewPacket, type ReviewPacketInput } from '../src/core/review/review-packet';
+import { closeReview, reviewLocation, reviewSessionOptions, reviewStatus, runReviewRound, type ReviewEffects } from '../src/effects/review/generic-review';
+import { acceptanceReceiptPath } from '../scripts/acceptance-receipt';
+import { seedAcceptanceFixture } from './helpers/verification-plan-fixture';
+import { canonicalize } from '../src/core/evidence/canonical-json';
+import type { JsonValue } from '../src/core/evidence/types';
+import { prepareChangeAssessment } from '../src/effects/review/change-assessment';
+import { executeVerificationContract } from '../src/effects/evidence/verification-execution';
+import { ensureSessionDirectory, nextSessionRound, readSessionArtifact, writeSessionArtifact } from '../src/effects/terminal/task-session';
+import { tmpWorkspace, tmpWorkspaceIn, run } from './helpers/repo-fixture';
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+
+function resolveNode24(): string {
+  const executable = Bun.which('node', { PATH: process.env.PATH ?? '' });
+  if (!executable) throw new Error('OAR fixture requires Node 24 on PATH');
+  const node = realpathSync(executable);
+  const runtime = JSON.parse(execFileSync(node, ['-p', 'JSON.stringify({ node: process.versions.node, bun: process.versions.bun, executable: process.execPath })'], {
+    encoding: 'utf8', timeout: 10_000,
+  })) as { node?: string; bun?: string; executable: string };
+  if (!/^24\./.test(runtime.node ?? '') || runtime.bun !== undefined || realpathSync(runtime.executable) !== node) {
+    throw new Error('OAR fixture requires the resolved PATH executable to be Node 24');
+  }
+  return node;
+}
+
+test('generic review refuses empty and missing plans before any provider starts on every platform', async () => {
+  for (const reason of ['empty_plan', 'missing_plan']) {
+    const { root, home, contract, verification } = seedAcceptanceFixture('gp');
+    roots.push(root, home);
+    const reviewerRepo = join(home, 'reviewer');
+    execFileSync('git', ['-C', root, 'worktree', 'add', '-qb', 'incomplete-plan-reviewer', reviewerRepo]);
+    const file = join(root, contract), source = readFileSync(file, 'utf8');
+    const beforePlan = source.slice(0, source.indexOf('## Verification Plan'));
+    const fence = String.fromCharCode(96).repeat(3);
+    writeFileSync(file, reason === 'empty_plan' ? beforePlan + `## Verification Plan\n\n${fence}json\n{"protocol":1,"checks":[]}\n${fence}\n` : beforePlan);
+    const calls: string[] = [];
+    const effects: ReviewEffects = {
+      owner: () => { calls.push('owner'); throw new Error('provider lookup must not run'); },
+      installation: async () => { calls.push('installation'); throw new Error('provider probe must not run'); },
+      start: async () => { calls.push('start'); throw new Error('provider start must not run'); },
+    };
+    await expect(runReviewRound({ repoRoot: root, contract, verification, reviewerRepo, authorityHome: home,
+      endpoint: { session: 'private-gp', home }, parentPane: 'fixture-owner-pane',
+      admitSession: () => { calls.push('admit'); } }, effects)).rejects.toThrow(reason);
+    expect(calls).toEqual([]);
+    expect(existsSync(acceptanceReceiptPath(root, home))).toBe(false);
+  }
+}, 60_000);
 const identity = { request_id: 'r', context_sha256: 'domain-context', subject_sha256: 'subject', actual_harness: 'claude' as const, actual_role: 'deep-reasoner', actual_model: 'fixture-model' };
 const finding = { id: 'f', severity: 'P1' as const, status: 'new' as const, message: '[fixture opinion] fix the fence' };
 const fail = { ...identity, verdict: 'FAIL', summary: '[fixture opinion] revise', findings: [finding] };
+const packetInput: ReviewPacketInput = Object.freeze({ context_sha256: 'domain-context', subject_sha256: 'subject',
+  actual_harness: 'claude', actual_role: 'deep-reasoner', prior_findings: Object.freeze([Object.freeze(finding)]),
+  contract: 'contract\n', goal: 'goal\n', verification: 'verification\n', source: 'source\n' });
+test('review packet preserves the exact transport text, domain identity and prior findings', () => {
+  // Frozen pre-extraction bytes. Do not derive this expectation from the builder or shared rule.
+  const expected = [
+    'Review the complete current subject against its goal, contract and prepared verification evidence. Do not edit production code or invoke other reviewers. Only author one final JSON file to the exact request.result_ref; no temp/rename or alternate submission. Terminal output and idle are observation only.',
+    'Outer transport JSON is {request_id: request.request_id, context_sha256: request.context_sha256, value: domain output}. Provider value has EXACTLY request_id, context_sha256, subject_sha256, verdict, summary, findings. Domain request_id is request.request_id; domain context_sha256 is the prepared domain hash below (distinct from transport packet hash). The owner adds actual harness/role/model from the bound task-agent and OAR Session observation, not your self-description.',
+    'PASS requires no unresolved P0/P1. FAIL requires at least one unresolved finding. Each finding has EXACTLY id, severity:P0|P1|P2|P3, status:new|open|resolved, message. Keep stable IDs: every prior finding must remain resolved/open with current evidence. A previous verdict is not evidence for current code.',
+    'DOMAIN IDENTITY: {"context_sha256":"domain-context","subject_sha256":"subject","actual_harness":"claude","actual_role":"deep-reasoner"}',
+    'PRIOR FINDINGS: [{"id":"f","severity":"P1","status":"new","message":"[fixture opinion] fix the fence"}]',
+    'CONTRACT:\ncontract\n', 'GOAL:\ngoal\n', 'PREPARED VERIFICATION:\nverification\n', 'CURRENT SOURCE:\nsource\n',
+  ].join('\n\n');
+  expect(Buffer.from(composeReviewPacket(packetInput))).toEqual(Buffer.from(expected));
+  expect(composeReviewPacket(packetInput)).toBe(composeReviewPacket(packetInput));
+  const codex = composeReviewPacket({ ...packetInput, actual_harness: 'codex', prior_findings: [] });
+  expect(codex).toContain('"actual_harness":"codex","actual_role":"deep-reasoner"');
+  expect(codex).toContain('PRIOR FINDINGS: []');
+});
+
+test('review packet enforces the existing 10 MiB limit in UTF-8 bytes without truncation', () => {
+  const input = { ...packetInput, source: '' };
+  const remaining = 10 * 1024 * 1024 - Buffer.byteLength(composeReviewPacket(input));
+  const source = 'é'.repeat(Math.floor(remaining / 2)) + 'x'.repeat(remaining % 2);
+  const packet = composeReviewPacket({ ...input, source });
+  expect(Buffer.byteLength(packet)).toBe(10 * 1024 * 1024);
+  expect(packet.endsWith(source)).toBe(true);
+  expect(() => composeReviewPacket({ ...input, source: source + 'x' })).toThrow('review_context_too_large');
+});
+
+function packetRoundFixture() {
+  const fixture = seedAcceptanceFixture('review-packet');
+  roots.push(fixture.root, fixture.home);
+  // Match the acceptance fixture's short, private endpoint HOME. TMPDIR can be
+  // long on macOS; Herdr also needs room for the longer client socket name.
+  const endpointHome = tmpWorkspaceIn('/tmp', 'rp');
+  roots.push(endpointHome);
+  const endpoint = { session: 'packet-fixture', home: endpointHome };
+  for (const socket of ['herdr.sock', 'herdr-client.sock']) {
+    const path = join(endpoint.home, '.config/herdr/sessions', endpoint.session, socket);
+    expect(Buffer.byteLength(path, 'utf8')).toBeLessThanOrEqual(103);
+  }
+  const reviewerRepo = join(fixture.home, 'reviewer');
+  execFileSync('git', ['-C', fixture.root, 'worktree', 'add', '-qb', 'packet-reviewer', reviewerRepo]);
+  const location = reviewLocation(fixture.root, fixture.contract);
+  const packetPath = (round = 1) => join(reviewerRepo, '.ai/harness/runs/generic-review-input', location.key, `packet-${round}.txt`);
+  const calls: string[] = [];
+  const effects: ReviewEffects = {
+    installation: async (_kind, executable) => { calls.push('installation'); return { kind: 'available', via: 'executable', command: executable ?? '/usr/bin/true' }; },
+    start: async () => {
+      calls.push('start');
+      expect(readFileSync(packetPath(), 'utf8')).toContain('CURRENT SOURCE:');
+      expect(lstatSync(packetPath()).mode & 0o777).toBe(0o600);
+      throw new Error('fixture_start_failure');
+    },
+    send: async () => { calls.push('send'); throw new Error('must not send'); },
+  };
+  const refresh = () => {
+    const report = executeVerificationContract({ repoRoot: fixture.root, contractPath: fixture.contract, reportFile: fixture.verification });
+    expect(report.passed).toBe(true);
+    const prepared = prepareChangeAssessment({ repoRoot: fixture.root, contractPath: fixture.contract });
+    const basis = { schema: 'repo-harness-change-assessment-evidence.v1', status: 'pass', assessment: prepared.assessment, selection_packet: prepared.packet };
+    writeFileSync(join(fixture.root, '.ai/harness/checks/change-assessment.latest.json'), JSON.stringify({ ...basis,
+      evidence_sha256: 'sha256:' + createHash('sha256').update(canonicalize(basis as unknown as JsonValue)).digest('hex'),
+    }, null, 2) + '\n');
+  };
+  const options = { repoRoot: fixture.root, contract: fixture.contract, verification: fixture.verification, reviewerRepo,
+    authorityHome: fixture.home, endpoint, parentPane: 'fixture-owner-pane',
+    harness: 'claude' as const, admitSession: () => { calls.push('admit'); } };
+  return { ...fixture, ...location, options, effects, calls, packetPath, refresh };
+}
+
+test('packet composition failure starts no pane and saves no packet or request', async () => {
+  const f = packetRoundFixture();
+  writeSessionArtifact(join(f.dir, 'request-1.json'), { subject_sha256: 'previous-subject' });
+  writeSessionArtifact(join(f.dir, 'accepted-1.json'), { output: { findings: [{ ...finding, message: 'x'.repeat(10 * 1024 * 1024) }] } });
+  await expect(runReviewRound(f.options, f.effects)).rejects.toThrow('review_context_too_large');
+  expect(f.calls).toEqual(['installation', 'admit']);
+  expect(existsSync(f.packetPath(2))).toBe(false);
+  expect(existsSync(join(f.dir, 'request-2.json'))).toBe(false);
+  expect(existsSync(acceptanceReceiptPath(f.root, f.home))).toBe(false);
+}, 60_000);
+
+test('packet survives launch failure; same input retries and changed subject fails before launch', async () => {
+  const f = packetRoundFixture();
+  // Linux keeps the real isolation refusal. Darwin reaches the injected start
+  // failure. Neither case starts a real pane or a provider process.
+  const launchError = process.platform === 'darwin' ? 'fixture_start_failure' : 'OAR_REVIEW_ISOLATION_UNSUPPORTED_PLATFORM';
+  await expect(runReviewRound(f.options, f.effects)).rejects.toThrow(launchError);
+  const packet = readFileSync(f.packetPath(), 'utf8');
+  const modifiedAt = lstatSync(f.packetPath()).mtimeMs;
+  expect(packet).toContain('CURRENT SOURCE:');
+  expect(packet).toContain('+candidate');
+  expect(lstatSync(f.packetPath()).mode & 0o777).toBe(0o600);
+  await expect(runReviewRound(f.options, f.effects)).rejects.toThrow(launchError);
+  expect(readFileSync(f.packetPath(), 'utf8')).toBe(packet);
+  expect(lstatSync(f.packetPath()).mtimeMs).toBe(modifiedAt);
+  expect(f.calls.filter(call => call === 'start')).toHaveLength(process.platform === 'darwin' ? 2 : 0);
+  const beforeChangedRetry = [...f.calls];
+  writeFileSync(join(f.root, 'feature.txt'), 'candidate\n\n');
+  f.refresh();
+  await expect(runReviewRound(f.options, f.effects)).rejects.toThrow('review_packet_changed_before_send; packet for round 1 is preserved. Inspect with repo-harness review status');
+  expect(f.calls).toEqual(beforeChangedRetry);
+  expect(readFileSync(f.packetPath(), 'utf8')).toBe(packet);
+  expect(existsSync(join(f.dir, 'request-1.json'))).toBe(false);
+  expect(existsSync(f.packetPath(2))).toBe(false);
+  expect(f.calls).not.toContain('send');
+  expect(existsSync(acceptanceReceiptPath(f.root, f.home))).toBe(false);
+}, 60_000);
+
+test.skipIf(process.platform !== 'darwin')('app-terminal round returns the exact host command, sends nothing and never asks for a relaunch', async () => {
+  const f = packetRoundFixture();
+  await expect(runReviewRound({ ...f.options, launch: 'app-terminal' }, f.effects)).rejects.toThrow('review_launch_addressing_invalid');
+  const { endpoint: _endpoint, parentPane: _parentPane, ...base } = f.options;
+  await expect(runReviewRound(base, f.effects)).rejects.toThrow('review_launch_addressing_invalid');
+  const options = { ...base, launch: 'app-terminal' as const };
+  const first = await runReviewRound(options, f.effects);
+  if (first.status !== 'launch_required') throw new Error('fixture_launch_required_expected');
+  expect(first.argv.slice(1)).toEqual(['--disable-sigusr1', realpathSync(join(import.meta.dir, '../dist/oar-review-host.js')), join(f.dir, 'host.json')]);
+  expect(first.argv[0]!.startsWith('/')).toBe(true);
+  expect(first.command).toBe(first.argv.map(arg => "'" + arg + "'").join(' '));
+  expect(first.cwd).toBe(realpathSync(f.options.reviewerRepo));
+  const session = readSessionArtifact<Record<string, unknown>>(join(f.dir, 'session.json'));
+  expect([session.endpoint, session.parent_pane, session.actual_harness]).toEqual([null, null, 'claude']);
+  expect(existsSync(join(f.dir, 'request-1.json'))).toBe(false);
+  expect(readFileSync(f.packetPath(), 'utf8')).toContain('CURRENT SOURCE:');
+  // Repeating the round before any host claims the directory returns the same command and admits no new session.
+  expect(await runReviewRound(options, f.effects)).toEqual(first);
+  expect(f.calls.filter(call => call === 'admit')).toHaveLength(1);
+  expect(f.calls).not.toContain('start');
+  expect(f.calls).not.toContain('send');
+  // A host that claimed the directory and exited before ready is a failure, never a relaunch request.
+  const exited = spawnSync('/usr/bin/true');
+  writeSessionArtifact(join(f.dir, 'host-claim.json'), { pid: exited.pid });
+  await expect(runReviewRound(options, f.effects)).rejects.toThrow('review_host_start_failed');
+  expect((reviewStatus(f.root, f.options.contract) as { lifecycle: { status: string } }).lifecycle.status).toBe('launch_pending');
+  // After Session opening began, a host exit without a disposal receipt is not cleanup proof.
+  writeSessionArtifact(join(f.dir, 'session-opening.json'), { pid: exited.pid });
+  await expect(closeReview(f.root, f.options.contract, true, f.home)).rejects.toThrow('review_host_cleanup_pending');
+  expect(reviewStatus(f.root, f.options.contract).status).toBe('open');
+  writeSessionArtifact(join(f.dir, 'disposed.json'), { disposed: true, fixture: false });
+  expect((await closeReview(f.root, f.options.contract, true, f.home)).status).toBe('closed');
+  expect(existsSync(join(f.dir, 'close.request'))).toBe(true);
+  expect(reviewStatus(f.root, f.options.contract).status).toBe('closed');
+  expect(existsSync(acceptanceReceiptPath(f.root, f.home))).toBe(false);
+}, 60_000);
+
+test.skipIf(process.platform !== 'darwin')('app-terminal cancel before any claim leaves a tombstone, so a late launch opens no Session', async () => {
+  const f = packetRoundFixture();
+  const { endpoint: _endpoint, parentPane: _parentPane, ...base } = f.options;
+  const launch = await runReviewRound({ ...base, launch: 'app-terminal' }, f.effects);
+  if (launch.status !== 'launch_required') throw new Error('fixture_launch_required_expected');
+  expect((await closeReview(f.root, f.options.contract, true, f.home)).status).toBe('closed');
+  const claim = join(f.dir, 'host-claim.json');
+  expect(JSON.parse(readFileSync(claim, 'utf8'))).toEqual({ pid: null, closed: true });
+  const late = spawnSync(launch.argv[0]!, launch.argv.slice(1), { encoding: 'utf8', timeout: 30_000 });
+  expect(late.status).not.toBe(0);
+  expect(late.stderr).toContain('EEXIST');
+  expect(existsSync(join(f.dir, 'ready.json'))).toBe(false);
+  expect(JSON.parse(readFileSync(claim, 'utf8'))).toEqual({ pid: null, closed: true });
+}, 60_000);
+
+test('packet fixtures keep valid socket paths with a long UTF-8 temporary root', () => {
+  const temp = tmpWorkspaceIn('/tmp', 'packet-' + 'é'.repeat(52)); roots.push(temp);
+  expect(temp.length).toBeLessThan(103);
+  expect(Buffer.byteLength(temp, 'utf8')).toBeGreaterThan(107);
+  // Set startup variables only in the child. Keep the real isolation preload
+  // and run the original assertions, including the Darwin launch failure.
+  const env: Record<string, string | undefined> = { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp, NO_COLOR: '1' };
+  // Bun hides pass lines in agent environments, even with onlyFailures=false.
+  for (const key of ['CLAUDECODE', 'REPL_ID', 'AGENT']) delete env[key];
+  const result = spawnSync(process.execPath, ['--no-env-file', 'test', import.meta.path,
+    '--test-name-pattern', '^packet (composition failure|survives launch failure)',
+    '--timeout', '60000', '--max-concurrency', '1'], {
+    cwd: join(import.meta.dir, '..'),
+    env,
+    encoding: 'utf8', timeout: 50_000,
+  });
+  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+  expect(result.error, output).toBeUndefined();
+  expect(result.signal, output).toBeNull();
+  expect(result.status, output).toBe(0);
+  expect(output).toContain('(pass) packet composition failure starts no pane and saves no packet or request');
+  expect(output).toContain('(pass) packet survives launch failure; same input retries and changed subject fails before launch');
+}, 60_000);
+
 test('generic review validates exact domain binding, verdict, stable findings and no launch fields', () => {
   expect(validateReviewOutput(fail, identity).verdict).toBe('FAIL');
   for (const field of Object.keys(identity)) expect(() => validateReviewOutput({ ...fail, [field]: 'different' }, identity)).toThrow(`review_${field}_mismatch`);
@@ -94,7 +326,7 @@ fs.writeFileSync(spec.allowed,'ALLOWED');
 if(spec.child){const r=cp.spawnSync(process.execPath,[__filename,JSON.stringify({...spec,child:false,allowed:spec.childAllowed})],{encoding:'utf8'});console.log(JSON.stringify({results,operations,child:{status:r.status,stdout:r.stdout,stderr:r.stderr}}))}
 else console.log(JSON.stringify({results,operations}));
 `);
-  const node = realpathSync('/opt/homebrew/opt/node@24/bin/node');
+  const node = resolveNode24();
   const spec = { targets, allowedNative, allowed: join(output, 'host.txt'), childAllowed: join(output, 'child.txt'), child: true };
   const temporary = reviewHostTemporaryDirectory(output);
   const result = spawnSync('/usr/bin/sandbox-exec', ['-f', profile, node, worker, JSON.stringify(spec)], { encoding: 'utf8', timeout: 15000, env: { ...process.env, TMPDIR: temporary } });
@@ -124,6 +356,39 @@ else console.log(JSON.stringify({results,operations}));
   expect(readFileSync(join(output, 'child.txt'), 'utf8')).toBe('ALLOWED');
 });
 
+test.skipIf(process.platform !== 'darwin')('OAR isolation: system DNS works while a reachable local Unix socket stays denied', async () => {
+  const { createServer } = await import('node:net');
+  const { mkdirSync } = await import('node:fs');
+  const { spawnSync } = await import('node:child_process');
+  const { reviewIsolationPolicy } = await import('../src/effects/review/review-isolation');
+  const root = tmpWorkspace('oar-dns-isolation'); roots.push(root);
+  const subject = join(root, 'subject'), output = join(root, 'output');
+  mkdirSync(subject); mkdirSync(output);
+  const socketPath = join(root, 'control.sock');
+  const server = createServer(socket => { socket.destroy(); });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
+  try {
+    const node = resolveNode24();
+    const script = `const net=require('node:net'),dns=require('node:dns');
+const connect=()=>new Promise(resolve=>{const socket=net.createConnection(process.argv[1]);socket.once('connect',()=>{socket.destroy();resolve({connected:true})});socket.once('error',error=>resolve({connected:false,code:error.code}));});
+(async()=>{const local=await connect();const lookup=await new Promise(resolve=>dns.lookup('example.com',error=>resolve({resolved:!error,code:error?.code??null})));console.log(JSON.stringify({local,lookup}));})();`;
+    const control = spawnSync(node, ['-e', script, socketPath], { encoding: 'utf8', timeout: 15000 });
+    expect(control.status, control.stderr).toBe(0);
+    expect(JSON.parse(control.stdout)).toMatchObject({ local: { connected: true }, lookup: { resolved: true } });
+    const profile = join(root, 'profile.sb');
+    writeFileSync(profile, reviewIsolationPolicy({ subject, primary: subject, ownerRecord: subject,
+      journal: subject, gitCommonDir: subject, output }));
+    const confined = spawnSync('/usr/bin/sandbox-exec', ['-f', profile, node, '-e', script, socketPath], { encoding: 'utf8', timeout: 15000 });
+    expect(confined.status, confined.stderr).toBe(0);
+    const result = JSON.parse(confined.stdout);
+    expect(result.local.connected).toBe(false);
+    expect(['EPERM', 'EACCES']).toContain(result.local.code);
+    expect(result.lookup).toEqual({ resolved: true, code: null });
+  } finally {
+    await new Promise<void>(resolve => { server.close(() => resolve()); });
+  }
+});
+
 test('OAR isolation: reject authority overlap and symlink output roots before execution', async () => {
   const { mkdirSync, symlinkSync } = await import('node:fs');
   const { reviewIsolationPolicy } = await import('../src/effects/review/review-isolation');
@@ -149,13 +414,13 @@ async function runOarNodeFixture(label: string, body: string, confined = true) {
   const temporary = reviewHostTemporaryDirectory(output), worker = join(root, 'fixture.mjs');
   const entry = pathToFileURL(realpathSync(join(import.meta.dir, '../dist/oar-review-host.js'))).href;
   writeFileSync(worker, `import assert from 'node:assert/strict';
-import {writeFileSync,readFileSync} from 'node:fs';
+import {existsSync,writeFileSync,readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
-import {openScriptedReviewHost,runHostFileRequest,reviewRuntime,assertOarHostNode} from ${JSON.stringify(entry)};
+import {openScriptedReviewHost,runHostFileRequest,serveHostFileRequests,reviewRuntime,assertOarHostNode} from ${JSON.stringify(entry)};
 const output=${JSON.stringify(output)},isolation=${JSON.stringify({paths,policyFile})};
 ${body}`);
-  const node = realpathSync('/opt/homebrew/opt/node@24/bin/node');
+  const node = resolveNode24();
   const result = confined ? spawnSync('/usr/bin/sandbox-exec', ['-f', policyFile, node, worker], { encoding: 'utf8', timeout: 15000, env: { ...process.env, TMPDIR: temporary } })
     : spawnSync(node, [worker], { encoding: 'utf8', timeout: 15000 });
   expect(result.status, result.stderr).toBe(0);
@@ -183,6 +448,25 @@ assert.equal(calls,3);await assert.rejects(host.prompt('fourth'),/BUDGET_EXHAUST
   expect(result.calls).toBe(3); expect(result.model).toBeNull();
 });
 
+test.skipIf(process.platform !== 'darwin')('OAR host: a close request during a pending turn aborts that turn and disposes the Session', async () => {
+  const result = await runOarNodeFixture('oar-cancel-pending', String.raw`
+const spec={mode:'review',kind:'codex',installation:{kind:'available',via:'bundled'},options:{cwd:output},requestDirectory:output,output,controlDirectory:output,timeoutMs:10000,isolation};let calls=0;
+// The turn never ends by itself; only Session disposal can settle it.
+const host=await openScriptedReviewHost(spec.options,()=>{},async({signal})=>{calls++;writeFileSync(join(output,'turn-started'),'1');await new Promise(resolve=>signal.addEventListener('abort',resolve))},isolation);
+let closing;const close=()=>closing??=host.dispose();
+try{const content='pending turn';writeFileSync(join(output,'context-1.txt'),content);
+const request={protocol:2,task:'fixture',role:'deep-reasoner',round:1,request_id:'fixture-1',context_ref:join(output,'context-1.txt'),source_ref:'fixture',result_ref:join(output,'result-1.json'),context_sha256:'sha256:'+createHash('sha256').update(content).digest('hex'),result_contract:{required_fields:['request_id','context_sha256','value'],atomic_write:'temp_rename',submission:{command:'fixture',repo:output,task:'fixture',role:'deep-reasoner',round:1}}};
+writeFileSync(join(output,'request-1.json'),JSON.stringify(request));
+const served=serveHostFileRequests(host,spec,close,()=>closing!==undefined);
+while(!existsSync(join(output,'turn-started')))await new Promise(resolve=>setTimeout(resolve,10));
+writeFileSync(join(output,'close.request'),JSON.stringify({close:true}));
+await served;await close();
+assert.equal(JSON.parse(readFileSync(join(output,'observed-1.json'),'utf8')).outcome,'aborted');assert.equal(existsSync(request.result_ref),false);
+await assert.rejects(host.prompt('after-cancel'),/HOST_DISPOSED/);
+console.log(JSON.stringify({calls,passed:true,model:null}));}finally{await close()}`);
+  expect(result.calls).toBe(1); expect(result.passed).toBe(true);
+});
+
 test.skipIf(process.platform !== 'darwin')('OAR Session refuses unconfined or changed owner profiles before opening', async () => {
   const result = await runOarNodeFixture('oar-unconfined', `
 let calls=0;await assert.rejects(openScriptedReviewHost({cwd:output},()=>{},async()=>{calls++},isolation),/SEATBELT_REQUIRED/);assert.equal(calls,0);writeFileSync(isolation.policyFile,'(version 1)(allow default)');await assert.rejects(openScriptedReviewHost({cwd:output},()=>{},async()=>{calls++},isolation),/PROFILE_NOT_ADMITTED/);assert.equal(calls,0);console.log(JSON.stringify({calls,passed:true}))`, false);
@@ -197,7 +481,7 @@ test.skipIf(process.platform !== 'darwin')('OAR installation is probed by the fi
   writeFileSync(executable, `#!/bin/sh\n/bin/ps -p "$PPID" -o command= >> '${trace}'\nprintf '0.0.0\\n'\n`); chmodSync(executable, 0o700);
   const priorNode = process.env.REPO_HARNESS_NODE_BIN, priorBin = process.env.OAR_CODEX_BIN;
   try {
-    process.env.REPO_HARNESS_NODE_BIN = realpathSync('/opt/homebrew/opt/node@24/bin/node');
+    process.env.REPO_HARNESS_NODE_BIN = resolveNode24();
     process.env.OAR_CODEX_BIN = executable;
     const observed = await probeReviewInstallation('codex');
     expect(observed.kind).toBe('available');
@@ -250,7 +534,7 @@ test.skipIf(process.platform !== 'darwin')('OAR native child cannot forge owner 
   const owner = join(root, 'owner'), output = join(root, 'output'); mkdirSync(owner); mkdirSync(output);
   const paths = { subject: owner, primary: owner, ownerRecord: owner, journal: owner, gitCommonDir: owner, output };
   const policyFile = join(owner, 'profile.sb'); writeFileSync(policyFile, reviewIsolationPolicy(paths), { mode: 0o600 });
-  const node = realpathSync('/opt/homebrew/opt/node@24/bin/node');
+  const node = resolveNode24();
   const fixture = join(root, 'fixture-codex.cjs');
   writeFileSync(fixture, `#!${node}\n` + String.raw`
 const fs=require('node:fs'),path=require('node:path'),net=require('node:net'),readline=require('node:readline');

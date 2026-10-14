@@ -1,6 +1,12 @@
-import { artifactRepairPath } from '../../core/state/artifact-repair';
-import { readFileSync, readdirSync, realpathSync, statSync } from 'fs';
-import { execFileSync } from 'child_process';
+import { assertObservationPath, currentReadonlyObservation, withReadonlyObservation, type ReadonlyObservationIO, observationReadFileSync as readFileSync, observationReaddirSync as readdirSync, observationExecFileSync as execFileSync } from './readonly-observation';
+import {
+  acceptanceReceiptPath,
+  inspectAcceptanceCurrentBinding,
+  inspectAcceptanceEvidence,
+} from '../../../scripts/acceptance-receipt';
+import { evaluateVerificationContract } from '../evidence/verification-execution';
+import type { EffectiveStateInputs } from '../../core/state/project-effective-state';
+import { existsSync, realpathSync, statSync } from 'fs';
 import { isAbsolute, posix, win32 } from 'path';
 import { buildReviewSubject, isImplementationSurfacePath } from '../review/diff-fingerprint';
 import { resolveWorkflowProfile, type WorkflowProfile } from '../../core/workflow/profile';
@@ -11,9 +17,12 @@ import {
   parseCapabilityRegistry,
   resolveCapabilityPaths,
   type ArchcontextNodeFile,
+  type CapabilityPathResolution,
+  type CapabilityRegistry,
   type CapabilityRegistryResolution,
   type CapabilitySourceMode,
 } from '../../core/capabilities/registry';
+import { archcontextResolveQueries, resolveArchcontextCapabilityPaths } from '../capabilities/archcontext-owners';
 import type {
   EffectiveState,
   EffectiveStateRiskInput,
@@ -71,8 +80,8 @@ export interface EffectiveStatePublicationEffects {
   readonly version?: StateVersionWriteEffects;
 }
 
-function readWorkflowPolicy(cwd: string): WorkflowPolicy {
-  const text = readText(cwd, POLICY_PATH);
+function readWorkflowPolicy(cwd: string, readSource = (path: string) => readText(cwd, path)): WorkflowPolicy {
+  const text = readSource(POLICY_PATH);
   if (text === null) return null;
   let parsed: unknown;
   try {
@@ -234,11 +243,11 @@ function parseNodeYaml(source: string): unknown {
  * single-file hash byte-for-byte; archcontext mode folds the sorted node files
  * into one revision so any node edit still moves authority_revision.
  */
-function capabilityAuthorityHash(cwd: string, mode: CapabilitySourceMode): string {
-  if (mode === 'registry') return sourceHash(cwd, CAPABILITY_REGISTRY_PATH);
+function capabilityAuthorityHash(cwd: string, mode: CapabilitySourceMode, hashSource = (path: string) => sourceHash(cwd, path)): string {
+  if (mode === 'registry') return hashSource(CAPABILITY_REGISTRY_PATH);
   const paths = archcontextNodePaths(cwd);
   if (paths.length === 0) return sha256(`missing:${CAPABILITY_NODES_DIR}`);
-  return contentRevision(Object.fromEntries(paths.map((path) => [path, sourceHash(cwd, path)])));
+  return contentRevision(Object.fromEntries(paths.map((path) => [path, hashSource(path)])));
 }
 
 /** State-input source paths for the selected capability authority. */
@@ -293,7 +302,6 @@ const ACTIVE_SPRINT_MARKER = '.ai/harness/sprint/active-sprint';
 const HANDOFF_PATH = '.ai/harness/handoff/current.md';
 const RESUME_PATH = '.ai/harness/handoff/resume.md';
 const CURRENT_SNAPSHOT_PATH = 'tasks/current.md';
-const CHECKS_PATH = '.ai/harness/checks/latest.json';
 
 /**
  * `source_hashes` keys the stability contract's re-read comparison ignores:
@@ -308,7 +316,7 @@ const CHECKS_PATH = '.ai/harness/checks/latest.json';
  */
 const NON_AUTHORITY_SOURCE_HASH_KEYS: ReadonlySet<string> = new Set([
   'review_subject',
-  CHECKS_PATH,
+  'evidence_revision',
   CURRENT_SNAPSHOT_PATH,
   HANDOFF_PATH,
   RESUME_PATH,
@@ -336,18 +344,11 @@ export interface CapabilityResolution {
   readonly outOfRepoPathCount: number;
 }
 
-// Deterministic "declared" signal for a missing registry file: a repo commits
-// to the capability-registry system by naming it in policy.json's
-// .context.capability_registry_file (written by ensure-task-workflow.sh /
-// project-init-lib.sh at adoption time; see
-// tests/create-project-dirs.runtime.test.ts). A repo that never adopted the
-// system has no such reference, so a missing capabilities.json there is
-// "absent" (today's no-signal behavior, unchanged). A repo that DID declare
-// it but whose registry file is missing is "invalid" -- fail closed with a
-// structured blocker instead of a silent capabilityCount=0. Repair: rerun
-// `repo-harness run check-task-workflow` (ensure-task-workflow.sh scaffolds a
-// default capabilities.json when the declared path is missing) or hand-fix
-// corrupt JSON directly.
+// Policy declares capability registry authority. Adoption and init, plus the
+// explicit capability commands, write the registry and its policy reference.
+// A declared missing or invalid registry fails closed. Restore the declared
+// registry through those writers, or repair its JSON explicitly. Workflow
+// diagnostics and ensure-task-workflow do not repair registry contents.
 function policyDeclaresCapabilityRegistry(policy: WorkflowPolicy): boolean {
   const declared = policyValue(policy, '.context.capability_registry_file');
   if (declared === POLICY_FIELD_ABSENT) return false;
@@ -362,9 +363,9 @@ function policyDeclaresCapabilityRegistry(policy: WorkflowPolicy): boolean {
  * `archcontext` the policy switch itself is the declaration, so a missing nodes
  * directory or an unreadable node is `invalid` (fail closed), never `absent`.
  */
-function loadCapabilityRegistry(cwd: string, policy: WorkflowPolicy): CapabilityRegistryResolution {
+function loadCapabilityRegistry(cwd: string, policy: WorkflowPolicy, readSource = (path: string) => readText(cwd, path)): CapabilityRegistryResolution {
   if (capabilitySourceMode(policy) === 'registry') {
-    const text = readText(cwd, CAPABILITY_REGISTRY_PATH);
+    const text = readSource(CAPABILITY_REGISTRY_PATH);
     return parseCapabilityRegistry(text && text.length > 0 ? text : null, {
       declared: policyDeclaresCapabilityRegistry(policy),
       repoRoot: cwd,
@@ -386,7 +387,7 @@ function loadCapabilityRegistry(cwd: string, policy: WorkflowPolicy): Capability
 
   const files: ArchcontextNodeFile[] = [];
   for (const path of nodePaths) {
-    const text = readText(cwd, path);
+    const text = readSource(path);
     if (text === null) {
       return {
         status: 'invalid',
@@ -412,22 +413,47 @@ function loadCapabilityRegistry(cwd: string, policy: WorkflowPolicy): Capability
       };
     }
   }
-  return capabilityRegistryFromArchcontextNodes(files, {
-    repoRoot: cwd,
-    isExistingDirectory: (path) => {
-      try {
-        return statSync(repoPath(cwd, path)).isDirectory();
-      } catch {
-        return false;
-      }
-    },
-  });
+  return capabilityRegistryFromArchcontextNodes(files, { repoRoot: cwd });
+}
+
+// One resolve runs several unlocked passes. The archctx answer depends only on
+// the node files and the queried paths, so a pass with the same inputs reuses a success.
+let archcontextResolutionMemo: { key: string; resolution: CapabilityPathResolution } | null = null;
+
+/** Under `archcontext`, ArchContext owns path ownership; a failed resolve fails closed. */
+function resolveRegistryPaths(
+  cwd: string,
+  policy: WorkflowPolicy,
+  registry: CapabilityRegistry,
+  paths: readonly string[],
+  readSource: (path: string) => string | null,
+): CapabilityPathResolution {
+  if (capabilitySourceMode(policy) === 'registry') return resolveCapabilityPaths(registry, paths, { repoRoot: cwd });
+  const nodes = archcontextNodePaths(cwd).map((path) => [path, readSource(path)]);
+  // The queries carry each path's directory state, which changes what archctx answers.
+  const key = sha256(JSON.stringify([safeRealpath(cwd), nodes, paths, archcontextResolveQueries(cwd, paths)]));
+  if (archcontextResolutionMemo?.key === key) return archcontextResolutionMemo.resolution;
+  try {
+    const resolution = resolveArchcontextCapabilityPaths(cwd, registry, paths);
+    archcontextResolutionMemo = { key, resolution };
+    return resolution;
+  } catch (error) {
+    // A process failure is not memoized: the next resolve tries archctx again.
+    return {
+      status: 'invalid',
+      capabilityIds: [],
+      matches: [],
+      unmappedPaths: [],
+      diagnostics: [{ code: 'ARCHCONTEXT_RESOLVE_FAILED', path: CAPABILITY_NODES_DIR, message: (error as Error).message }],
+    };
+  }
 }
 
 function capabilityIdsForPaths(
   cwd: string,
   paths: readonly string[],
   policy: WorkflowPolicy,
+  readSource = (path: string) => readText(cwd, path),
 ): CapabilityResolution {
   // Absolute paths outside the repo (user-level config such as ~/.pi/agent/*)
   // are outside the registry's jurisdiction: prefixes are repo-relative, so
@@ -437,7 +463,7 @@ function capabilityIdsForPaths(
   // own capability:out-of-repo:<n> reason instead.
   const inRepoPaths = paths.filter((path) => !isCapabilityPathOutsideRepo(path, cwd));
   const outOfRepoPathCount = paths.length - inRepoPaths.length;
-  const registry = loadCapabilityRegistry(cwd, policy);
+  const registry = loadCapabilityRegistry(cwd, policy, readSource);
   if (registry.status === 'absent') {
     return { ids: [], registryStatus: 'absent', unmappedPaths: [], malformedEntryCount: 0, outOfRepoPathCount };
   }
@@ -455,7 +481,7 @@ function capabilityIdsForPaths(
       outOfRepoPathCount,
     };
   }
-  const resolution = resolveCapabilityPaths(registry.registry, inRepoPaths, { repoRoot: cwd });
+  const resolution = resolveRegistryPaths(cwd, policy, registry.registry, inRepoPaths, readSource);
   return {
     ids: resolution.capabilityIds,
     registryStatus: resolution.status,
@@ -506,7 +532,20 @@ function resolveEffectiveStateUnlocked(
   options: { risk?: EffectiveStateRiskInput },
 ): EffectiveState {
   const currentWorktree = safeRealpath(cwd);
-  const policy = readWorkflowPolicy(cwd);
+  // Only these named facts are shared, and only within this unlocked read-only
+  // pass. Every subsequent initial/confirmation pass owns a fresh map.
+  const captured = currentReadonlyObservation() ? new Map<string, string | null>() : null;
+  const readSource = (path: string): string | null => {
+    if (captured?.has(path)) { assertObservationPath(repoPath(cwd, path)); return captured.get(path)!; }
+    const text = readText(cwd, path);
+    captured?.set(path, text);
+    return text;
+  };
+  const hashSource = (path: string): string => {
+    const text = readSource(path);
+    return text === null ? sha256(`missing:${path}`) : sha256(text);
+  };
+  const policy = readWorkflowPolicy(cwd, readSource);
   const capabilitySource = capabilitySourceMode(policy);
   const preferredMarker = readTrimmed(cwd, ACTIVE_PLAN_MARKER);
   const owner = readTrimmed(cwd, ACTIVE_WORKTREE_MARKER);
@@ -574,7 +613,7 @@ function resolveEffectiveStateUnlocked(
   const capabilityResolution: CapabilityResolution | null = options.risk?.capabilityIds
     ? { ids: options.risk.capabilityIds, registryStatus: 'valid', unmappedPaths: [], malformedEntryCount: 0, outOfRepoPathCount: 0 }
     : hasRawTargetPaths
-      ? capabilityIdsForPaths(cwd, implementationTargetPaths, policy)
+      ? capabilityIdsForPaths(cwd, implementationTargetPaths, policy, readSource)
       : null;
   const observedCapabilityIds = capabilityResolution?.ids;
   const unmappedCapabilityCount = capabilityResolution?.unmappedPaths.length ?? 0;
@@ -651,9 +690,70 @@ function resolveEffectiveStateUnlocked(
   const reviewPath = planPath ? deriveReviewPath(planPath, planText, contractText) : null;
   const reviewText = readText(cwd, reviewPath);
   const reviewSubjectSha256 = reviewSubject.status === 'ok' ? reviewSubject.review_subject_sha256 : null;
-  const checksText = readText(cwd, CHECKS_PATH);
-  const repairPath = artifactRepairPath(checksText);
-  const artifactRepairText = readText(cwd, repairPath);
+  // One execution evaluation per unlocked collection. The owner returns
+  // missing/empty plans before tree capture. This path never runs commands.
+  let verification: EffectiveStateInputs['verification'] = {
+    freshness: 'missing', status: null, reason: 'missing_contract', resultRefs: [],
+  };
+  let acceptance: EffectiveStateInputs['acceptance'] = {
+    path: null, freshness: planPath && contractText ? 'missing' : 'not_applicable', disposition: null,
+  };
+  let executionFingerprint = sha256('missing:execution');
+  let assessmentFingerprint = sha256('missing:assessment');
+  let acceptanceFingerprint = sha256('missing:acceptance');
+  const authorityHome = process.env.HOME;
+  if (contractPath && contractText) {
+    try {
+      const outcome = evaluateVerificationContract({ repoRoot: cwd, contractPath });
+      executionFingerprint = sha256(JSON.stringify(outcome));
+      if (outcome.kind === 'verification_unavailable') {
+        verification = { freshness: 'missing', status: outcome.status, reason: outcome.reason, resultRefs: [] };
+      } else {
+        const relationValid = markdownHeader(contractText, 'Plan') === planPath
+          && !conflictingSources.includes('plan_contract_relationship')
+          && !conflictingSources.includes('contract_plan_relationship');
+        verification = {
+          freshness: relationValid && reviewSubject.status === 'ok'
+            ? outcome.status === 'missing' ? 'missing' : 'fresh'
+            : 'stale',
+          status: outcome.status,
+          reason: null,
+          resultRefs: outcome.results.map(({ execution_id, run_file }) => ({ execution_id, run_file })),
+        };
+        if (outcome.passed && relationValid && reviewSubject.status === 'ok') {
+          try {
+            const evidence = inspectAcceptanceEvidence({
+              root: cwd, contract: contractPath, contractContent: contractText,
+              report: outcome, subject: reviewSubject, current: true,
+            });
+            assessmentFingerprint = evidence.fingerprint;
+            try {
+              if (!authorityHome) throw new Error('Acceptance authority HOME is unavailable');
+              const receipt = inspectAcceptanceCurrentBinding({
+                root: cwd, authorityHome,
+                contract: contractPath, subject: reviewSubject, evidence,
+              });
+              acceptance = {
+                path: acceptanceReceiptPath(cwd, authorityHome),
+                freshness: 'fresh', disposition: receipt.disposition,
+              };
+              acceptanceFingerprint = sha256(JSON.stringify(receipt));
+            } catch (error) {
+              const path = authorityHome ? acceptanceReceiptPath(cwd, authorityHome) : null;
+              acceptance = { path, freshness: path ? existsSync(path) ? 'stale' : 'missing' : 'unavailable', disposition: null };
+              acceptanceFingerprint = sha256(String(error));
+            }
+          } catch (error) {
+            verification = { ...verification, freshness: 'stale', reason: String(error) };
+            assessmentFingerprint = sha256(String(error));
+          }
+        }
+      }
+    } catch (error) {
+      verification = { freshness: 'unavailable', status: null, reason: String(error), resultRefs: [] };
+      executionFingerprint = sha256(String(error));
+    }
+  }
   const sprintPath = readTrimmed(cwd, ACTIVE_SPRINT_MARKER);
   const taskId = planPath ? artifactStemFromPlan(planPath, planText) : null;
 
@@ -669,8 +769,8 @@ function resolveEffectiveStateUnlocked(
     active_worktree: sourceHash(cwd, ACTIVE_WORKTREE_MARKER),
     plan: planPath ? sourceHash(cwd, planPath) : sha256('missing:plan'),
     contract: contractPath ? sourceHash(cwd, contractPath) : sha256('missing:contract'),
-    policy: sourceHash(cwd, POLICY_PATH),
-    capability_registry: capabilityAuthorityHash(cwd, capabilitySource),
+    policy: captured ? hashSource(POLICY_PATH) : sourceHash(cwd, POLICY_PATH),
+    capability_registry: capabilityAuthorityHash(cwd, capabilitySource, captured ? hashSource : undefined),
     active_sprint_marker: sourceHash(cwd, ACTIVE_SPRINT_MARKER),
     active_sprint_file: sprintPath ? sourceHash(cwd, sprintPath) : sha256('missing:active-sprint-file'),
     task_identity: sha256(taskId ?? 'missing:task-id'),
@@ -681,8 +781,9 @@ function resolveEffectiveStateUnlocked(
     target_rev: reviewSubject.status === 'ok' ? sha256(reviewSubject.target_rev) : sha256('unavailable:target-rev'),
   });
   const evidenceRevision = contentRevision({
-    ...(repairPath ? { artifact_repair: artifactRepairText !== null ? sha256(artifactRepairText) : sha256('missing:artifact-repair') } : {}),
-    checks: checksText !== null ? sha256(checksText) : sha256('missing:checks'),
+    execution: executionFingerprint,
+    assessment: assessmentFingerprint,
+    acceptance: acceptanceFingerprint,
     review: reviewText !== null ? sha256(reviewText) : sha256('missing:review'),
     // Bound to the subject: evidence recomputed against a new subject is
     // distinguishable from stale evidence even if checks/review bytes match.
@@ -706,17 +807,17 @@ function resolveEffectiveStateUnlocked(
     ...(planPath ? [planPath] : []),
     ...(contractPath ? [contractPath] : []),
     ...(reviewPath ? [reviewPath] : []),
-    CHECKS_PATH,
-    ...(repairPath ? [repairPath] : []),
     ACTIVE_SPRINT_MARKER,
     ...(sprintPath ? [sprintPath] : []),
     HANDOFF_PATH,
     RESUME_PATH,
     CURRENT_SNAPSHOT_PATH,
   ];
-  const collected = collectStateInputs(cwd, sourcePaths, {
+  const collected = collectStateInputs(cwd, sourcePaths.filter(path => !captured?.has(path)), {
+    ...Object.fromEntries(sourcePaths.filter(path => captured?.has(path)).map(path => [path, hashSource(path)])),
     ...(reviewSubjectSha256 ? { review_subject: reviewSubjectSha256 } : {}),
     authority_revision: authorityRevision,
+    evidence_revision: evidenceRevision,
   });
   const sourceHashes = collected.sourceHashes;
   const stateRevision = collected.stateRevision;
@@ -746,9 +847,8 @@ function resolveEffectiveStateUnlocked(
       targetRevision: reviewSubject.status === 'ok' ? reviewSubject.target_rev : null,
       targetOverlapCount: reviewSubject.status === 'ok' ? reviewSubject.target_overlap_count : 0,
     },
-    checksPath: CHECKS_PATH,
-    checksText,
-    artifactRepairText,
+    verification,
+    acceptance,
     sprintPath,
     sprintExists: Boolean(sprintPath && fileExists(cwd, sprintPath)),
     activeWorktreePath: ACTIVE_WORKTREE_MARKER,
@@ -850,9 +950,13 @@ export function resolveEffectiveStateReadOnly(
   cwd = process.cwd(),
   nowMs = Date.now(),
   risk?: EffectiveStateRiskInput,
+  observation?: ReadonlyObservationIO,
 ): EffectiveState {
-  const confirmed = resolveStableEffectiveState(cwd, nowMs, risk);
-  return { ...confirmed, state_version: currentStateVersion(cwd) };
+  const collect = () => {
+    const confirmed = resolveStableEffectiveState(cwd, nowMs, risk);
+    return { ...confirmed, state_version: currentStateVersion(cwd) };
+  };
+  return observation ? withReadonlyObservation(observation, collect) : collect();
 }
 
 function resolveStableEffectiveState(

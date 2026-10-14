@@ -6,6 +6,11 @@
  * Never mutates.
  */
 
+import { bunGlobalPackageRoot, expectedSkillProjections, skillLinkMatches, type SkillProjection } from '../installer/skill-projection';
+import { hashManagedTree, installedCopyTreeOptions, installedProfileStatus, managedInstallSurfaceIsCurrent, readInstalledProfile, PROFILE_COMPONENTS } from '../installer/install-profile';
+import { parseSkillSurfaceCatalog } from '../../core/skill-surface/catalog';
+import type { SkillProjectionState } from '../../core/setup/types';
+
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -18,6 +23,7 @@ import { runSecurityScan, type SecurityScanReport } from './security';
 import { isOptIn, resolveRepoRoot } from '../hook/runtime';
 import { getHandlerForRoute } from '../hook/handler-registry';
 import { ROUTES } from '../hook/route-registry';
+import { isRepoHarnessSourceCheckout } from '../../core/adoption/source-checkout';
 
 const TRUST_STATE_LINE = /^\[hooks\.state\."[^"]+\/\.codex\/hooks\.json:/;
 const PACKAGE_NAME = 'repo-harness';
@@ -34,6 +40,19 @@ export interface DoctorCheckResult {
   describe: string;
   status: CheckStatus;
   detail: string;
+  /** `skill-projection` only: the typed per-skill judgments that `detail` is generated from. */
+  skills?: SkillProjectionRow[];
+  /** `codex-cli-version` only: the parsed CLI version. */
+  version?: string;
+}
+
+/** One per-skill judgment of the skill projection check. Paths stay in the CLI text only. */
+export interface SkillProjectionRow {
+  host: SkillProjection['host'];
+  name: string;
+  state: SkillProjectionState;
+  /** No problem for this skill: an ok state and no install ledger drift. */
+  ok: boolean;
 }
 
 export interface DoctorCheck {
@@ -157,6 +176,7 @@ function checkCodexCliVersion(): DoctorCheckResult {
       describe,
       status: 'warn',
       detail: `path=${resolved}; current=${version}; minimum=${MIN_CODEX_CLI_VERSION}`,
+      version,
     };
   }
   return {
@@ -164,6 +184,7 @@ function checkCodexCliVersion(): DoctorCheckResult {
     describe,
     status: 'ok',
     detail: `path=${resolved}; current=${version}; minimum=${MIN_CODEX_CLI_VERSION}`,
+    version,
   };
 }
 
@@ -482,12 +503,132 @@ function checkTypedHookRoutes(cwd: string): DoctorCheckResult {
   };
 }
 
+function skillProjectionState(projection: SkillProjection, contract: Parameters<typeof installedCopyTreeOptions>[1]): SkillProjectionState {
+  const { destination, source, name, staged } = projection;
+  let stat: fs.Stats;
+  try { stat = fs.lstatSync(destination); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+    throw error;
+  }
+  if (stat.isSymbolicLink()) {
+    if (!fs.existsSync(destination)) return 'dangling link';
+    return skillLinkMatches(destination, source) ? 'ok link' : 'wrong link';
+  }
+  if (!stat.isDirectory()) return 'invalid path type';
+  if (!fs.existsSync(path.join(source, 'SKILL.md'))) return 'source missing';
+  const sourceHash = hashManagedTree(source, installedCopyTreeOptions(name === 'repo-harness' ? 'canonical-skill' : 'command-facade', contract));
+  if (hashManagedTree(destination) !== sourceHash) return 'stale copy';
+  return staged ? 'unowned real directory' : 'ok copy';
+}
+
+/** One per-skill judgment. The public row omits every path; the CLI line adds them. */
+interface SkillProjectionJudgment {
+  readonly row: SkillProjectionRow;
+  readonly projection: SkillProjection;
+  readonly ledgerDrift: boolean;
+}
+
+/** CLI text projection of one judgment. Only `ok link` names its target. */
+function formatSkillProjectionJudgment({ row, projection, ledgerDrift }: SkillProjectionJudgment, profile: string): string {
+  const { destination, source, host } = projection;
+  const fix = `repo-harness install --profile ${profile} --target ${host}`;
+  const problems: string[] = [];
+  if (!row.state.startsWith('ok ')) {
+    const preserve = row.state === 'missing' || row.state === 'source missing' ? '' : `preserve or move ${destination}, then `;
+    problems.push(`expected ${source}; ${preserve}run: ${fix}`);
+  }
+  if (ledgerDrift) problems.push(`ledger drift; inspect: repo-harness install --state; then run: ${fix}`);
+  const state = row.state === 'ok link' ? `ok link -> ${source}` : row.state;
+  return `${destination}: ${state}${problems.length > 0 ? '; ' + problems.join('; ') : ''}`;
+}
+
+/** The package root whose catalog and skills the projection check reads. */
+export function skillProjectionSourceRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const globalRoot = bunGlobalPackageRoot(env);
+  return globalRoot && fs.existsSync(path.join(globalRoot, 'package.json')) ? globalRoot : PACKAGE_ROOT;
+}
+
+/** Read all selected host projections and the recorded install ownership. */
+export function checkSkillProjection(target: DoctorTarget = 'both', env: NodeJS.ProcessEnv = process.env): DoctorCheckResult {
+  const id = 'skill-projection';
+  const describe = 'Host skills match their source and install ledger';
+  try {
+    const home = env.HOME ?? env.USERPROFILE ?? os.homedir();
+    const installed = readInstalledProfile(env);
+    const profile = installed?.profile ?? 'full';
+    const sourceRoot = skillProjectionSourceRoot(env);
+    const contractPath = path.join(sourceRoot, 'assets', 'workflow-contract.v1.json');
+    const contract = JSON.parse(fs.readFileSync(contractPath, 'utf8'));
+    for (const field of ['installedCopyExcludes', 'installedCopyIncludes']) {
+      if (sourceRoot !== PACKAGE_ROOT && contract[field] === undefined) {
+        return { id, describe, status: 'warn', detail: `global package contract at ${contractPath} lacks ${field}; run: repo-harness update; then run: repo-harness upgrade` };
+      }
+    }
+    if (!Array.isArray(contract.installedCopyExcludes) || !contract.installedCopyExcludes.every((value: unknown) => typeof value === 'string')) {
+      throw new Error('invalid installed copy exclusions');
+    }
+    const manifestPath = path.join(sourceRoot, 'assets', 'skill-commands', 'manifest.json');
+    const catalog = parseSkillSurfaceCatalog(fs.readFileSync(manifestPath, 'utf8'), { declared: true, profileComponents: PROFILE_COMPONENTS });
+    if (catalog.status !== 'valid') throw new Error(`invalid skill catalog: ${manifestPath}`);
+    const judgments: SkillProjectionJudgment[] = [];
+    for (const projection of expectedSkillProjections(catalog.catalog, sourceRoot, home, profile)) {
+      if (target !== 'both' && target !== projection.host) continue;
+      const state = skillProjectionState(projection, contract);
+      const records = installed?.ownership_manifest.filter(surface => surface.path === projection.destination) ?? [];
+      const ledgerDrift = records.some(surface => !managedInstallSurfaceIsCurrent(surface));
+      judgments.push({
+        row: { host: projection.host, name: projection.name, state, ok: state.startsWith('ok ') && !ledgerDrift },
+        projection,
+        ledgerDrift,
+      });
+    }
+    let warning = judgments.some(judgment => !judgment.row.ok);
+    const details = judgments.map(judgment => formatSkillProjectionJudgment(judgment, profile));
+    if (installed) {
+      const drift = installedProfileStatus(installed, env).drift;
+      if (drift.status === 'drift') warning = true;
+      details.push(`install ledger: ${JSON.stringify(drift)}${drift.status === 'drift' ? '; inspect: repo-harness install --state; run: repo-harness install --profile ' + profile : ''}`);
+    } else {
+      warning = true;
+      details.push('install ledger: missing; run: repo-harness install --profile ' + profile);
+    }
+    return { id, describe, status: warning ? 'warn' : 'ok', detail: details.join('\n'), skills: judgments.map(judgment => judgment.row) };
+  } catch (error) {
+    return { id, describe, status: 'fail', detail: `${String((error as Error).message ?? error)}; inspect: repo-harness install --state` };
+  }
+
+}
+
+function checkLegacyWorkflowState(cwd: string): DoctorCheckResult {
+  const id = 'legacy-workflow-state';
+  const describe = 'Repository operator library uses the installed package';
+  const repoRoot = resolveRepoRoot(cwd);
+  if (!repoRoot) return { id, describe, status: 'na', detail: 'not in a git repository' };
+  if (isRepoHarnessSourceCheckout(repoRoot)) {
+    return { id, describe, status: 'na', detail: 'source checkout keeps its self-host operator library' };
+  }
+  const legacy = path.join(repoRoot, '.ai/hooks/lib/workflow-state.sh');
+  try {
+    fs.lstatSync(legacy);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { id, describe, status: 'ok', detail: 'no legacy workflow-state.sh copy' };
+    }
+    return { id, describe, status: 'warn', detail: `cannot inspect ${legacy}: ${String(error)}` };
+  }
+  return {
+    id, describe, status: 'warn',
+    detail: `Legacy copy: ${legacy}. Change callers to source "$(repo-harness hook-lib path)" or use repo-harness run <helper>. Test callers, back up the copy, then remove it manually. Keep edited copies until their changes are reviewed. Init and upgrade preserve this file.`,
+  };
+}
+
 export function runDoctor(cwd: string = process.cwd(), target: DoctorTarget = 'both'): DoctorReport {
   const checks: DoctorCheckResult[] = [];
   const codegraphProbe = probeCodegraph(cwd);
   const securityReport = runSecurityScan({ cwd });
   checks.push(checkPath());
   checks.push(checkVersion());
+  checks.push(checkSkillProjection(target));
   checks.push(checkCodexCliVersion());
   checks.push(checkCliUpdate(target));
   for (const target of ALL_TARGETS) {
@@ -502,6 +643,7 @@ export function runDoctor(cwd: string = process.cwd(), target: DoctorTarget = 'b
   checks.push(checkCodegraphIndex(codegraphProbe));
   checks.push(checkSecurityConfig(securityReport));
   checks.push(checkTypedHookRoutes(cwd));
+  checks.push(checkLegacyWorkflowState(cwd));
   for (const plugin of REGISTERED_CHECKS) {
     const r = plugin.run();
     checks.push({ id: plugin.id, describe: plugin.describe, ...r });

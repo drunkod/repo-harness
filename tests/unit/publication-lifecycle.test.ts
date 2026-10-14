@@ -1,3 +1,5 @@
+import { productionMergeReadinessCollector, resolvePublicationReadiness } from '../../src/effects/publication/merge-readiness';
+import { publicationSha256, replacePublicationMarker, stablePublicationJson } from '../../src/core/publication/publication-receipt';
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -17,7 +19,7 @@ import {
   verifyPublicationShipJournalComplete,
 } from '../../src/effects/publication/publication-lifecycle';
 import { PublicationLifecycleError } from '../../src/core/publication/publication-lifecycle';
-import { preparePublicationReceipt, ensurePublicationReceipt } from '../../src/effects/publication/publication-receipt';
+import { preparePublicationReceipt, ensurePublicationReceipt, readPublicationReceiptCache } from '../../src/effects/publication/publication-receipt';
 import { abortLeaseCompletionRecord, beginLeaseCompletionRecord, bindLeaseRecord, buildLeaseOwnerRecord, deriveTaskRevision, stealLeaseRecord } from '../../src/core/state/coordination-identity';
 import { createLeaseDirectory, readLease, writeLeaseOwnerDurably } from '../../src/effects/state/coordination-lease-store';
 import { resolveRepoIdentity } from '../../src/effects/state/coordination-canonical-source';
@@ -26,7 +28,6 @@ import { fixtureTaskId } from '../helpers/sprint-fixture';
 import { writeClaimTokenForBoundLease } from '../../src/effects/state/coordination-claim-token';
 
 const CLAIM = 'claim-lifecycle';
-const SUBJECT = `sha256:${'3'.repeat(64)}`;
 const SPRINT_PATH = 'plans/sprints/demo.sprint.md';
 const TASK_CELL = 'review lifecycle';
 
@@ -41,8 +42,6 @@ interface Fixture {
   readonly head: string;
   readonly gh: string;
   readonly body: string;
-  readonly seal: string;
-  readonly checks: string;
   readonly journal: string;
   readonly shipKey: string;
 }
@@ -74,9 +73,6 @@ function installFixture(): Fixture {
   const revision = deriveTaskRevision({ taskCell: TASK_CELL, taskId, modeCell: 'contract', acceptanceCell: 'lifecycle tests' });
   git(root, 'switch', '-c', 'codex/lifecycle');
   writeFileSync(join(root, 'feature.txt'), 'lifecycle\n');
-  mkdirSync(join(root, '.ai/harness/checks'), { recursive: true });
-  const checks = join(root, '.ai/harness/checks/latest.json');
-  writeFileSync(checks, JSON.stringify({ status: 'pass', review_subject_sha256: SUBJECT }) + '\n');
   git(root, 'add', '.'); git(root, 'commit', '-m', 'feature');
   const head = git(root, 'rev-parse', 'HEAD');
   const base = git(root, 'rev-parse', 'main');
@@ -92,16 +88,14 @@ function installFixture(): Fixture {
   writeLeaseOwnerDurably(root, taskId, bound.record);
   writeClaimTokenForBoundLease(root,{task_id:taskId,claim_id:CLAIM,worktree:root,sprint:SPRINT_PATH,task:TASK_CELL,unit_ref:'plans/plan-lifecycle.md'});
   writeLeaseOwnerDurably(root, taskId, completing.record);
-  const seal = join(root, 'seal.json');
-  writeFileSync(seal, JSON.stringify({ protocol: 1, kind: 'repo-harness-merge-seal', base_sha: base, head_sha: head, acceptance_subject_sha256: SUBJECT }) + '\n');
   const body = join(root, 'pr-body.md'); writeFileSync(body, 'PR body\n');
   const gh = join(root, 'fake-gh.sh');
   writeFileSync(gh, [
     '#!/bin/bash', 'set -euo pipefail',
-    'head="$(git rev-parse HEAD)"', 'base="$(git rev-parse main)"', 'body="$(jq -Rs . < "$GH_BODY_FILE")"',
+    'head="${GH_HEAD_SHA:-$(git rev-parse HEAD)}"', 'base="$(git rev-parse main)"', 'body="$(jq -Rs . < "$GH_BODY_FILE")"',
     'merged_at="null"; [[ -z "${GH_PR_MERGED_AT:-}" ]] || merged_at="\\"$GH_PR_MERGED_AT\\""',
-    'pr="{\\"number\\":1,\\"url\\":\\"https://example.invalid/pr/1\\",\\"headRefOid\\":\\"$head\\",\\"headRefName\\":\\"codex/lifecycle\\",\\"baseRefName\\":\\"main\\",\\"baseRefOid\\":\\"$base\\",\\"body\\":$body,\\"createdAt\\":\\"2026-08-22T04:05:55Z\\",\\"state\\":\\"${GH_PR_STATE:-OPEN}\\",\\"mergedAt\\":$merged_at,\\"mergeCommit\\":{\\"oid\\":\\"$base\\"}}"',
-    'if [[ "$1 $2" == "repo view" ]]; then printf \'{"id":"R_lifecycle"}\\n\'; exit 0; fi',
+    'pr="{\\"number\\":1,\\"url\\":\\"https://example.invalid/pr/1\\",\\"headRefOid\\":\\"$head\\",\\"headRefName\\":\\"codex/lifecycle\\",\\"baseRefName\\":\\"main\\",\\"baseRefOid\\":\\"$base\\",\\"body\\":$body,\\"createdAt\\":\\"2026-08-22T04:05:55Z\\",\\"state\\":\\"${GH_PR_STATE:-OPEN}\\",\\"isDraft\\":false,\\"reviewDecision\\":null,\\"mergeable\\":\\"MERGEABLE\\",\\"mergedAt\\":$merged_at,\\"mergeCommit\\":{\\"oid\\":\\"$base\\"}}"',
+    'if [[ "$1 $2" == "repo view" ]]; then printf \'{"id":"R_lifecycle","nameWithOwner":"fixture/lifecycle"}\\n\'; exit 0; fi',
     'if [[ "$1 $2" == "pr list" ]]; then [[ "${GH_PR_EXISTS:-0}" == "1" ]] && printf \'[%s]\\n\' "$pr" || printf \'[]\\n\'; exit 0; fi',
     'if [[ "$1 $2" == "pr view" ]]; then printf \'%s\\n\' "$pr"; exit 0; fi',
     'if [[ "$1 $2" == "pr edit" ]]; then printf \'%s\' "$5" > "$GH_BODY_FILE"; exit 0; fi',
@@ -118,7 +112,7 @@ function installFixture(): Fixture {
     target_branch: 'main', base_ref: 'refs/remotes/origin/main', base_sha: base,
     remote:'origin',publication_mode:'lease',claim_id:CLAIM,claim_task_id:taskId,claim_generation:'1',claim_task_revision:revision,
   }) + '\n');
-  return { root, taskId, revision, head, gh, body, seal, checks, journal, shipKey };
+  return { root, taskId, revision, head, gh, body, journal, shipKey };
 }
 
 function withFixture(run: (fixture: Fixture) => void): void {
@@ -132,7 +126,7 @@ function withFixture(run: (fixture: Fixture) => void): void {
 }
 
 function createReceiptAndJournal(fixture: Fixture) {
-  const input = { repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, branch: 'codex/lifecycle', target_branch: 'main', gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks };
+  const input = { repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, branch: 'codex/lifecycle', target_branch: 'main', gh_bin: fixture.gh, };
   const prepared = preparePublicationReceipt(input);
   if (prepared.create_intent === null) throw new Error('fixture expected creation intent');
   writeFileSync(fixture.journal, JSON.stringify({
@@ -153,6 +147,33 @@ function createReceiptAndJournal(fixture: Fixture) {
   return ensured.receipt;
 }
 
+/** Another PR lands on the target; the publication worktree, head, and marker stay unchanged. */
+function advanceTarget(fixture: Fixture): void {
+  const base = git(fixture.root, 'rev-parse', 'main');
+  git(fixture.root, 'update-ref', 'refs/heads/main', git(fixture.root, 'commit-tree', `${base}^{tree}`, '-p', base, '-m', 'unrelated target change'), base);
+}
+
+/** Production receipt and provider identity reads; check facts are green so only fences can block. */
+function readiness(fixture: Fixture, publicationId: string) {
+  return resolvePublicationReadiness({ repo_root: fixture.root, publication_id: publicationId, gh_bin: fixture.gh }, {
+    ...productionMergeReadinessCollector,
+    observe_facts: (identity) => ({
+      state: identity.state, is_draft: identity.is_draft, head_sha: identity.head_sha, base_sha: identity.base_sha,
+      review_decision: identity.review_decision, unresolved_thread_count: 0, rollback_boundary: { status: 'not_active' },
+      checks: [{ name: 'Required / CI', bucket: 'pass' }], mergeable: identity.mergeable,
+    }),
+    classify_integration: () => 'unmerged',
+  });
+}
+
+function lifecycleRefusal(run: () => unknown): PublicationLifecycleError {
+  try { run(); } catch (error) {
+    if (error instanceof PublicationLifecycleError) return error;
+    throw error;
+  }
+  throw new Error('expected a typed publication lifecycle refusal');
+}
+
 function completeLegacyJournal(fixture: Fixture, receipt: ReturnType<typeof createReceiptAndJournal>): void {
   const inProgress = JSON.parse(readFileSync(fixture.journal, 'utf-8')) as { phases: unknown[] };
   writeFileSync(fixture.journal, JSON.stringify({
@@ -164,7 +185,7 @@ function completeLegacyJournal(fixture: Fixture, receipt: ReturnType<typeof crea
 describe('task-locked publication lifecycle', () => {
   test('enters reviewing after marker-backed journal evidence and same-owner reopen fences topology', () => withFixture((fixture) => {
     const receipt = createReceiptAndJournal(fixture);
-    const enterInput = { repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks };
+    const enterInput = { repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, };
     expect(() => enterPublicationReviewing({ ...enterInput, ship_journal_path: join(fixture.root, 'untrusted-status.json') }))
       .toThrow('key-derived common-directory ship journal');
     expect(readLease(fixture.root, fixture.taskId).record?.state).toBe('completing');
@@ -188,9 +209,41 @@ describe('task-locked publication lifecycle', () => {
     expect(reopened).toMatchObject({ record_schema: 2, state: 'bound', current_publication: null, claim_id: CLAIM });
   }));
 
+
+  test('refuses old receipt digests in the journal and lease without rewriting history', () => withFixture((fixture) => {
+    const receipt = createReceiptAndJournal(fixture);
+    const { candidate_diff_fingerprint, ...retained } = receipt;
+    const oldDigest = publicationSha256(stablePublicationJson({ ...retained, protocol: 1,
+      review_subject_sha256: `sha256:${'3'.repeat(64)}`, verification_evidence_sha256: `sha256:${'4'.repeat(64)}` }));
+    const input = { repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM,
+      ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, };
+    const validJournal = readFileSync(fixture.journal, 'utf-8');
+    const journal = JSON.parse(validJournal);
+    journal.phases.find((phase: { phase: string }) => phase.phase === 'pr_observed').publication.receipt_digest = oldDigest;
+    writeFileSync(fixture.journal, JSON.stringify(journal));
+    const oldJournal = readFileSync(fixture.journal, 'utf-8');
+    const leaseBefore = readLease(fixture.root, fixture.taskId).raw;
+    expect(() => enterPublicationReviewing(input)).toThrow('ship journal pr_observed evidence does not match');
+    expect(readFileSync(fixture.journal, 'utf-8')).toBe(oldJournal);
+    expect(readLease(fixture.root, fixture.taskId).raw).toBe(leaseBefore);
+    writeFileSync(fixture.journal, validJournal);
+    enterPublicationReviewing(input);
+    const reviewing = readLease(fixture.root, fixture.taskId).record;
+    if (reviewing === null || reviewing.state !== 'reviewing' || reviewing.current_publication === null) throw new Error('fixture expected reviewing pointer');
+    writeLeaseOwnerDurably(fixture.root, fixture.taskId, { ...reviewing,
+      current_publication: { ...reviewing.current_publication, receipt_sha256: oldDigest } });
+    const oldLease = readLease(fixture.root, fixture.taskId).raw;
+    expect(() => productionMergeReadinessCollector.resolve_receipt({
+      repo_root: fixture.root, publication_id: receipt.publication_id,
+    })).toThrow('lease current_publication does not match the publication receipt');
+    expect(() => reopenPublication({ ...input, expected_generation: 1, publication_id: receipt.publication_id, expected_head_sha: receipt.head_sha }))
+      .toThrow('receipt digest does not match current publication pointer');
+    expect(readLease(fixture.root, fixture.taskId).raw).toBe(oldLease);
+  }));
+
   test('reopen authorization fence blocks the lease write after transport entry authorization is revoked', () => withFixture((fixture) => {
     const receipt = createReceiptAndJournal(fixture);
-    const enterInput = { repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks };
+    const enterInput = { repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, };
     enterPublicationReviewing(enterInput);
     const before = readLease(fixture.root, fixture.taskId).raw;
     expect(() => reopenPublication({
@@ -207,18 +260,16 @@ describe('task-locked publication lifecycle', () => {
 
   test('takeover writes reserving and abandon persists lineage before removing the lease', () => withFixture((fixture) => {
     const receipt = createReceiptAndJournal(fixture);
-    enterPublicationReviewing({ repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks });
+    enterPublicationReviewing({ repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, });
     expect(() => takeoverPublication({
       repo_root: fixture.root, task_id: fixture.taskId, expected_claim_id: CLAIM, expected_generation: 1,
       publication_id: receipt.publication_id, expected_head_sha: 'd'.repeat(40), reason: 'CI repair', session_id: 'session-two', new_claim_id: 'claim-two', source_worktree: fixture.root,
-      gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks,
-    })).toThrow('publication_pointer_mismatch');
+      gh_bin: fixture.gh, })).toThrow('publication_pointer_mismatch');
     expect(readLease(fixture.root, fixture.taskId).record?.state).toBe('reviewing');
     const taken = takeoverPublication({
       repo_root: fixture.root, task_id: fixture.taskId, expected_claim_id: CLAIM, expected_generation: 1,
       publication_id: receipt.publication_id, expected_head_sha: receipt.head_sha, reason: 'CI repair', session_id: 'session-two', new_claim_id: 'claim-two', source_worktree: fixture.root,
-      gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks,
-    });
+      gh_bin: fixture.gh, });
     expect(taken).toMatchObject({ state: 'reserving', generation: 2, claim_id: 'claim-two', current_publication: null, execution_worktree: null });
 
     // A new fixture keeps the reviewing pointer so abandon proves lineage-first removal.
@@ -226,14 +277,15 @@ describe('task-locked publication lifecycle', () => {
     const previous = { ...process.env }; process.env.GH_BODY_FILE = second.body; process.env.GH_PR_EXISTS = '0';
     try {
       const secondReceipt = createReceiptAndJournal(second);
-      enterPublicationReviewing({ repo_root: second.root, task_id: second.taskId, claim_id: CLAIM, ship_transaction_key: second.shipKey, ship_journal_path: second.journal, gh_bin: second.gh, merge_seal_path: second.seal, checks_path: second.checks });
-      expect(() => abandonPublication({ repo_root: second.root, task_id: second.taskId, expected_claim_id: CLAIM, expected_generation: 1, publication_id: secondReceipt.publication_id, expected_head_sha: secondReceipt.head_sha, reason: 'closed unmerged', gh_bin: second.gh, merge_seal_path: second.seal, checks_path: second.checks })).toThrow('CLOSED and unmerged');
+      enterPublicationReviewing({ repo_root: second.root, task_id: second.taskId, claim_id: CLAIM, ship_transaction_key: second.shipKey, ship_journal_path: second.journal, gh_bin: second.gh, });
+      expect(() => abandonPublication({ repo_root: second.root, task_id: second.taskId, expected_claim_id: CLAIM, expected_generation: 1, publication_id: secondReceipt.publication_id, expected_head_sha: secondReceipt.head_sha, reason: 'closed unmerged', gh_bin: second.gh, })).toThrow('CLOSED and unmerged');
       process.env.GH_PR_STATE = 'CLOSED'; process.env.GH_PR_MERGED_AT = '2026-08-22T05:00:00Z';
-      expect(() => abandonPublication({ repo_root: second.root, task_id: second.taskId, expected_claim_id: CLAIM, expected_generation: 1, publication_id: secondReceipt.publication_id, expected_head_sha: secondReceipt.head_sha, reason: 'closed unmerged', gh_bin: second.gh, merge_seal_path: second.seal, checks_path: second.checks })).toThrow('CLOSED and unmerged');
+      expect(() => abandonPublication({ repo_root: second.root, task_id: second.taskId, expected_claim_id: CLAIM, expected_generation: 1, publication_id: secondReceipt.publication_id, expected_head_sha: secondReceipt.head_sha, reason: 'closed unmerged', gh_bin: second.gh, })).toThrow('CLOSED and unmerged');
       delete process.env.GH_PR_MERGED_AT;
-      const lineage = abandonPublication({ repo_root: second.root, task_id: second.taskId, expected_claim_id: CLAIM, expected_generation: 1, publication_id: secondReceipt.publication_id, expected_head_sha: secondReceipt.head_sha, reason: 'closed unmerged', gh_bin: second.gh, merge_seal_path: second.seal, checks_path: second.checks });
+      const lineage = abandonPublication({ repo_root: second.root, task_id: second.taskId, expected_claim_id: CLAIM, expected_generation: 1, publication_id: secondReceipt.publication_id, expected_head_sha: secondReceipt.head_sha, reason: 'closed unmerged', gh_bin: second.gh, });
       expect(lineage.publication_id).toBe(secondReceipt.publication_id);
       expect(readLease(second.root, second.taskId).classification).toBe('available');
+      expect(productionMergeReadinessCollector.resolve_receipt({ repo_root: second.root, publication_id: secondReceipt.publication_id })).toEqual(secondReceipt);
       const lineagePath = join(resolveGitCommonDirectory(second.root), 'repo-harness/publications/v1/lineage', `${secondReceipt.publication_id.slice('sha256:'.length)}.json`);
       expect(existsSync(lineagePath)).toBe(true);
       expect(JSON.parse(readFileSync(lineagePath, 'utf-8')).reason).toBe('closed unmerged');
@@ -242,7 +294,7 @@ describe('task-locked publication lifecycle', () => {
 
   test('takeover authorization fence blocks the lease write after transport entry authorization is revoked', () => withFixture((fixture) => {
     const receipt = createReceiptAndJournal(fixture);
-    const enterInput = { repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks };
+    const enterInput = { repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, };
     enterPublicationReviewing(enterInput);
     const before = readLease(fixture.root, fixture.taskId).raw;
     expect(() => takeoverPublication({
@@ -257,8 +309,6 @@ describe('task-locked publication lifecycle', () => {
       new_claim_id: 'claim-two',
       source_worktree: fixture.root,
       gh_bin: fixture.gh,
-      merge_seal_path: fixture.seal,
-      checks_path: fixture.checks,
       authorization_fence: () => {
         throw new PublicationLifecycleError('publication_claim_mismatch', 'authorization was revoked before takeover mutation');
       },
@@ -268,14 +318,67 @@ describe('task-locked publication lifecycle', () => {
 
   test('reopen revalidates the live marker/provider receipt before any lease mutation', () => withFixture((fixture) => {
     const receipt = createReceiptAndJournal(fixture);
-    enterPublicationReviewing({ repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks });
+    enterPublicationReviewing({ repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, });
     writeFileSync(fixture.body, 'marker removed after review entry\n');
     expect(() => reopenPublication({
       repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, expected_generation: 1,
       publication_id: receipt.publication_id, expected_head_sha: receipt.head_sha,
-      gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks,
-    })).toThrow('publication receipt marker');
+      gh_bin: fixture.gh, })).toThrow('publication receipt marker');
     expect(readLease(fixture.root, fixture.taskId).record?.state).toBe('reviewing');
+  }));
+
+  test('a target base advance blocks merge readiness but not exact-owner reopen', () => withFixture((fixture) => {
+    const receipt = createReceiptAndJournal(fixture);
+    const enterInput = { repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, };
+    const reopenInput = { ...enterInput, expected_generation: 1, publication_id: receipt.publication_id, expected_head_sha: receipt.head_sha };
+    enterPublicationReviewing(enterInput);
+    expect(readiness(fixture, receipt.publication_id)).toMatchObject({ ready: true, blockers: [] });
+    const markerBody = readFileSync(fixture.body, 'utf-8');
+    advanceTarget(fixture);
+
+    expect(readiness(fixture, receipt.publication_id)).toMatchObject({
+      ready: false, expected_base_sha: receipt.base_sha, blockers: [{ code: 'base_moved_since_verification' }],
+    });
+    expect(lifecycleRefusal(() => reopenPublication({ ...reopenInput, claim_id: 'claim-other' }))).toMatchObject({
+      code: 'publication_claim_mismatch', message: expect.stringContaining('claim'),
+    });
+    process.env.GH_HEAD_SHA = 'd'.repeat(40);
+    expect(lifecycleRefusal(() => reopenPublication(reopenInput))).toMatchObject({
+      code: 'publication_claim_mismatch', message: expect.stringContaining('provider'),
+    });
+    delete process.env.GH_HEAD_SHA;
+    expect(readLease(fixture.root, fixture.taskId).record?.state).toBe('reviewing');
+    expect(reopenPublication(reopenInput)).toMatchObject({ state: 'bound', current_publication: null, claim_id: CLAIM });
+    expect(readPublicationReceiptCache(fixture.root, receipt.publication_id)).toEqual(receipt);
+    expect(readFileSync(fixture.body, 'utf-8')).toBe(markerBody);
+  }));
+
+  test('a target base advance does not block takeover or closed-unmerged abandon', () => withFixture((fixture) => {
+    const receipt = createReceiptAndJournal(fixture);
+    enterPublicationReviewing({ repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM, ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal, gh_bin: fixture.gh, });
+    advanceTarget(fixture);
+    const takeoverInput = {
+      repo_root: fixture.root, task_id: fixture.taskId, expected_claim_id: CLAIM, expected_generation: 1,
+      publication_id: receipt.publication_id, expected_head_sha: receipt.head_sha, reason: 'rebase repair', session_id: 'session-two', new_claim_id: 'claim-two', source_worktree: fixture.root,
+      gh_bin: fixture.gh,
+    };
+    writeFileSync(fixture.body, 'marker removed after review entry\n');
+    expect(() => takeoverPublication(takeoverInput)).toThrow('publication receipt marker');
+    expect(readLease(fixture.root, fixture.taskId).record?.state).toBe('reviewing');
+    writeFileSync(fixture.body, replacePublicationMarker('PR body\n', receipt));
+    expect(takeoverPublication(takeoverInput)).toMatchObject({ state: 'reserving', generation: 2, claim_id: 'claim-two', current_publication: null });
+
+    const second = installFixture();
+    const previous = { ...process.env }; process.env.GH_BODY_FILE = second.body; process.env.GH_PR_EXISTS = '0';
+    try {
+      const secondReceipt = createReceiptAndJournal(second);
+      enterPublicationReviewing({ repo_root: second.root, task_id: second.taskId, claim_id: CLAIM, ship_transaction_key: second.shipKey, ship_journal_path: second.journal, gh_bin: second.gh, });
+      advanceTarget(second);
+      process.env.GH_PR_STATE = 'CLOSED';
+      const lineage = abandonPublication({ repo_root: second.root, task_id: second.taskId, expected_claim_id: CLAIM, expected_generation: 1, publication_id: secondReceipt.publication_id, expected_head_sha: secondReceipt.head_sha, reason: 'closed unmerged', gh_bin: second.gh, });
+      expect(lineage.publication_id).toBe(secondReceipt.publication_id);
+      expect(readLease(second.root, second.taskId).classification).toBe('available');
+    } finally { process.env = previous; rmSync(second.root, { recursive: true, force: true }); }
   }));
 
   test('legacy inspection only classifies a complete marker-backed receipt, journal, and lease join as migratable', () => withFixture((fixture) => {
@@ -283,28 +386,24 @@ describe('task-locked publication lifecycle', () => {
     const premature = inspectLegacyPublication({
       repo_root: fixture.root, task_id: fixture.taskId, expected_claim_id: CLAIM,
       ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal,
-      gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks,
-    });
+      gh_bin: fixture.gh, });
     expect(premature.classification).toBe('legacy_unattributable');
     completeLegacyJournal(fixture, receipt);
     const migratable = inspectLegacyPublication({
       repo_root: fixture.root, task_id: fixture.taskId, expected_claim_id: CLAIM,
       ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal,
-      gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks,
-    });
+      gh_bin: fixture.gh, });
     expect(migratable.classification).toBe('migratable');
     const migrated = migrateLegacyPublication({
       repo_root: fixture.root, task_id: fixture.taskId, claim_id: CLAIM,
       ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal,
-      gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks,
-    });
+      gh_bin: fixture.gh, });
     expect(migrated.publication_id).toBe(receipt.publication_id);
     writeFileSync(fixture.body, 'marker intentionally absent\n');
     const unattributable = inspectLegacyPublication({
       repo_root: fixture.root, task_id: fixture.taskId, expected_claim_id: CLAIM,
       ship_transaction_key: fixture.shipKey, ship_journal_path: fixture.journal,
-      gh_bin: fixture.gh, merge_seal_path: fixture.seal, checks_path: fixture.checks,
-    });
+      gh_bin: fixture.gh, });
     expect(unattributable.classification).toBe('legacy_unattributable');
   }));
 });

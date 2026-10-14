@@ -1,5 +1,8 @@
 # Product Spec
 
+Campaign execution moved to the existing [repo-harness](../SKILL.md), [repo-harness-product](../assets/skills/repo-harness-product/SKILL.md), and [repo-harness-check](../assets/skill-commands/repo-harness-check/SKILL.md) Bot skills on 2026-10-04. They dispatch and collect work through Herdr/OAR.
+
+
 > **Status**: Approved
 > **Owner**: repo-harness maintainers
 
@@ -59,7 +62,7 @@ repos.
 ## Core Invariants
 
 - Durable truth lives in repo files: `plans/`, `tasks/contracts/`,
-  `tasks/reviews/`, `tasks/notes/`, `.ai/harness/checks/latest.json`,
+  `tasks/reviews/`, `tasks/notes/`, `.ai/harness/evidence/events/log.jsonl`,
   `.ai/harness/runs/*.json`, and `.ai/harness/handoff/`.
 - Helper implementation is package-owned for adopted downstream repositories;
   root `scripts/` in this repository are self-hosted source/runtime only.
@@ -90,60 +93,9 @@ repos.
   `effect_started` are durable; only the exact persisted Task or Module Inbox
   receipt proves delivery, and every ambiguous outcome requires reconciliation
   without an automatic retry.
-- An unattended automation run is bounded by one machine-enforced budget, never
-  by prompt text. Every claim, dispatch, retry, and provider invocation first
-  takes a reservation under the run's exclusive lock, and a reservation that
-  would pass any hard limit is refused before the operation happens.
-- The budget store's caller is untrusted for every decision input; the host
-  process is the only trusted source. The store reads its own clock, derives the
-  reserved vector from the operation kind, derives the charge from the outcome
-  the host observed, and reads and digests the task contract from the repository
-  itself. A caller names what it wants to do and what happened; it never states
-  what that costs or when it happened. The limits are the host-owned
-  `ProgramAuthorizationV1` / `ProgramBudgetLimitV1` grant composed with the task
-  contract's own runner budget, strictest value per metric, recomputed from both
-  authorities on every read rather than trusted from the record. A run with no
-  task contract requires an explicit `contract_less` grant. Wall clock is a
-  frozen absolute deadline measured on the store clock, which may not run
-  backwards over the run's own durable records. A token or cost limit is
-  refused at preflight until provider-attested usage is wired, because a
-  self-asserted usage number is worse than no limit. `ProgramAuthorizationV1`
-  grants are operator-minted into the account-level harness home and a budget is
-  accepted only when its embedded grant resolves to byte-identical stored bytes.
-- The automation budget defends against honest-but-buggy controllers and
-  transport retries, not against a caller that already has the store's own
-  privileges. Three boundaries are explicitly out of scope until their owning
-  authority exists: `operation` and `outcome` are caller-asserted until the
-  unattended controller binds them to real side effects; reconciliation
-  `evidence_refs` are shape-checked typed refs, presence-checked but not
-  content-verified, until a digest-addressed provider usage and attempt-receipt
-  authority can resolve them; and the store's clock seam is a test-only
-  convenience rather than a permission boundary, because a same-process caller
-  is already trusted at the process level. Replaying an idempotency key charges
-  once, an interrupted reservation blocks further spending until it is
-  reconciled from exact evidence rather than assumed free -- and once a
-  reconciliation decision is recorded, only that decision may charge the
-  reservation. A projection that counts durable records the disk does not have
-  is corruption, not a crash window: every verb and every read surface fails
-  closed without writing anything. Exhaustion
-  publishes an immutable `AutomationStopReceiptV1`. A budget never raises or
-  renews itself, never rewrites Task, Lease, Work Graph, or contract authority,
-  and never releases or steals a claim.
-
-- One unattended controller is bound to the exact automation budget run,
-  Engineer principal, Binding generation, authorization revision, and protected
-  path set. Each invocation has independent hard step and duration ceilings.
-  Acquisition is only through canonical `acquire-next`; execution consumes its
-  returned `WorkEnvelopeV1` and dispatches only an already-admitted run through
-  `dispatchDelegatedRun`. The controller never creates Task, Work Graph, Lease,
-  or delegated-run authority.
-- Controller events are append-only evidence under the Git common directory.
-  The event is durable before every acquisition or dispatch; a restart at an
-  unresolved side-effect boundary becomes `reconciliation_required` and cannot
-  repeat that side effect. Transient acquisition failures use recorded,
-  deterministic exponential backoff capped by the frozen policy; user/operator
-  blockers and budget exhaustion are terminal. Explicit stop prevents another
-  acquisition and leaves the current Claim and Lease to their normal owner.
+- repo-harness keeps no scheduler, budget ledger or unattended controller. The
+  Bot schedules long-running work through the repo-harness CLI and Herdr.
+  repo-harness supplies the tools and the evidence for that decision.
 
 ## Workflow Surfaces
 
@@ -155,12 +107,9 @@ repos.
 | `plans/prds/`, `plans/sprints/`, `plans/plan-*.md` | Planner | Decision-complete work packages |
 | `tasks/contracts/*.contract.md` | Implementer | Allowed paths, delegation, and exit criteria |
 | `tasks/reviews/*.review.md` | Evaluator | Human Review Card, evidence, risk, acceptance |
-| `.ai/harness/checks/latest.json` | Verifier | Current structured gate result |
+| `.ai/harness/evidence/events/log.jsonl` | Verification Plan executor | Accepted execution events bind immutable runs |
 | `.ai/harness/runs/*.json` | Verifier | Immutable run/trace snapshots |
 | `.ai/harness/handoff/` | Session owner | Resume packets and exact next step |
-| `repo-harness automation budget show --run <id>` | Package runtime | Read-only operator projection of one automation run's budget, consumption, and stop receipt |
-| `repo-harness automation budget repair --run <id>` | Package runtime | Operator re-run of the locked reconciliation so a stopped or expired run seals its exhaustion receipt; it reserves, charges and re-caps nothing |
-| `repo-harness automation controller start\|step\|status\|stop\|reconcile` | Package runtime | Bounded unattended Engineer orchestration over the existing budget, acquire-next, WorkEnvelope and delegated-run authorities |
 | `docs/reference-configs/ux-feature-guard.md`, `docs/reference-configs/design-options.md`, `.claude/templates/design-brief.template.md` | Conventions | Frontend behavior discipline: freeze rules and non-goals before implementation, product boundary before imagegen variants, taste-class refinement ceiling, role-aware visible-concept declaration; `frontend` task_profile contracts must cite a design brief, and the runtime `[UXFeatureGuard]` advisory fires only on frontend-scoped feature intent |
 
 ## Safety Boundaries
@@ -230,7 +179,7 @@ AcceptanceReceipt field.
 ## Acceptance Scenarios
 
 - An existing repo can adopt the harness, generate workflow files, and pass
-  `repo-harness run check-task-workflow --strict`.
+  `repo-harness run check-task-workflow`.
 - A standard downstream init or migration does not create repo-local
   repo-harness helper scripts under `scripts/` or `.ai/harness/scripts/`.
 - A sprint row can expand into a plan, contract, notes, review, latest trace,
@@ -258,9 +207,10 @@ AcceptanceReceipt field.
   `tasks/workstreams/<domain>/<capability>/` that carries status across
   sessions and plans instead of living only in chat memory.
 - **Capability**: A functional block registered in the capability authority
-  selected by `.ai/harness/policy.json#context.capability_source` and resolved
-  by longest-prefix path match, owning local agent context and ownership
-  boundaries for the files under it.
+  selected by `.ai/harness/policy.json#context.capability_source`. The
+  `registry` source resolves paths by longest-prefix match. The `archcontext`
+  source resolves them through `archctx resolve`. A capability owns local agent
+  context and ownership boundaries for the files under it.
 - **Module Engineer**: A stable logical engineering role that references one
   canonical capability and a reviewed SOP. It is not a Session, task owner,
   Lease, or acceptance identity.
@@ -338,49 +288,19 @@ AcceptanceReceipt field.
 - **Task profile**: The declared execution shape of a contract (for example
   `code-change`) that determines which verification and delegation rules
   apply to that task.
-- **Proactive refactor recommendations**: Global `refactor_recommendations.enabled`
-  defaults to true and is initialized once by install/update or successful
-  repository init, preserving an explicit disabled choice. Normal Stop reads
-  measured structural opportunities and asks the Agent to explain evidence,
-  expected benefit and risk, then request the user's decision. Observation is
-  separate from Refactor Mode activation: it never authors a proposal, accepts
-  a recommendation, creates an execution task or edits code. User approval
-  enters the existing approved-plan workflow. Incomplete facts are reported,
-  never synthesized. Delivery is bounded and deduplicated. The managed Stop host allows 150 seconds;
-  a shared timing policy caps Stop work at 140 seconds and projection at 110
-  seconds, reserving 30 seconds for the serial recommendation scan and lifecycle
-  readback. Journal and disabled-provider cascade work retain their 20-second
-  entry deadline. The provider may impose a shorter configured timeout; work
-  that exceeds the host slice remains pending for the existing explicit drain.
-  Observation uses positive remaining caller time and reports exhausted-budget
-  deferral without turning it into a recommendation.
-- **Refactor Mode**: The `off | shadow | active` operating mode under which
-  repo-harness consumes an external structural authority to author, assess and
-  execute refactors. It is a narrowed entry into the existing plan, contract,
-  worktree, and ship flow, never a second workflow engine.
-- **Proposal Author**: The repo-harness-side agent or human that writes a
-  refactor proposal for the external structural authority to assess. The
-  author supplies intent, scope, target outcomes, and kill list; it never
-  decides the structural scale, the workflow route, or a recommendation's
-  status.
-- **RefactorWorkflowRoute**: The repo-harness workflow routing decision
-  deterministically projected from the external authority's structural scale
-  and its evidence reason codes. It may stop more conservatively than the
-  upstream scale but may never route below it.
-- **Refactor Program**: One authorized Refactor Mode run, holding only the
-  bindings from external recommendations to local work packages. It carries no
-  recommendation status; every status is re-read from the external authority.
+- **Refactor recommendations**: Evidence on demand. No hook scans for them.
+  The Bot reads `repo-harness refactor recommendations --json` and decides
+  whether to schedule work or ask the user.
+  `repo-harness refactor recommendations` shows each suggestion with its
+  metrics and module statistics; `repo-harness refactor decide` records the
+  user's accept, defer or reject decision in ArchContext. repo-harness never
+  executes a refactor and keeps no local delivery state. An accepted suggestion
+  enters the normal plan and pull request workflow. Incomplete code facts are
+  reported, never synthesized.
 - **Cutover Closure**: The provider-independent gate asserting that every
   declared old implementation, caller, fallback, test, document, and
   compatibility window of a replaced surface has an explicit disposition, and
   that nothing declared removed still exists at the candidate head.
-- **Refactor Execution Binding**: The append-only, immutable set of references
-  tying one external recommendation to the plan, contract, closure,
-  acceptance, and merge evidence of one execution. It has no status field, so
-  a merged pull request can never by itself mean the refactor is resolved.
-- **Joined Refactor Board**: The read-only projection joining the external
-  semantic refactor ledger with local execution evidence. It owns no state and
-  is fully rebuildable from its authorities.
 
 ## Agent WorkDemand intake authority
 
@@ -390,10 +310,7 @@ Only Human authority may accept or reject a submitted demand. Acceptance freezes
 
 ## Execution boundary invariants
 
-- Controller dispatch must match the acquired Task/revision, Claim/generation, WorkEnvelope, and Engineer Binding/generation before budget reservation or attempt start.
-- Refactor materialization binds every accepted Recommendation payload's baseline, assessment, proposal/author, scale, nodes and major-change reasons to the Program. Later stages consume the immutable materialized Program digest. Full scan provenance (provider stage and scale-reason codes absent from recommendation readback) remains an audit gap, not execution authority.
-- Execution bindings consume verifier-persisted receipts and the exact verified PR head. Post-merge evidence measures one exact final-main head; each recorded merge must be its ancestor. Board identity includes that measured head.
-- Campaign journal inspection and stop/reconciliation/expiry recording remain available after target movement or grant expiry; they grant no fresh execution authority. Post-merge continuation remains disabled until a typed Campaign-to-owned-publication proof is available. Omitted CLI start timestamps replay the first immutable start definition.
+- repo-harness dispatches no controller work and executes no refactor. The Bot schedules through the repo-harness CLI and Herdr; an accepted refactor suggestion enters the normal plan and pull request flow.
 - Live canonical Sprint carriers share one Task ID namespace, including completed rows in a live Sprint. Archived carriers are excluded. Canonical readers and proposed materialization validate the same invariant before shared Lease/message use or publication.
 
 ## Persistent generic acceptance review
@@ -404,7 +321,7 @@ The existing acceptance context owns contract/goal identity, Git subject, target
 
 Three changed-subject repair rounds share one task-agent binding; every prior finding stays open or becomes resolved. Durable request intent prevents unknown delivery from consuming a new round. Initial creation uses the existing semantic-review admission. Fleet model/effort and the exact result-write communication exception are passed through OAR SessionOptions; the fleet RECOMMENDATION-first message remains unchanged. No vendor argv, native-log or TUI parser belongs to this application. The trusted Node host retains owner write authority and starts with --disable-sigusr1. An immutable owner-held executable launcher is probed through OAR's installation API; it forwards OAR's arguments unchanged through /usr/bin/sandbox-exec to the native reviewer. The reviewer and descendants cannot write outside the canonical output tree except /dev/null, send signals to the host or connect to Unix control sockets. TMPDIR stays output-local. The host deletes inherited OAR_CODEX_SANDBOX before Session creation: stock OAR selects danger-full-access, with cwd=output and the admitted child OS policy as the write authority. A missing/changed profile, launcher or unproven child denial prevents Session creation. Zero-model native-protocol fixtures prove this transport and control boundary without asserting a real model opinion. Optional narrow pure-state grants cannot overlap protected authorities; settings/hooks/trust/instructions/definitions/credentials remain denied. Stock OAR Claude bypass is allowed only under that proved OS boundary. Claude's system/init-only model projection cannot certify its actual gateway backend and therefore cannot mint a Receipt. Unsupported platforms fail closed. Native behavior, hooks, complete payload ingestion and forced host-loss cleanup remain unverified.
 
-`close` re-verifies the current passing Receipt and exact final accepted round before requesting OAR Session.dispose, proving its acknowledgement and execution-owner exit, then task-agent owned cleanup. `cancel` permits cleanup without acceptance. All identity/ownership cleanup remains task-agent's responsibility; attached user objects are never closed. Before upgrading, drain old sessions with the previous version and archive old evidence read-only. The retired command returns upgrade-required; old source labels have no current Receipt reader or alias. Cross-review CLI/core/runner remain an independent advisory path and their retirement is a separate scope after E2 merges. Campaign remains out of scope.
+`close` re-verifies the current passing Receipt and exact final accepted round before requesting OAR Session.dispose, proving its acknowledgement and execution-owner exit, then task-agent owned cleanup. `cancel` permits cleanup without acceptance. All identity/ownership cleanup remains task-agent's responsibility; attached user objects are never closed. Before upgrading, drain old sessions with the previous version and archive old evidence read-only. The retired command returns upgrade-required; old source labels have no current Receipt reader or alias. Cross-review CLI/core/runner remain an independent advisory path and their retirement is a separate scope after E2 merges.
 
 
 The zero-prompt native startup probe used real HOME and SDK launch/dispose:

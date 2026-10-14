@@ -1,4 +1,4 @@
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { spawn, spawnSync } from 'child_process';
 
 import {
@@ -12,9 +12,10 @@ import {
 import {
   decodePublicationMarker,
   publicationReceiptDigest,
-  type PublicationReceiptV1,
+  type PublicationReceiptV3,
 } from '../../core/publication/publication-receipt';
 import { readActiveSprintPath, readCanonicalTargetRef } from '../state/collect-board-inputs';
+import { readLease } from '../state/coordination-lease-store';
 import { resolveBoard } from '../state/resolve-board';
 import { PublicationReceiptError, readPublicationReceiptCache } from './publication-receipt';
 
@@ -38,12 +39,10 @@ export interface PublicationReadinessInput {
   readonly pr_number?: number;
   readonly gh_bin?: string;
   readonly git_bin?: string;
-  readonly checks_path?: string;
-  readonly merge_seal_path?: string;
   /** Internal effect/test seam; HTTP callers never choose an authority store. */
   readonly authority_home?: string;
   readonly now_ms?: number;
-  /** Test/effect seam; production leaves this unset and invokes the configured gh binary. */
+  /** Internal effect/test seam for caller-owned provider execution, such as a protected helper environment. */
   readonly gh_runner?: (args: readonly string[]) => { readonly status: number; readonly stdout: string; readonly stderr?: string };
 }
 
@@ -115,10 +114,10 @@ export interface MergeReadinessRound {
 }
 
 export interface MergeReadinessCollector {
-  readonly resolve_receipt: (input: PublicationReadinessInput) => PublicationReceiptV1;
-  readonly observe_identity: (receipt: PublicationReceiptV1, input: PublicationReadinessInput) => ProviderIdentity;
-  readonly observe_facts: (identity: ProviderIdentity, receipt: PublicationReceiptV1, input: PublicationReadinessInput) => ProviderMergeReadinessFactsV1;
-  readonly classify_integration: (identity: ProviderIdentity, receipt: PublicationReceiptV1, input: PublicationReadinessInput) => MergeReadinessIntegrationMode;
+  readonly resolve_receipt: (input: PublicationReadinessInput) => PublicationReceiptV3;
+  readonly observe_identity: (receipt: PublicationReceiptV3, input: PublicationReadinessInput) => ProviderIdentity;
+  readonly observe_facts: (identity: ProviderIdentity, receipt: PublicationReceiptV3, input: PublicationReadinessInput) => ProviderMergeReadinessFactsV1;
+  readonly classify_integration: (identity: ProviderIdentity, receipt: PublicationReceiptV3, input: PublicationReadinessInput) => MergeReadinessIntegrationMode;
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -152,8 +151,18 @@ function gh(input: PublicationReadinessInput, args: readonly string[], accepted 
     );
   }
   try {
-    return JSON.parse(result.stdout);
+    const value = JSON.parse(result.stdout);
+    if (args[0] === 'api' && accepted.includes(1)) {
+      if (result.status !== 0 && value?.status !== '404') {
+        throw new MergeReadinessError('provider_unavailable', 'rollback reporter activation unavailable');
+      }
+      if (result.status === 0 && value?.status === '404') {
+        throw new MergeReadinessError('provider_data_incomplete', 'rollback reporter activation HTTP status is inconsistent');
+      }
+    }
+    return value;
   } catch (error) {
+    if (error instanceof MergeReadinessError) throw error;
     throw new MergeReadinessError('provider_data_incomplete', `provider returned invalid JSON: gh ${args.join(' ')}`, error);
   }
 }
@@ -228,14 +237,24 @@ async function ghAbortable(
     throw new MergeReadinessError('provider_unavailable', `provider observation failed: gh ${args.join(' ')}: ${detail}`, result.error);
   }
   try {
-    return JSON.parse(result.stdout);
+    const value = JSON.parse(result.stdout);
+    if (args[0] === 'api' && accepted.includes(1)) {
+      if (result.status !== 0 && value?.status !== '404') {
+        throw new MergeReadinessError('provider_unavailable', 'rollback reporter activation unavailable');
+      }
+      if (result.status === 0 && value?.status === '404') {
+        throw new MergeReadinessError('provider_data_incomplete', 'rollback reporter activation HTTP status is inconsistent');
+      }
+    }
+    return value;
   } catch (error) {
+    if (error instanceof MergeReadinessError) throw error;
     throw new MergeReadinessError('provider_data_incomplete', `provider returned invalid JSON: gh ${args.join(' ')}`, error);
   }
 }
 
 function identityBytes(identity: ProviderIdentity): string {
-  const { body: _body, review_decision: _reviewDecision, ...fences } = identity;
+  const { body: _body, ...fences } = identity;
   return JSON.stringify(fences);
 }
 
@@ -250,7 +269,10 @@ function parseProviderPullRequestIdentity(prNumber: number, repoValue: unknown, 
   if (!['OPEN', 'CLOSED', 'MERGED'].includes(String(pr.state))) {
     throw new MergeReadinessError('provider_data_incomplete', 'provider PR state is unknown');
   }
-  if (pr.reviewDecision !== null && !['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED'].includes(String(pr.reviewDecision))) {
+  // gh pr view serializes an absent GraphQL review decision as an empty string.
+  const reviewDecision = pr.reviewDecision === '' ? null : pr.reviewDecision;
+  if (reviewDecision !== null && (typeof reviewDecision !== 'string'
+    || !['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED'].includes(reviewDecision))) {
     throw new MergeReadinessError('provider_data_incomplete', 'provider PR reviewDecision is unknown');
   }
   if (pr.mergeable !== 'MERGEABLE' && pr.mergeable !== 'CONFLICTING') {
@@ -268,13 +290,13 @@ function parseProviderPullRequestIdentity(prNumber: number, repoValue: unknown, 
     base_sha: string(pr.baseRefOid, 'provider PR base OID'),
     base_ref: string(pr.baseRefName, 'provider PR base ref'),
     body: typeof pr.body === 'string' ? pr.body : '',
-    review_decision: pr.reviewDecision as string | null,
+    review_decision: reviewDecision,
     mergeable: pr.mergeable,
   });
   return identity;
 }
 
-function parseProviderReadinessIdentity(receipt: PublicationReceiptV1, repoValue: unknown, prValue: unknown): ProviderIdentity {
+function parseProviderReadinessIdentity(receipt: PublicationReceiptV3, repoValue: unknown, prValue: unknown): ProviderIdentity {
   const identity = parseProviderPullRequestIdentity(receipt.pr_number, repoValue, prValue);
   if (identity.provider_repo_id !== receipt.provider_repo_id
     || identity.pr_url !== receipt.pr_url
@@ -282,7 +304,7 @@ function parseProviderReadinessIdentity(receipt: PublicationReceiptV1, repoValue
     || identity.base_ref !== receipt.target_ref) {
     throw new MergeReadinessError('publication_claim_mismatch', 'provider identity does not match the publication receipt');
   }
-  let marker: PublicationReceiptV1 | null;
+  let marker: PublicationReceiptV3 | null;
   try { marker = decodePublicationMarker(identity.body); } catch (error) {
     throw new MergeReadinessError('publication_claim_mismatch', 'provider publication marker is invalid', error);
   }
@@ -292,7 +314,7 @@ function parseProviderReadinessIdentity(receipt: PublicationReceiptV1, repoValue
   return identity;
 }
 
-export function observeProviderReadinessIdentity(receipt: PublicationReceiptV1, input: PublicationReadinessInput): ProviderIdentity {
+export function observeProviderReadinessIdentity(receipt: PublicationReceiptV3, input: PublicationReadinessInput): ProviderIdentity {
   return parseProviderReadinessIdentity(
     receipt,
     gh(input, ['repo', 'view', '--json', 'id,nameWithOwner']),
@@ -304,7 +326,7 @@ export function observeProviderReadinessIdentity(receipt: PublicationReceiptV1, 
 }
 
 export async function observeProviderReadinessIdentityAbortable(
-  receipt: PublicationReceiptV1,
+  receipt: PublicationReceiptV3,
   input: AbortablePublicationReadinessInput,
 ): Promise<ProviderIdentity> {
   const repo = await ghAbortable(input, ['repo', 'view', '--json', 'id,nameWithOwner']);
@@ -318,7 +340,8 @@ export async function observeProviderReadinessIdentityAbortable(
 function parseProviderReadinessFacts(
   identity: ProviderIdentity,
   checksValue: unknown,
-  rollbackTags: ProviderMergeReadinessFactsV1['rollback_tags'],
+  rollbackBoundary: ProviderMergeReadinessFactsV1['rollback_boundary'],
+  graphValue: unknown,
 ): ProviderMergeReadinessFactsV1 {
   if (!Array.isArray(checksValue)) throw new MergeReadinessError('provider_data_incomplete', 'provider required checks must be an array');
   const checks = checksValue.map((entry) => {
@@ -328,17 +351,57 @@ function parseProviderReadinessFacts(
     }
     return Object.freeze({ name: string(check.name, 'provider required check name'), bucket: check.bucket as 'pass' | 'fail' | 'pending' | 'skipping' | 'cancel' });
   });
+  const graph = object(graphValue, 'provider GraphQL result');
+  if (graph.errors !== undefined && (!Array.isArray(graph.errors) || graph.errors.length > 0)) {
+    throw new MergeReadinessError('provider_data_incomplete', 'provider review query has errors');
+  }
+  const node = object(object(graph.data, 'provider GraphQL data').node, 'provider repository node');
+  const pr = object(node.pullRequest, 'provider review PR');
+  if (node.id !== identity.provider_repo_id || pr.number !== identity.pr_number
+    || pr.headRefOid !== identity.head_sha || pr.baseRefOid !== identity.base_sha) {
+    throw new MergeReadinessError('provider_data_incomplete', 'provider reviews do not bind this PR/head/base');
+  }
+  if (pr.reviewDecision !== identity.review_decision) {
+    throw new MergeReadinessError('provider_data_incomplete', 'provider review decision changed during read');
+  }
+  const threads = object(pr.reviewThreads, 'provider review threads');
+  const reviews = object(pr.latestOpinionatedReviews, 'provider latest opinionated reviews');
+  for (const connection of [threads, reviews]) {
+    if (object(connection.pageInfo, 'provider review pageInfo').hasNextPage !== false || !Array.isArray(connection.nodes)) {
+      throw new MergeReadinessError('provider_data_incomplete', 'provider reviews and threads were not exhaustively observed');
+    }
+  }
+  let unresolved = 0;
+  for (const entry of threads.nodes as unknown[]) {
+    const thread = object(entry, 'provider review thread');
+    if (typeof thread.isResolved !== 'boolean') throw new MergeReadinessError('provider_data_incomplete', 'provider review thread isResolved is invalid');
+    if (!thread.isResolved) unresolved++;
+  }
+  let changesRequested = pr.reviewDecision === 'CHANGES_REQUESTED';
+  for (const entry of reviews.nodes as unknown[]) {
+    const review = object(entry, 'provider review');
+    if (!['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'PENDING'].includes(String(review.state))) {
+      throw new MergeReadinessError('provider_data_incomplete', 'provider review state is unknown');
+    }
+    if (review.state === 'CHANGES_REQUESTED') changesRequested = true;
+  }
   return Object.freeze({
     state: identity.state,
     is_draft: identity.is_draft,
     head_sha: identity.head_sha,
     base_sha: identity.base_sha,
-    review_decision: identity.review_decision,
-    unresolved_thread_count: null,
-    rollback_tags: rollbackTags,
+    review_decision: changesRequested ? 'CHANGES_REQUESTED' : identity.review_decision,
+    unresolved_thread_count: unresolved,
+    rollback_boundary: rollbackBoundary,
     checks: Object.freeze(checks),
     mergeable: identity.mergeable,
   });
+}
+
+function providerReviewArgs(identity: ProviderIdentity): string[] {
+  // Latest opinionated reviews preserve a change request across later comment-only reviews.
+  const query = 'query($repoId:ID!,$number:Int!){node(id:$repoId){id ... on Repository{pullRequest(number:$number){number headRefOid baseRefOid reviewDecision latestOpinionatedReviews(first:100){pageInfo{hasNextPage}nodes{state}} reviewThreads(first:100){pageInfo{hasNextPage}nodes{isResolved}}}}}}';
+  return ['api', 'graphql', '-f', `query=${query}`, '-F', `repoId=${identity.provider_repo_id}`, '-F', `number=${identity.pr_number}`];
 }
 
 function requiredCIRunPath(identity: ProviderIdentity, checksValue: unknown): string {
@@ -369,66 +432,82 @@ function validateRequiredCIRun(identity: ProviderIdentity, value: unknown, check
   }
 }
 
-/** One read protocol for synchronous and abortable consumers; no history scan or tag write. */
-function* rollbackTagBoundary(identity: ProviderIdentity): Generator<string, ProviderMergeReadinessFactsV1['rollback_tags'], unknown> {
+/** One read protocol for synchronous and abortable consumers; reads only the current commit boundary. */
+function* rollbackBoundary(identity: ProviderIdentity): Generator<string, ProviderMergeReadinessFactsV1['rollback_boundary'], unknown> {
+  const validSha = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) && value !== '0'.repeat(40);
+  if (!validSha(identity.base_sha)) throw new MergeReadinessError('provider_data_incomplete', 'rollback base SHA is invalid');
   const root = `repos/${identity.repo_name_with_owner}`;
   const activation = object(yield `${root}/contents/.github/workflows/ci-report.yml?ref=${identity.base_sha}`, 'rollback reporter activation');
-  if (activation.status === '404') return 'not_active';
-  if (activation.type !== 'file' || activation.path !== '.github/workflows/ci-report.yml' || !/^[0-9a-f]{40}$/.test(String(activation.sha))) {
+  if (activation.status === '404') return Object.freeze({ status: 'not_active' });
+  if (activation.status || activation.type !== 'file' || activation.path !== '.github/workflows/ci-report.yml' || !validSha(activation.sha)) {
     throw new MergeReadinessError('provider_data_incomplete', 'rollback reporter activation unavailable');
   }
   const associations = yield `${root}/commits/${identity.base_sha}/pulls?per_page=100`;
   if (!Array.isArray(associations) || associations.length >= 100) throw new MergeReadinessError('provider_data_incomplete', 'parent PR associations incomplete');
-  const merged = associations.filter(pr => pr?.merged_at && pr.base?.ref === 'main' && pr.merge_commit_sha === identity.base_sha);
-  if (merged.length !== 1 || !Number.isInteger(merged[0].number) || merged[0].number < 1) {
+  const merged = associations.map(entry => {
+    const pr = object(entry, 'parent PR association');
+    const base = object(pr.base, 'parent PR base');
+    if (typeof base.ref !== 'string' || (pr.merged_at !== null && (typeof pr.merged_at !== 'string' || pr.merged_at.trim() === ''))
+      || (pr.merge_commit_sha !== null && !validSha(pr.merge_commit_sha))) {
+      throw new MergeReadinessError('provider_data_incomplete', 'parent PR association is incomplete');
+    }
+    return pr;
+  }).filter(pr => pr.merged_at !== null && (pr.base as Record<string, unknown>).ref === 'main' && pr.merge_commit_sha === identity.base_sha);
+  const prNumber = merged[0]?.number;
+  if (merged.length !== 1 || typeof prNumber !== 'number' || !Number.isSafeInteger(prNumber) || prNumber < 1) {
     throw new MergeReadinessError('provider_data_incomplete', 'activated reporter parent is not an exact single merged PR');
   }
   const commit = object(yield `${root}/git/commits/${identity.base_sha}`, 'main parent commit');
-  if (commit.sha !== identity.base_sha || !Array.isArray(commit.parents) || commit.parents.length !== 1 || !/^[0-9a-f]{40}$/.test(String(commit.parents[0]?.sha))) {
-    throw new MergeReadinessError('provider_data_incomplete', 'rollback parent is not a single squash boundary');
+  if (commit.sha !== identity.base_sha || !Array.isArray(commit.parents) || commit.parents.length !== 1
+    || !validSha(commit.parents[0]?.sha) || commit.parents[0].sha === identity.base_sha) {
+    throw new MergeReadinessError('provider_data_incomplete', 'rollback parent is not a single commit boundary');
   }
-  for (const [phase, sha] of [['before', commit.parents[0].sha], ['after', identity.base_sha]]) {
-    const name = `gate-cutover-pr-${merged[0].number}-${phase}`;
-    const ref = object(yield `${root}/git/ref/tags/${name}`, 'rollback tag ref');
-    if (ref.status === '404') return 'pending';
-    if (ref.status) throw new MergeReadinessError('provider_unavailable', `rollback tag ref HTTP ${ref.status}`);
-    const tagObject = object(ref.object, 'rollback tag object');
-    if (typeof tagObject.type !== 'string' || typeof tagObject.sha !== 'string' || !/^[0-9a-f]{40}$/.test(tagObject.sha)) throw new MergeReadinessError('provider_data_incomplete', 'rollback tag ref incomplete');
-    if (tagObject.type !== 'tag') return 'pending';
-    const annotation = object(yield `${root}/git/tags/${tagObject.sha}`, 'rollback tag annotation');
-    if (annotation.status === '404') return 'pending';
-    if (annotation.status) throw new MergeReadinessError('provider_unavailable', `rollback tag annotation HTTP ${annotation.status}`);
-    const target = object(annotation.object, 'rollback tag target');
-    if (typeof annotation.tag !== 'string' || typeof target.type !== 'string' || typeof target.sha !== 'string' || !/^[0-9a-f]{40}$/.test(target.sha)) throw new MergeReadinessError('provider_data_incomplete', 'rollback tag annotation incomplete');
-    if (annotation.tag !== name || target.type !== 'commit' || target.sha !== sha) return 'pending';
+  const detail = object(yield `${root}/pulls/${prNumber}`, 'merged parent PR detail');
+  if (detail.number !== prNumber || detail.merged !== true || detail.merge_commit_sha !== identity.base_sha
+    || object(detail.base, 'merged parent PR detail base').ref !== 'main') {
+    throw new MergeReadinessError('provider_data_incomplete', 'merged parent PR detail does not match the rollback boundary');
   }
-  return 'ready';
+  const parentAssociations = yield `${root}/commits/${commit.parents[0].sha}/pulls?per_page=100`;
+  if (!Array.isArray(parentAssociations) || parentAssociations.length >= 100) {
+    throw new MergeReadinessError('provider_data_incomplete', 'rollback parent PR associations incomplete');
+  }
+  const parentPRs = parentAssociations.map(entry => {
+    const pr = object(entry, 'rollback parent PR association');
+    if (typeof pr.number !== 'number' || !Number.isSafeInteger(pr.number) || pr.number < 1) {
+      throw new MergeReadinessError('provider_data_incomplete', 'rollback parent PR number unavailable');
+    }
+    return pr.number;
+  });
+  if (parentPRs.includes(prNumber)) {
+    throw new MergeReadinessError('provider_data_incomplete', `Automatic rollback cannot revert only the last commit of multi-commit rebase PR #${prNumber}`);
+  }
+  return Object.freeze({ status: 'ready', pr_number: prNumber, before_sha: commit.parents[0].sha, after_sha: identity.base_sha });
 }
 
-export function observeProviderReadinessFacts(identity: ProviderIdentity, receipt: Pick<PublicationReceiptV1, 'pr_number'>, input: PublicationReadinessInput): ProviderMergeReadinessFactsV1 {
+export function observeProviderReadinessFacts(identity: ProviderIdentity, receipt: Pick<PublicationReceiptV3, 'pr_number'>, input: PublicationReadinessInput): ProviderMergeReadinessFactsV1 {
   const checks = gh(input, [
     'pr', 'checks', String(receipt.pr_number), '--required', '--json', 'name,bucket,link',
   ], [0, 1, 8]);
   validateRequiredCIRun(identity, gh(input, ['api', requiredCIRunPath(identity, checks)]), checks);
-  const boundary = rollbackTagBoundary(identity);
+  const boundary = rollbackBoundary(identity);
   let request = boundary.next();
-  while (!request.done) request = boundary.next(gh(input, ['api', request.value], [0, 1]));
-  return parseProviderReadinessFacts(identity, checks, request.value);
+  while (!request.done) request = boundary.next(gh(input, ['api', request.value], request.value.includes('/contents/') ? [0, 1] : [0]));
+  return parseProviderReadinessFacts(identity, checks, request.value, gh(input, providerReviewArgs(identity)));
 }
 
 export async function observeProviderReadinessFactsAbortable(
   identity: ProviderIdentity,
-  receipt: Pick<PublicationReceiptV1, 'pr_number'>,
+  receipt: Pick<PublicationReceiptV3, 'pr_number'>,
   input: AbortablePublicationReadinessInput,
 ): Promise<ProviderMergeReadinessFactsV1> {
   const checks = await ghAbortable(input, [
     'pr', 'checks', String(receipt.pr_number), '--required', '--json', 'name,bucket,link',
   ], [0, 1, 8]);
   validateRequiredCIRun(identity, await ghAbortable(input, ['api', requiredCIRunPath(identity, checks)]), checks);
-  const boundary = rollbackTagBoundary(identity);
+  const boundary = rollbackBoundary(identity);
   let request = boundary.next();
-  while (!request.done) request = boundary.next(await ghAbortable(input, ['api', request.value], [0, 1]));
-  return parseProviderReadinessFacts(identity, checks, request.value);
+  while (!request.done) request = boundary.next(await ghAbortable(input, ['api', request.value], request.value.includes('/contents/') ? [0, 1] : [0]));
+  return parseProviderReadinessFacts(identity, checks, request.value, await ghAbortable(input, providerReviewArgs(identity)));
 }
 
 /** Ordinary main PRs consume the same provider/check decoder as fleet publications, without a receipt or Lease. */
@@ -458,14 +537,18 @@ export function collectPullRequestMergeReadiness(
   }
 }
 
-function classifyIntegration(identity: ProviderIdentity, receipt: PublicationReceiptV1, input: PublicationReadinessInput): MergeReadinessIntegrationMode {
+// Same authority rule as publication reconcile: the candidate repository is
+// untrusted content, so the executable merge predicate is always the packaged
+// script and the candidate repository is only its working directory.
+const WORKTREE_MERGE_LIB = resolve(import.meta.dir, '../../../scripts/worktree-merge-lib.sh');
+
+function classifyIntegration(identity: ProviderIdentity, receipt: PublicationReceiptV3, input: PublicationReadinessInput): MergeReadinessIntegrationMode {
   const gitBin = input.git_bin ?? process.env.REPO_HARNESS_GIT_BIN ?? 'git';
   for (const oid of [identity.base_sha, receipt.head_sha]) {
     const objectCheck = spawnSync(gitBin, ['cat-file', '-e', `${oid}^{commit}`], { cwd: input.repo_root, encoding: 'utf-8' });
     if (objectCheck.error || objectCheck.status !== 0) return 'unavailable';
   }
-  const script = join(input.repo_root, 'scripts/worktree-merge-lib.sh');
-  const result = spawnSync('/bin/bash', [script, '--target', identity.base_sha, '--', receipt.head_sha], {
+  const result = spawnSync('/bin/bash', [WORKTREE_MERGE_LIB, '--target', identity.base_sha, '--', receipt.head_sha], {
     cwd: input.repo_root,
     encoding: 'utf-8',
   });
@@ -477,12 +560,31 @@ function classifyIntegration(identity: ProviderIdentity, receipt: PublicationRec
   return mode === 'ancestor' || mode === 'absorbed' || mode === 'unmerged' ? mode : 'unavailable';
 }
 
-function resolveReceipt(input: PublicationReadinessInput): PublicationReceiptV1 {
+function assertCurrentPublicationPointer(receipt: PublicationReceiptV3, input: PublicationReadinessInput): PublicationReceiptV3 {
+  const lease = readLease(input.repo_root, receipt.task_id);
+  const record = lease.record;
+  if (record === null) {
+    if (lease.classification !== 'available') throw new MergeReadinessError('receipt_unavailable', 'publication lease is unreadable');
+    return receipt;
+  }
+  if (!('current_publication' in record) || record.current_publication === null
+    || record.current_publication.publication_id !== receipt.publication_id) return receipt;
+  if (record.current_publication.receipt_sha256 !== publicationReceiptDigest(receipt)
+    || record.current_publication.head_sha !== receipt.head_sha
+    || record.claim_id !== receipt.claim_id || record.generation !== receipt.generation
+    || record.task_revision !== receipt.task_revision || record.target_ref !== receipt.target_ref
+    || record.branch !== receipt.branch) {
+    throw new MergeReadinessError('publication_pointer_mismatch', 'lease current_publication does not match the publication receipt');
+  }
+  return receipt;
+}
+
+function resolveReceipt(input: PublicationReadinessInput): PublicationReceiptV3 {
   if ((input.publication_id === undefined) === (input.pr_number === undefined)) {
     throw new MergeReadinessError('receipt_unavailable', 'exactly one of publication_id or pr_number is required');
   }
   if (input.publication_id) {
-    let receipt: PublicationReceiptV1 | null;
+    let receipt: PublicationReceiptV3 | null;
     try {
       receipt = readPublicationReceiptCache(input.repo_root, input.publication_id, input.git_bin ?? 'git');
     } catch (error) {
@@ -492,13 +594,13 @@ function resolveReceipt(input: PublicationReadinessInput): PublicationReceiptV1 
       throw new MergeReadinessError('receipt_unavailable', `publication receipt is unreadable: ${input.publication_id}`, error);
     }
     if (!receipt) throw new MergeReadinessError('receipt_unavailable', `publication receipt is unavailable: ${input.publication_id}`);
-    return receipt;
+    return assertCurrentPublicationPointer(receipt, input);
   }
   if (!Number.isInteger(input.pr_number) || input.pr_number! < 1) throw new MergeReadinessError('receipt_unavailable', 'pr_number must be positive');
   const repo = object(gh(input, ['repo', 'view', '--json', 'id']), 'provider repository');
   const pr = object(gh(input, ['pr', 'view', String(input.pr_number), '--json', 'number,body']), 'provider PR');
   if (pr.number !== input.pr_number) throw new MergeReadinessError('publication_claim_mismatch', 'provider PR number changed');
-  let receipt: PublicationReceiptV1 | null;
+  let receipt: PublicationReceiptV3 | null;
   try { receipt = decodePublicationMarker(typeof pr.body === 'string' ? pr.body : ''); } catch (error) {
     throw new MergeReadinessError('receipt_unavailable', 'provider publication marker is invalid', error);
   }
@@ -506,7 +608,7 @@ function resolveReceipt(input: PublicationReadinessInput): PublicationReceiptV1 
   if (receipt.provider_repo_id !== string(repo.id, 'provider repository id') || receipt.pr_number !== input.pr_number) {
     throw new MergeReadinessError('publication_claim_mismatch', 'provider marker identity does not match the selected PR');
   }
-  return receipt;
+  return assertCurrentPublicationPointer(receipt, input);
 }
 
 export const productionMergeReadinessCollector: MergeReadinessCollector = Object.freeze({
@@ -516,7 +618,7 @@ export const productionMergeReadinessCollector: MergeReadinessCollector = Object
   classify_integration: classifyIntegration,
 });
 
-function projectRound(receipt: PublicationReceiptV1, round: MergeReadinessRound, observation: MergeReadinessObservation): MergeReadinessV1 {
+function projectRound(receipt: PublicationReceiptV3, round: MergeReadinessRound, observation: MergeReadinessObservation): MergeReadinessV1 {
   return projectMergeReadiness({
     receipt,
     integration_mode: round.integration_mode,
@@ -525,7 +627,7 @@ function projectRound(receipt: PublicationReceiptV1, round: MergeReadinessRound,
   });
 }
 
-function collectRound(receipt: PublicationReceiptV1, input: PublicationReadinessInput, collector: MergeReadinessCollector): MergeReadinessRound {
+function collectRound(receipt: PublicationReceiptV3, input: PublicationReadinessInput, collector: MergeReadinessCollector): MergeReadinessRound {
   let identityBefore: ProviderIdentity;
   let facts: ProviderMergeReadinessFactsV1;
   let identityAfter: ProviderIdentity;
@@ -556,7 +658,7 @@ function roundStable(round: MergeReadinessRound): boolean {
 }
 
 function unavailableReadiness(
-  receipt: PublicationReceiptV1,
+  receipt: PublicationReceiptV3,
   observation: Extract<MergeReadinessObservation, 'provider_unavailable' | 'provider_data_incomplete'>,
 ): MergeReadinessV1 {
   const identity: ProviderIdentity = {
@@ -569,7 +671,7 @@ function unavailableReadiness(
     identity_before: identity,
     identity_after: identity,
     facts: { state: 'UNKNOWN', is_draft: false, head_sha: receipt.head_sha, base_sha: receipt.base_sha,
-      review_decision: null, unresolved_thread_count: null, rollback_tags: 'pending', checks: [], mergeable: 'CONFLICTING' },
+      review_decision: null, unresolved_thread_count: null, rollback_boundary: null, checks: [], mergeable: 'CONFLICTING' },
     integration_mode: 'unavailable',
   }, observation);
 }
@@ -594,7 +696,7 @@ export function resolvePublicationReadiness(
 }
 
 async function collectAbortableRound(
-  receipt: PublicationReceiptV1,
+  receipt: PublicationReceiptV3,
   input: AbortablePublicationReadinessInput,
 ): Promise<MergeReadinessRound> {
   const identityBefore = await observeProviderReadinessIdentityAbortable(receipt, input);

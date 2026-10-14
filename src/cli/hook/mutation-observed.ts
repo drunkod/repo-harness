@@ -1,15 +1,8 @@
 /**
  * Mutation observed — HRD-05 in-process journal handler for `PostToolUse.edit`.
  *
- * Replaces the retired `assets/hooks/post-edit-guard.sh` (253 lines) and
- * `assets/hooks/minimal-change-observer.sh` (18 lines): instead of multiple
- * durable projections per edit (a `.claude/.task-handoff.md` rewrite, a
- * `workflow_write_handoff` regeneration, a synchronous architecture-queue
- * record + context-contract-sync + capability-context cascade, a synchronous
- * contract-verification run, and a synchronous minimal-change signals
- * report), a qualifying edit now writes AT MOST ONE small journal event
- * (append-only, one file per event) carrying dirty bits. The deferred
- * consumers (`consumePendingPostEditEvents`, invoked at Stop by
+ * A qualifying edit writes at most one durable journal event carrying dirty
+ * bits. The deferred consumers (`consumePendingPostEditEvents`, invoked at Stop by
  * `runtime.ts`, and `pendingPostEditJournalSection`, surfaced at
  * SessionStart) consume deferred changes; contract verification reads execution
  * evidence without starting contract commands. See
@@ -17,21 +10,15 @@
  * the condition-by-condition dirty-bit derivation table and the falsifier
  * record.
  *
- * The architecture cascade is no longer one of those dirty bits: a journal
- * event only exists for a Claude Edit/Write tool call, which made the cascade
- * blind to shell and apply_patch writes. `architecture-drift.ts` owns that
- * changed set now; this journal owns edit-time trigger payloads only.
- *
  * Host-visible advisory stdout (DocDrift/DeployAsset echoes, and the
  * former first-principles advisory) is ported in-process — those never wrote
  * anything durable, so they stay on the hot path without a second route
  * runtime.
  */
 
-import { execFileSync, spawnSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { parseVerificationPlanFromContractText } from '../../core/evidence/verification-plan';
 import {
-  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -47,7 +34,6 @@ import { loadMinimalChangePolicy } from './minimal-change-policy';
 import { collectMinimalChangeSignals } from './minimal-change-signals';
 import { canonicalRepoRelativePath, fileExists, readText } from '../../effects/state/collect-state-inputs';
 import { withExclusiveDirectoryLock } from '../../effects/locking/exclusive-directory-lock';
-import { runProcess } from '../../effects/process-runner';
 import type { WorktreeOwnership } from '../../effects/loop/state-input-collector';
 import {
   artifactStemFromPlan,
@@ -314,58 +300,12 @@ function renderFirstPrinciplesAdvisory(repoRoot: string, filePath: string): stri
 // gate for the (retired) task-handoff regeneration.
 // ---------------------------------------------------------------------------
 
-/**
- * EPC-05 note: deliberately NOT extended to
- * `CONTRACT_VERIFICATION_REPORT_RELATIVE` (`.ai/harness/checks/contract-verify.latest.json`).
- * This guard flags a hand-EDIT of a checkpoint-relevant file (the file was
- * the subject of a tracked Write/Edit tool call); the continuous-verification
- * report is machine-written telemetry from a Stop-time subprocess spawn, never
- * itself the target of an edit tool call in normal operation, so adding it
- * here would be unreachable. The existing `.ai/harness/checks/latest.json`
- * check is unchanged: hand-editing the acceptance-evidence file is still
- * checkpoint-worthy.
- */
+/** Only task and review edits request checkpoint work. */
 function isCheckpointPath(filePath: string): boolean {
   if (filePath === 'tasks/todos.md') return true;
   if (/^plans\/.*\.md$/.test(filePath)) return true;
   if (/^tasks\/reviews\/.*\.review\.md$/.test(filePath)) return true;
-  if (filePath === '.ai/harness/checks/latest.json') return true;
   return false;
-}
-
-// ---------------------------------------------------------------------------
-// Policy / repo-relative-path reads (verbatim re-ports of
-// mutation-guard.ts's private `policyGet`/`repoRelativePath` -- same
-// "outside Allowed Paths" reasoning).
-// ---------------------------------------------------------------------------
-
-function policyGet(repoRoot: string, path: readonly string[], fallback: string): string {
-  const raw = readText(repoRoot, '.ai/harness/policy.json');
-  if (!raw) return fallback;
-  try {
-    let current: unknown = JSON.parse(raw);
-    for (const segment of path) {
-      if (current === null || typeof current !== 'object') return fallback;
-      current = (current as Record<string, unknown>)[segment];
-    }
-    return typeof current === 'string' && current.length > 0 ? current : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function repoRelativePath(value: string, defaultValue: string, allowedPrefix: string): string {
-  if (!value || value.startsWith('/') || value.includes('\n') || value.includes('\r')) return defaultValue;
-  if (value === '..' || value.startsWith('../') || value.endsWith('/..') || value.includes('/../')) {
-    return defaultValue;
-  }
-  if (allowedPrefix && !value.startsWith(allowedPrefix)) return defaultValue;
-  return value;
-}
-
-function resolveChecksFile(repoRoot: string): string {
-  const value = policyGet(repoRoot, ['harness', 'checks_file'], '.ai/harness/checks/latest.json');
-  return repoRelativePath(value, '.ai/harness/checks/latest.json', '.ai/harness/');
 }
 
 // ---------------------------------------------------------------------------
@@ -423,7 +363,6 @@ export interface PostEditJournalEvent {
   readonly subject_revision: string | null;
   readonly dirty: PostEditJournalDirtyBits;
   readonly payload: {
-    readonly contract_verification?: { readonly contract_file: string; readonly checks_file: string };
     readonly minimal_change?: { readonly path: string; readonly base_ref: string };
   };
 }
@@ -486,8 +425,11 @@ function writeOrCoalesceJournalEventLocked(repoRoot: string, input: WriteJournal
   const absPath = join(repoRoot, relativePath);
   const nowIso = new Date().toISOString();
   const current = readJournalEventFile(absPath);
-  const legacy = current ? null : readLegacyJournalEventFile(absPath);
-  const existing: PostEditJournalEvent | null = current ?? (legacy ? { ...legacy, schema_version: 2, source_key: key } : null);
+  if (!current && readLegacyJournalEventFile(absPath)) {
+    warnStderr('[PostEditJournal] WARN: v1 event blocks this journal write; run repo-harness state migrate-post-edit-journal-v1 --json');
+    throw new Error('post-edit journal v1 requires explicit migration');
+  }
+  const existing = current;
 
   const dirty: PostEditJournalDirtyBits = existing
     ? {
@@ -515,7 +457,6 @@ function writeOrCoalesceJournalEventLocked(repoRoot: string, input: WriteJournal
     subject_revision: input.subjectRevision ?? existing?.subject_revision ?? null,
     dirty,
     payload: {
-      contract_verification: existing?.payload.contract_verification,
       minimal_change: input.minimalChangeInfo
         ? { path: input.minimalChangeInfo.path, base_ref: input.minimalChangeInfo.baseRef }
         : existing?.payload.minimal_change,
@@ -643,124 +584,11 @@ export function pendingPostEditJournalSection(repoRoot: string): SessionContextS
 }
 
 // ---------------------------------------------------------------------------
-// Stop-time (deferred) consumption: replays the SAME external commands the
-// retired scripts used, per unique dirty path, then marks each event
-// consumed atomically. Invoked by runtime.ts's Stop.default dispatch.
+// Stop-time (deferred) consumption: runs each dirty consumer once per unique
+// path, then marks each event consumed atomically. Invoked by runtime.ts's
+// Stop.default dispatch.
 // ---------------------------------------------------------------------------
 
-function commandAvailable(cmd: string, env: NodeJS.ProcessEnv): boolean {
-  try {
-    return spawnSync('sh', ['-c', `command -v ${cmd}`], { env, stdio: 'ignore' }).status === 0;
-  } catch {
-    return false;
-  }
-}
-
-/** `repo_harness_runner_available()` port (assets/hooks/post-edit-guard.sh:14-19). */
-function repoHarnessRunnerAvailable(env: NodeJS.ProcessEnv): boolean {
-  const cli = env.REPO_HARNESS_CLI;
-  if (cli && existsSync(cli) && commandAvailable('bun', env)) return true;
-  return commandAvailable('repo-harness', env);
-}
-
-/** `run_repo_harness_helper()` port (assets/hooks/post-edit-guard.sh:21-29). */
-function runRepoHarnessHelper(
-  repoRoot: string,
-  env: NodeJS.ProcessEnv,
-  helper: string,
-  args: readonly string[],
-  timeoutMs: number,
-): { status: number; stdout: string; stderr: string; timedOut: boolean } {
-  const cli = env.REPO_HARNESS_CLI;
-  let command: string;
-  let commandArgs: readonly string[];
-  if (cli && existsSync(cli) && commandAvailable('bun', env)) {
-    command = 'bun';
-    commandArgs = [cli, 'run', helper, ...args];
-  } else {
-    command = 'repo-harness';
-    commandArgs = ['run', helper, ...args];
-  }
-  const result = runProcess(command, commandArgs, { cwd: repoRoot, env, inheritEnv: false, processGroup: true, timeoutMs });
-  return {
-    status: result.status,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    timedOut: result.timedOut,
-  };
-}
-
-/** capability-context's own 3-tier fallback (post-edit-guard.sh:73-93) --
- * NOT `run <helper>` shaped, ported as its own function. */
-function runCapabilityContextRequest(repoRoot: string, env: NodeJS.ProcessEnv, timeoutMs: number): { status: number } {
-  const args = ['capability-context', 'request', '--from-latest-architecture-event'];
-  const cli = env.REPO_HARNESS_CLI;
-  if (cli && existsSync(cli) && commandAvailable('bun', env)) {
-    const result = runProcess('bun', [cli, ...args], { cwd: repoRoot, env, inheritEnv: false, processGroup: true, timeoutMs });
-    return { status: result.status ?? 1 };
-  }
-  if (commandAvailable('repo-harness', env)) {
-    const result = runProcess('repo-harness', args, { cwd: repoRoot, env, inheritEnv: false, processGroup: true, timeoutMs });
-    return { status: result.status ?? 1 };
-  }
-  const localCli = join(repoRoot, 'src/cli/index.ts');
-  if (commandAvailable('bun', env) && existsSync(localCli)) {
-    const result = runProcess('bun', [localCli, ...args], { cwd: repoRoot, env, inheritEnv: false, processGroup: true, timeoutMs });
-    return { status: result.status ?? 1 };
-  }
-  return { status: 1 };
-}
-
-/**
- * `run_architecture_queue_sync()` port (post-edit-guard.sh:49-96), now
- * invoked per path of the Stop-time drift changed set (see
- * `architecture-drift.ts`) instead of per journal event. The
- * context-contract-sync + capability-context cascade is gated on
- * architecture-queue's OWN real-time output matching
- * `/^\[ArchitectureDrift\] Request:/m` -- replicated here exactly, against
- * the (still same, unmodified) `architecture-queue.sh record` command's real
- * output, not a second capability-resolver implementation.
- */
-export type ArchitectureCascadeResult =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly error: string };
-
-export function processArchitectureCascade(
-  repoRoot: string,
-  env: NodeJS.ProcessEnv,
-  filePath: string,
-  budget: { readonly deadlineMs: number; readonly nowMs: () => number },
-): ArchitectureCascadeResult {
-  const remaining = () => Math.max(0, budget.deadlineMs - budget.nowMs());
-  const expired = (): ArchitectureCascadeResult => ({ ok: false, error: `legacy architecture cascade deadline exhausted before ${filePath}; drift retained for retry` });
-  if (remaining() <= 0) return expired();
-  if (!repoHarnessRunnerAvailable(env)) {
-    return { ok: false, error: `legacy architecture cascade runner is unavailable for ${filePath}` };
-  }
-  const queueBudget = remaining();
-  if (queueBudget <= 0) return expired();
-  const result = runRepoHarnessHelper(repoRoot, env, 'architecture-queue', ['record', '--file', filePath], queueBudget);
-  if (result.status !== 0) {
-    return { ok: false, error: `legacy architecture cascade failed for ${filePath}: architecture-queue exited ${result.status}` };
-  }
-  if (/^\[ArchitectureDrift\] Request:/m.test(result.stdout)) {
-    const contextBudget = remaining();
-    if (contextBudget <= 0) return expired();
-    const contextSync = runRepoHarnessHelper(repoRoot, env, 'context-contract-sync', ['sync-latest'], contextBudget);
-    if (contextSync.status !== 0) {
-      return { ok: false, error: `legacy architecture cascade failed for ${filePath}: context-contract-sync exited ${contextSync.status}` };
-    }
-    const capabilityBudget = remaining();
-    if (capabilityBudget <= 0) return expired();
-    const capabilityContext = runCapabilityContextRequest(repoRoot, env, capabilityBudget);
-    if (capabilityContext.status !== 0) {
-      return { ok: false, error: `legacy architecture cascade failed for ${filePath}: capability-context exited ${capabilityContext.status}` };
-    }
-  }
-  return { ok: true };
-}
-
-/** Evaluate the current plan without starting missing verification commands. */
 /** `minimal_change_hook_entry signals --phase post-edit` port -- calls the
  * SAME `collectMinimalChangeSignals()` function `minimal-change-observer.sh`
  * called (via minimal-change-cli.ts), just deferred to Stop time using the
@@ -812,7 +640,8 @@ function warnStderr(line: string): void {
 }
 
 /**
- * Processes pending journal events within one bounded Stop-time pass. External
+ * Processes pending v2 journal events within one bounded Stop-time pass.
+ * V1 files stay pending until the explicit migration runs. External
  * helpers are process-group supervised and clamped to the pass deadline.
  * Completed, failed, and timed-out effects are all acknowledged; the latter
  * two emit warnings so one slow event cannot pin the queue head forever.
@@ -832,11 +661,15 @@ export function consumePendingPostEditEvents(
   if (!Number.isSafeInteger(helperTimeoutMs) || helperTimeoutMs < 1) {
     throw new Error('post-edit journal helper timeout must be a positive integer');
   }
-  migratePendingPostEditJournalV1(repoRoot, 100);
-  const { valid, corruptNames } = scanPendingPostEditEventFiles(repoRoot);
+  const { valid, corruptNames, legacyNames } = scanPendingPostEditEventFiles(repoRoot);
   let consumed = 0;
   let errors = 0;
   const warnings: string[] = [];
+  if (legacyNames.length > 0) {
+    const warning = `[PostEditJournal] WARN: retained ${legacyNames.length} v1 event(s); run repo-harness state migrate-post-edit-journal-v1 --json`;
+    warnings.push(warning);
+    warnStderr(warning);
+  }
 
   for (const name of corruptNames) {
     const warning = `[PostEditJournal] WARN: removed corrupt pending event file ${name}`;
@@ -894,5 +727,5 @@ export function consumePendingPostEditEvents(
       errors += 1;
     }
   }
-  return { consumed, pending: valid.length - consumed, errors, warnings };
+  return { consumed, pending: valid.length - consumed + legacyNames.length, errors, warnings };
 }

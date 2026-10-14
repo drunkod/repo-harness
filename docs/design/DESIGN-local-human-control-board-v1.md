@@ -79,7 +79,7 @@
 | Source | Learn (學什麼) | Avoid (避什麼) |
 |--------|----------------|-----------------|
 | `Ancienttwo/repo-harness-page@ffe3ff1...` | exact warm-paper tokens、Space Grotesk/IBM Plex Sans/JetBrains Mono、carrot focus/accent、ink inverse band、48px grid wash、Lucide、120/180ms motion | 不复制 landing hero、marketing section rhythm、功能卡片墙 |
-| `docs/researches/20260823-human-control-board-agentic-factory.md` | five-column information architecture、Attention Inbox、Task Drawer、thin renderer boundary | 不提前加入 mutations、Tunnel、Planner 或 Worker Host |
+| [20260823-human-control-board-agentic-factory.md](https://github.com/Ancienttwo/repo-harness/blob/archive/docs-researches-20261004/docs/researches/20260823-human-control-board-agentic-factory.md) | five-column information architecture、Attention Inbox、Task Drawer、thin renderer boundary | 不提前加入 mutations、Tunnel、Planner 或 Worker Host |
 | `src/core/fleet/board.ts` | exact public statuses、null/consistency/error semantics | 不从标签或 prose 重新推断状态 |
 
 ## Color (色彩)
@@ -88,6 +88,8 @@
 - Usage rules: paper 是工作面，ink rail/headers 建层级，carrot 只用于 primary/focus/attention，semantic hues 只表达状态；正文/背景达到 WCAG AA，focus ring 为 `0 0 0 3px rgba(232,116,44,.32)`。
 
 ## Typography (字型排印)
+
+> Note: the Kumo console plan (`plans/plan-20261010-0320-operator-console-kumo.md`) replaces the typography and styling in this document.
 
 - Typeface(s): Space Grotesk display、IBM Plex Sans body、JetBrains Mono ids/labels/code，复用 reference 自托管 font packages。
 - Scale / weights: dashboard 主体以 12/14/16/18/22/28px 为主，400/500/600/700；数字、revision、SHA 使用 tabular mono。

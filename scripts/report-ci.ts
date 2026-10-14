@@ -1,19 +1,19 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 const validSha = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) && value !== '0'.repeat(40);
 
-/** CI completion effect: GitHub is the authority for runs, repair issues and immutable rollback tags. */
+/** CI completion effect: GitHub is the authority for runs, repair issues and rollback boundaries. */
 export class CIReportError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
-export type GitHubAPI = (path: string, method?: 'GET' | 'POST', body?: unknown) => Promise<unknown>;
+export type GitHubAPI = (path: string, method?: 'GET' | 'POST' | 'PATCH', body?: unknown) => Promise<unknown>;
 export interface CIReport {
   run_id: number; run_attempt: number; sha: string; conclusion: string; run_url: string;
   repairs: { key: string; issue_url: string | null; delivery: 'created' | 'reused' | 'pending'; error?: string }[];
-  merges: { pr: number; before: string; after: string; before_tag: string; after_tag: string; rollback: string }[];
+  merges: { pr: number; before: string; after: string; rollback: string }[];
   unresolved_repairs: { issue_number: number; url: string; title: string }[] | null;
   errors: string[];
 }
-function positive(value: unknown): value is number { return Number.isInteger(value) && Number(value) > 0; }
+function positive(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) > 0; }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function safeText(value: unknown): string { return String(value ?? '').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 300); }
 
@@ -35,17 +35,30 @@ async function githubPages(api: GitHubAPI, path: string, field?: string): Promis
   }
   throw new Error(`Provider pagination limit reached: ${path}`);
 }
-async function ensureRepairIssue(api: GitHubAPI, root: string, key: string, title: string, body: string): Promise<{ issue_url: string; delivery: 'created' | 'reused' }> {
+async function ensureRepairIssue(api: GitHubAPI, root: string, key: string, title: string, body: string, requireOpen = false): Promise<{ issue_url: string; delivery: 'created' | 'reused' }> {
   const marker = `<!-- ${key} -->`;
+  const isClaim = (issue: Record<string, unknown>): boolean => !issue.pull_request && (!requireOpen || issue.state === 'open')
+    && typeof issue.body === 'string' && issue.body.includes(marker) && positive(issue.number);
   const issues = await githubPages(api, `${root}/issues?state=all`);
-  const existing = issues.find(issue => !issue.pull_request && typeof issue.body === 'string' && issue.body.includes(marker));
+  const existing = issues.find(issue => isClaim(issue));
   if (existing) {
     if (typeof existing.html_url !== 'string') throw new Error('Existing repair issue has no provider URL');
     return { issue_url: existing.html_url, delivery: 'reused' };
   }
-  const issue = record(await api(`${root}/issues`, 'POST', { title, body: `${marker}\n\n${body}` }), 'Created repair issue');
-  if (!positive(issue.number) || typeof issue.html_url !== 'string') throw new Error('Repair issue was not confirmed by provider');
-  return { issue_url: issue.html_url, delivery: 'created' };
+  const created = record(await api(`${root}/issues`, 'POST', { title, body: `${marker}\n\n${body}` }), 'Created repair issue');
+  const createdNumber = created.number;
+  const createdUrl = created.html_url;
+  if (!positive(createdNumber) || typeof createdUrl !== 'string') throw new Error('Repair issue was not confirmed by provider');
+  // Separate list and create is not atomic across report runs, and the shared
+  // repair key admits concurrent creators. The oldest matching issue is the one
+  // winning claim; a loser closes only its own duplicate and reuses the winner.
+  const winner = (await githubPages(api, `${root}/issues?state=all`))
+    .filter(issue => isClaim(issue) && (issue.number as number) < createdNumber)
+    .sort((left, right) => (left.number as number) - (right.number as number))[0];
+  if (!winner) return { issue_url: createdUrl, delivery: 'created' };
+  record(await api(`${root}/issues/${createdNumber}`, 'PATCH', { state: 'closed' }), 'Duplicate repair issue close');
+  if (typeof winner.html_url !== 'string') throw new Error('Existing repair issue has no provider URL');
+  return { issue_url: winner.html_url, delivery: 'reused' };
 }
 
 export async function reportCI(repo: string, runId: number, api: GitHubAPI): Promise<CIReport> {
@@ -62,12 +75,12 @@ export async function reportCI(repo: string, runId: number, api: GitHubAPI): Pro
   const headSha = run.head_sha;
   const report: CIReport = { run_id: runId, run_attempt: run.run_attempt, sha: run.head_sha,
     conclusion: run.conclusion, run_url: run.html_url, repairs: [], merges: [], unresolved_repairs: null, errors: [] };
-  const repair = async (identity: string, detail: string): Promise<void> => {
-    const key = `ci-repair:${run.id}:${run.run_attempt}:${identity}`;
+  const repair = async (identity: string, detail: string, requireOpen = false): Promise<void> => {
+    const key = requireOpen ? `ci-repair:${identity}` : `ci-repair:${run.id}:${run.run_attempt}:${identity}`;
     try {
       const task = await ensureRepairIssue(api, root, key,
         `[CI repair] ${safeText(identity)} @ ${headSha.slice(0, 12)}`,
-        `Fixed main SHA: \`${run.head_sha}\`\nRun: ${run.html_url}\nAttempt: ${run.run_attempt}\nCheck: ${identity}\n\n${safeText(detail)}\n\nInvestigate the real failure; open a repair PR and run typecheck + affected tests once. Do not weaken assertions. Credentials/permissions and production operations require user approval.`);
+        `Fixed main SHA: \`${run.head_sha}\`\nRun: ${run.html_url}\nAttempt: ${run.run_attempt}\nCheck: ${identity}\n\n${safeText(detail)}\n\nInvestigate the real failure; open a repair PR and run typecheck + affected tests once. Do not weaken assertions. Credentials/permissions and production operations require user approval.`, requireOpen);
       report.repairs.push({ key, ...task });
     } catch (error) {
       // The artifact is the pending delivery record. An HTTP refusal never becomes a fake dispatch success.
@@ -90,23 +103,6 @@ export async function reportCI(repo: string, runId: number, api: GitHubAPI): Pro
     } catch (error) { report.errors.push(`Failure observation incomplete: ${message(error)}`); await repair(`run-${run.id}`, 'Failed run/check observation was incomplete.'); }
   }
 
-  const tag = async (name: string, sha: string): Promise<void> => {
-    const read = async () => {
-      const ref = record(await api(`${root}/git/ref/tags/${name}`), 'Tag ref');
-      const tagObject = record(ref.object, 'Tag object');
-      if (tagObject.type !== 'tag' || !validSha(tagObject.sha)) throw new Error(`Tag ${name} is not an annotated immutable tag`);
-      const annotation = record(await api(`${root}/git/tags/${tagObject.sha}`), 'Tag annotation');
-      const target = record(annotation.object, 'Tag target');
-      if (annotation.tag !== name || target.type !== 'commit' || target.sha !== sha) throw new Error(`Tag conflict: ${name}`);
-    };
-    try { await read(); return; } catch (error) { if (!(error instanceof CIReportError) || error.status !== 404) throw error; }
-    const annotation = record(await api(`${root}/git/tags`, 'POST', { tag: name, message: `PR rollback boundary: ${name}`, object: sha, type: 'commit' }), 'Created tag annotation');
-    if (!validSha(annotation.sha)) throw new Error(`Tag annotation not confirmed: ${name}`);
-    try { await api(`${root}/git/refs`, 'POST', { ref: `refs/tags/${name}`, sha: annotation.sha }); }
-    catch (error) { if (!(error instanceof CIReportError) || error.status !== 422) throw error; }
-    await read(); // A concurrent ref creation is accepted only after exact annotated-target readback.
-  };
-
   try {
     const createdAt = Date.parse(run.created_at);
     if (!Number.isFinite(createdAt)) throw new Error('Daily reporting interval unavailable');
@@ -122,23 +118,32 @@ export async function reportCI(repo: string, runId: number, api: GitHubAPI): Pro
       if (!positive(pr.number) || !validSha(pr.merge_commit_sha)) throw new Error('Merged PR identity incomplete');
       const after = pr.merge_commit_sha;
       try {
-        const commit = record(await api(`${root}/git/commits/${after}`), 'Squash commit');
-        if (commit.sha !== after || !Array.isArray(commit.parents) || commit.parents.length !== 1) throw new Error('Automatic rollback requires a single squash commit');
-        const parent = record(commit.parents[0], 'Squash parent');
-        if (!validSha(parent.sha)) throw new Error('Squash parent identity unavailable');
+        const commit = record(await api(`${root}/git/commits/${after}`), 'Merge commit');
+        if (commit.sha !== after || !Array.isArray(commit.parents) || commit.parents.length !== 1) throw new Error('Automatic rollback requires a single-parent commit boundary');
+        const parent = record(commit.parents[0], 'Commit parent');
+        if (!validSha(parent.sha) || parent.sha === after) throw new Error('Commit parent identity unavailable');
         const membership = record(await api(`${root}/compare/${after}...${run.head_sha}`), 'Snapshot membership');
         if (membership.status === 'behind' || membership.status === 'diverged') continue;
         if (membership.status !== 'ahead' && membership.status !== 'identical') throw new Error('Snapshot membership unavailable');
+        const detail = record(await api(`${root}/pulls/${pr.number}`), 'Merged PR detail');
+        if (detail.number !== pr.number || detail.merged !== true || detail.merge_commit_sha !== after
+          || record(detail.base, 'Merged PR detail base').ref !== 'main') throw new Error('Merged PR detail does not match the rollback boundary');
+        const parentAssociations = await api(`${root}/commits/${parent.sha}/pulls?per_page=100`);
+        if (!Array.isArray(parentAssociations) || parentAssociations.length >= 100) throw new Error('Rollback parent PR associations incomplete');
+        const parentPRs = parentAssociations.map(entry => {
+          const pr = record(entry, 'Rollback parent PR association');
+          if (!positive(pr.number)) throw new Error('Rollback parent PR number unavailable');
+          return pr.number;
+        });
+        if (parentPRs.includes(pr.number)) throw new Error(`Automatic rollback cannot revert only the last commit of multi-commit rebase PR #${pr.number}`);
         const before = parent.sha;
-        const beforeTag = `gate-cutover-pr-${pr.number}-before`; const afterTag = `gate-cutover-pr-${pr.number}-after`;
-        await tag(beforeTag, before); await tag(afterTag, after);
-        report.merges.push({ pr: pr.number, before, after, before_tag: beforeTag, after_tag: afterTag, rollback: `git revert --no-edit ${afterTag}` });
+        report.merges.push({ pr: pr.number, before, after, rollback: `git revert --no-edit ${after}` });
       } catch (error) {
-        report.errors.push(`Tag recovery pending for PR #${pr.number}: ${message(error)}`);
-        await repair(`tags-pr-${pr.number}`, 'Recover exact before/after annotated tags. Never repeat the already completed merge or force a conflicting tag.');
+        report.errors.push(`Rollback boundary pending for PR #${pr.number}: ${message(error)}`);
+        await repair(`merge-pr-${pr.number}`, 'Recover the exact GitHub merge commit, its single parent and the parent PR associations in the fixed main snapshot. Automatic rollback cannot revert only the last commit of a multi-commit rebase PR. Never repeat the completed merge.', true);
       }
     }
-  } catch (error) { report.errors.push(`Merge reporting incomplete: ${message(error)}`); await repair(`report-${run.id}`, 'Recover provider merge/tag report.'); }
+  } catch (error) { report.errors.push(`Merge reporting incomplete: ${message(error)}`); await repair(`report-${run.id}`, 'Recover provider merge boundary report.'); }
   try {
     const open = await githubPages(api, `${root}/issues?state=open`);
     report.unresolved_repairs = open.filter(issue => !issue.pull_request && issue.state === 'open' && typeof issue.body === 'string'
@@ -166,7 +171,7 @@ export async function watchDailyCI(repo: string, now: Date, api: GitHubAPI, sche
   if (now.getTime() < expected + 4 * 60 * 60 * 1000) throw new Error('Daily observation is before the four-hour deadline');
   const key = `ci-daily-missing:${date}`;
   try {
-    const runs = await githubPages(api, `${root}/actions/workflows/ci.yml/runs?event=schedule&created=${date}`, 'workflow_runs');
+    const runs = await githubPages(api, `${root}/actions/workflows/ci.yml/runs?event=schedule&created=${date}..${now.toISOString().slice(0, 10)}`, 'workflow_runs');
     const matching = runs.filter(run => {
       if (!positive(run.id) || typeof run.created_at !== 'string' || !Number.isFinite(Date.parse(run.created_at)) || typeof run.status !== 'string') throw new Error('Daily run observation incomplete');
       return run.path === '.github/workflows/ci.yml' && run.head_branch === 'main' && run.event === 'schedule'
@@ -183,7 +188,7 @@ export async function watchDailyCI(repo: string, now: Date, api: GitHubAPI, sche
 
 export function renderReport(report: CIReport): string {
   return `# Main CI daily report\n\nSHA: \`${report.sha}\`\nRun: ${report.run_url}\nResult: ${report.conclusion}\n\n`
-    + report.merges.map(merge => `- PR #${merge.pr}: \`${merge.before_tag}\` (${merge.before}) → \`${merge.after_tag}\` (${merge.after}); rollback: \`${merge.rollback}\``).join('\n')
+    + report.merges.map(merge => `- PR #${merge.pr}: \`${merge.before}\` → \`${merge.after}\`; rollback: \`${merge.rollback}\``).join('\n')
     + `\n\nRepair tasks:\n${report.repairs.map(repair => `- ${repair.key}: ${repair.delivery}${repair.issue_url ? ` (${repair.issue_url})` : ''}${repair.error ? `: ${safeText(repair.error)}` : ''}`).join('\n')}`
     + `\n\nUnresolved repair backlog: ${report.unresolved_repairs === null ? 'unknown' : report.unresolved_repairs.map(issue => `#${issue.issue_number} ${issue.url}`).join(', ') || 'none'}\n`
     + `\n\nPending H02/H03/H04 approvals are not observed by CI; their operation owner retains user approval.\n`
@@ -201,7 +206,15 @@ if (import.meta.main) {
       method, headers: { Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GH_TOKEN!}`, 'X-GitHub-Api-Version': '2022-11-28' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000),
     });
-    if (!response.ok) throw new CIReportError(response.status, `GitHub ${method} ${path}: HTTP ${response.status}`);
+    if (!response.ok) {
+      const payload: unknown = await response.json().catch(() => null);
+      let providerMessage = isRecord(payload) && typeof payload.message === 'string' ? payload.message : '';
+      const token = process.env.GH_TOKEN;
+      if (token) providerMessage = providerMessage.split(token).join('[REDACTED]');
+      providerMessage = safeText(providerMessage.replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/g, '[REDACTED]')
+        .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [REDACTED]'));
+      throw new CIReportError(response.status, `GitHub ${method} ${path}: HTTP ${response.status}${providerMessage ? `: ${providerMessage}` : ''}`);
+    }
     return response.json();
   };
   mkdirSync('.ci-report', { recursive: true });

@@ -18,7 +18,6 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -27,7 +26,7 @@ import {
   writeFileSync,
 } from 'fs';
 import { fileURLToPath } from 'url';
-import { basename, dirname, join, relative, resolve } from 'path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'path';
 import {
   createSessionContextProviderDiagnostic,
   type SessionContextProviderDiagnostic,
@@ -43,8 +42,12 @@ import type { WorktreeOwnership } from '../../effects/loop/state-input-collector
 import { resolveRecoveryEvidence } from '../../effects/evidence/recovery-materializer';
 import { parseHookInput } from './hook-input';
 import { mintOrAdoptSessionRunIdentity } from './run-identity';
-import { capabilitySourceMode, findMatch, readRegistry } from '../../../scripts/capability-resolver';
-import { readGlobalArchitectureConfiguration } from '../../effects/architecture/projection-config';
+import {
+  acquireExclusiveDirectoryLock,
+  ExclusiveLockContentionError,
+  type ExclusiveDirectoryLockHandle,
+} from '../../effects/locking/exclusive-directory-lock';
+import { DEFAULT_PROCESS_MAX_BUFFER_BYTES, runProcess } from '../../effects/process-runner';
 
 // ---------------------------------------------------------------------------
 // run-identity threading -- SessionStart's single mint/adopt point
@@ -178,25 +181,30 @@ function renderSecurityContext(report: SecurityScanReport): string | null {
   const warn = report.findings.filter((finding) => finding.severity === 'warn').length;
   const first = report.findings[0];
   const bits = [`${report.findings.length} finding(s)`, `${high} high`, `${warn} warn`, `${fail} fail`];
-  return `[SecurityConfig] ${bits.join(', ')}. First: ${first.ruleId} at ${first.filePath}. Run repo-harness security scan --json.`;
+  return `[SecurityConfig] ${bits.join(', ')}. First: ${first.ruleId} at ${first.filePath}. Review findings only within the task's authorized read scope. This diagnostic does not authorize another scan.`;
+}
+
+/** Exact per-session authorization for startup operations that scan host configuration. */
+function authorizedSessionSecurityHome(env: NodeJS.ProcessEnv): string | null {
+  if (env.REPO_HARNESS_SESSION_SECURITY_SCAN !== '1') return null;
+  const home = env.HOME;
+  // Never let a scanner fall back to the hook process's real HOME.
+  return home && isAbsolute(home) ? home : null;
 }
 
 /**
- * Ports the fingerprint-gated (changed-only) scan-and-cache flow verbatim.
- * `security_scan()`'s subprocess chain (`bun $CLI security scan --json` /
- * `repo-harness security scan --json` / `agentic-dev security scan --json`)
- * collapses to a direct in-process call to `runSecurityScan()` -- the exact
- * function `doctor.ts` already calls in-process, and the same object
- * `formatSecurityScan(report, true)` would JSON.stringify unchanged (no
- * transform between the two), so this is not a "second" scan authority.
- * This is the section's `bun_cli` cost dropping to 0. On any unexpected
- * throw, mirrors bash's `security_scan` failure path: skip the cache write,
- * emit nothing, never fail the session.
+ * Startup cannot infer permission from a task brief or a host/persona name.
+ * The launcher must opt in for this session, with permission to read the
+ * complete host/repo config set. Check it before fingerprints or cache effects.
+ * Explicit CLI security checks remain independent of this startup opt-in.
  */
 export function securitySentinelSessionContent(
   repoRoot: string,
   env: NodeJS.ProcessEnv,
 ): string | null {
+  const home = authorizedSessionSecurityHome(env);
+  if (home === null) return null;
+
   mkdirSync(join(repoRoot, SECURITY_DIR), { recursive: true });
 
   const currentFingerprint = computeSecurityFingerprint(repoRoot, env);
@@ -209,7 +217,7 @@ export function securitySentinelSessionContent(
     // its own homeDir(), which reads process.env.HOME directly) keeps this
     // call honoring the SAME injected `env` the fingerprint above just used
     // -- they must agree on which HOME they are looking at.
-    report = runSecurityScan({ cwd: repoRoot, home: env.HOME });
+    report = runSecurityScan({ cwd: repoRoot, home });
   } catch {
     return null;
   }
@@ -220,7 +228,7 @@ export function securitySentinelSessionContent(
   return renderSecurityContext(report);
 }
 
-/** `mandatory`/`actionable` stay `true` unconditionally (`securityBoundary` short-circuits both in the retired runtime.ts branch), `reference` is the same `setup check` string the old branch assigned (`taskState` is false for this id too). */
+/** Retain authorized findings in the context budget; retention does not grant task authority. */
 export function securitySentinelSessionSection(
   repoRoot: string,
   env: NodeJS.ProcessEnv,
@@ -233,7 +241,7 @@ export function securitySentinelSessionSection(
     content,
     mandatory: true,
     actionable: true,
-    reference: 'repo-harness setup check --json',
+    reference: "Review findings only within the task's authorized read scope.",
   };
 }
 
@@ -357,7 +365,6 @@ function getActivePlan(collector: SessionContextCollector): string | null {
 // Gatekeeper blocking finding (PORT decision): the base script's own
 // top-of-file housekeeping --
 //   workflow_rotate_events_file "$(workflow_events_file)" 2>/dev/null || true
-//   workflow_rotate_events_file ".ai/harness/architecture/events.jsonl" 2>/dev/null || true
 // -- was dropped in the first pass. Operator helpers still append lifecycle
 // events, while typed host handlers may write trace/runtime evidence; without
 // rotation those durable files grow unbounded. Ported
@@ -567,16 +574,11 @@ function workflowRotateEventsFile(
   });
 }
 
-/** Both cold-path rotation targets, in the base script's own call order. Never throws (mirrors `2>/dev/null || true` on each call). */
+/** Cold-path rotation of the workflow event log. Never throws (mirrors `2>/dev/null || true`). */
 function rotateSessionStartEventLogs(repoRoot: string): void {
   const lockRoot = join(dirname(join(repoRoot, workflowEventsFile(repoRoot))), '.locks');
   try {
     workflowRotateEventsFile(repoRoot, workflowEventsFile(repoRoot), lockRoot);
-  } catch {
-    /* cold-path housekeeping must never fail the session */
-  }
-  try {
-    workflowRotateEventsFile(repoRoot, '.ai/harness/architecture/events.jsonl', lockRoot);
   } catch {
     /* cold-path housekeeping must never fail the session */
   }
@@ -687,142 +689,6 @@ function resumeBlock(repoRoot: string, collector: SessionContextCollector): stri
     handoffSectionHasSignal(repoRoot, handoffFile, '## Changed Files');
   if (!signal) return '';
   return capResumeContent(readText(repoRoot, resumeFile) ?? '');
-}
-
-/** 2. `capability_context_pending` -- ".request_id" existing-but-non-string rows still count toward pending_count in jq (`// empty` only drops null/absent); the display list silently skips rows missing capability_id/path (jq would error per-row and jq's own multi-input error recovery is not worth replicating for a queue format this repo always writes complete). */
-function capabilityContextPendingContext(repoRoot: string): string | null {
-  const raw = readText(repoRoot, '.ai/harness/capability-context/requests.jsonl');
-  if (!raw || raw.trim() === '') return null;
-  let pendingCount = 0;
-  const lineSet = new Set<string>();
-  for (const rawLine of raw.split('\n')) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    let obj: unknown;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (!obj || typeof obj !== 'object' || (obj as Record<string, unknown>).status !== 'pending') continue;
-    pendingCount += 1;
-    const capabilityId = (obj as Record<string, unknown>).capability_id;
-    const path = (obj as Record<string, unknown>).path;
-    if (typeof capabilityId === 'string' && typeof path === 'string') {
-      lineSet.add(`- ${capabilityId} <- \`${path}\``);
-    }
-  }
-  const pendingLines = [...lineSet].sort().slice(0, 10).join('\n');
-  if (pendingCount === 0 || !pendingLines) return null;
-  return [
-    '# Capability Context Queue',
-    '',
-    `Pending capability context requests detected (${pendingCount}). Run:`,
-    '',
-    '```bash',
-    'repo-harness capability-context sync --pending --apply',
-    '```',
-    '',
-    'Queued capabilities:',
-    pendingLines,
-  ].join('\n');
-}
-
-/** 3. `architecture_queue_pending` -- `date -j -f '%Y-%m-%d'` parses in LOCAL time, matched here with the local-time `Date(y,m,d)` constructor rather than a UTC `Date.parse`. */
-function architectureQueuePendingContext(repoRoot: string, nowMs: number): string | null {
-  const requestsDir = 'docs/architecture/requests';
-  const absDir = join(repoRoot, requestsDir);
-  let entries: string[];
-  try {
-    entries = readdirSync(absDir, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
-      .map((entry) => entry.name)
-      .sort();
-  } catch {
-    return null;
-  }
-
-  let pendingCount = 0;
-  let oldestEpochSec: number | null = null;
-  for (const name of entries) {
-    const relPath = `${requestsDir}/${name}`;
-    const text = readText(repoRoot, relPath);
-    if (text === null) continue;
-    if (!/^> \*\*Status\*\*:[ \t]*Pending[ \t]*$/m.test(text)) continue;
-    pendingCount += 1;
-    const match = /^> \*\*Detected\*\*:[ \t]*(.*)$/m.exec(text);
-    const detectedDate = (match ? match[1].trim() : '').split('T')[0];
-    if (/^\d{4}-\d{2}-\d{2}$/.test(detectedDate)) {
-      const [y, m, d] = detectedDate.split('-').map(Number);
-      const epochSec = Math.floor(new Date(y, m - 1, d).getTime() / 1000);
-      if (oldestEpochSec === null || epochSec < oldestEpochSec) oldestEpochSec = epochSec;
-    }
-  }
-  if (pendingCount === 0) return null;
-
-  const nowEpochSec = Math.floor(nowMs / 1000);
-  const oldestDays =
-    oldestEpochSec !== null && nowEpochSec >= oldestEpochSec
-      ? `${Math.floor((nowEpochSec - oldestEpochSec) / 86400)}d`
-      : 'unknown';
-
-  // Checkpoint nudge, not a manual documentation obligation: architecture
-  // truth projection belongs to archcontext (docs/researches/
-  // 20260808-archctx-projection-handoff.md §4), so this card only reports that
-  // a checkpoint is due and names the command to inspect it.
-  return [
-    '# Architecture Queue',
-    '',
-    `Checkpoint due: ${pendingCount} capabilities have pending architecture drift (oldest ${oldestDays}) -- \`repo-harness run architecture-queue status\`.`,
-  ].join('\n');
-}
-
-/** Read-only observations, not proposed semantic boundaries. */
-export function architectureModelGuidanceContext(repoRoot: string, env: NodeJS.ProcessEnv): string | null {
-  if (capabilitySourceMode(repoRoot) !== 'archcontext') return null;
-  const global = readGlobalArchitectureConfiguration(env);
-  if (!global.initialized || global.policy.provider === 'disabled') return null;
-
-  const registry = readRegistry(repoRoot);
-  const observations: string[] = [];
-  if (registry.capabilities.length === 0) observations.push('No capability nodes are declared.');
-  const missingDocs = registry.capabilities.filter((capability) => !fileExists(repoRoot, capability.architecture_module));
-  if (missingDocs.length) {
-    observations.push(`${missingDocs.length} declared module document(s) are missing: ${missingDocs.slice(0, 3).map((capability) => JSON.stringify(capability.architecture_module)).join(', ')}.`);
-  }
-
-  // Git's tracked manifest paths are inventory evidence only. Do not crawl source
-  // trees or infer responsibilities from directory names inside a session hook.
-  const manifests = execFileSync('git', ['ls-files', '-z', '--', ':(glob)**/package.json'], {
-    cwd: repoRoot, encoding: 'utf-8', timeout: 2_000, maxBuffer: 1_048_576,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).split('\0').filter((file) => file && file !== 'package.json');
-  const unmapped: string[] = [];
-  const ancestorGroups = new Map<string, string[]>();
-  for (const manifest of manifests) {
-    const packageRoot = dirname(manifest);
-    const match = findMatch(registry, repoRoot, packageRoot);
-    if (!match.matched) unmapped.push(packageRoot);
-    else if (match.matched_prefix !== packageRoot) {
-      const key = `${match.capability_id} (${match.matched_prefix})`;
-      const roots = ancestorGroups.get(key) ?? [];
-      roots.push(packageRoot);
-      ancestorGroups.set(key, roots);
-    }
-  }
-  if (unmapped.length) observations.push(`${unmapped.length} tracked package root(s) have no capability match: ${unmapped.slice(0, 3).map((root) => JSON.stringify(root)).join(', ')}.`);
-  for (const [capability, roots] of ancestorGroups) {
-    if (roots.length > 1) observations.push(`${roots.length} tracked package roots share ancestor capability ${JSON.stringify(capability)}: ${roots.slice(0, 3).map((root) => JSON.stringify(root)).join(', ')}. Review whether that boundary is intentional.`);
-  }
-  if (!observations.length) return null;
-  return [
-    '# Architecture Model Guidance', '',
-    ...observations.slice(0, 5).map((observation) => `- ${observation}`),
-    ...(observations.length > 5 ? [`- ${observations.length - 5} more observations; inspect the full model.`] : []),
-    'Use the repo-harness-architecture skill to inspect source responsibilities and existing semantic docs, then propose justified capability boundaries. Package layout alone does not establish a capability.',
-    'Within the authorized task, Agent decides and writes model changes through archctx plan/apply (ChangeSet), validates, then runs architecture projection. Keep unrelated findings as advice; do not expand the active task. Hooks never author nodes.',
-    'Evidence: `repo-harness run capability-resolver list --format json`; `.archcontext/model/nodes/`; `git ls-files "**/package.json"`.',
-  ].join('\n');
 }
 
 interface PendingOrchestration {
@@ -1074,10 +940,28 @@ function toolingUpdateReportWasRendered(repoRoot: string, reportFile: string, ma
   return reportMtime !== null && String(reportMtime) === markerRaw;
 }
 
-function toolingUpdateMarkReportRendered(repoRoot: string, reportFile: string, markerFile: string): void {
+/** Rendered advisory plus the marker commit that consumes it. Runtime calls `markDelivered` only after the host output includes the advisory. */
+interface ToolingUpdateAdvisory {
+  readonly content: string;
+  readonly markDelivered: () => void;
+}
+
+function renderToolingUpdateAdvisory(repoRoot: string, reportFile: string, markerFile: string): ToolingUpdateAdvisory | null {
+  // Capture the rendered report's mtime now: a later refresh can replace the
+  // report before delivery, and the marker must name only the delivered one.
   const reportMtime = fileMtimeSec(repoRoot, reportFile);
-  if (reportMtime === null) return;
-  writeFileSync(join(repoRoot, markerFile), `${reportMtime}\n`);
+  const content = renderToolingUpdateContext(repoRoot, reportFile);
+  if (reportMtime === null || content === null) return null;
+  return {
+    content,
+    markDelivered: () => {
+      try {
+        writeFileSync(join(repoRoot, markerFile), `${reportMtime}\n`);
+      } catch {
+        // An unwritten marker only repeats the advisory in a later session.
+      }
+    },
+  };
 }
 
 /**
@@ -1100,52 +984,47 @@ function repoHarnessSetupCheckSubprocess(
   repoRoot: string,
   env: NodeJS.ProcessEnv,
   target: string,
+  timeoutMs: number,
 ): string | null {
   const args = ['setup', 'check', '--target', target, '--check-updates', '--json'];
   const cliPath = env.REPO_HARNESS_CLI;
-  if (cliPath && existsSync(cliPath)) {
-    try {
-      return execFileSync('bun', [cliPath, ...args], {
-        cwd: repoRoot,
-        encoding: 'utf-8',
-        env,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-    } catch {
-      return null;
-    }
-  }
-  try {
-    return execFileSync('repo-harness', args, {
-      cwd: repoRoot,
-      encoding: 'utf-8',
-      env,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-  } catch {
-    return null;
-  }
+  const [command, commandArgs] = cliPath && existsSync(cliPath)
+    ? ['bun', [cliPath, ...args]]
+    : ['repo-harness', args];
+  // The process group bound stops the whole check tree, so a stuck check
+  // cannot hold the refresh lock forever. The report is kept verbatim.
+  const result = runProcess(command, commandArgs, {
+    cwd: repoRoot,
+    env,
+    inheritEnv: false,
+    processGroup: true,
+    timeoutMs,
+    maxOutputBytes: DEFAULT_PROCESS_MAX_BUFFER_BYTES,
+    redactions: [],
+  });
+  return result.ok ? result.stdout : null;
 }
 
-/** `REPO_HARNESS_TOOLING_ADVISORY_SYNC=1` branch: populate the cache synchronously, then render+mark exactly like the fresh-cache path. On any subprocess failure, mirrors bash: no cache write, no render. */
+/** Bound for one setup check: its tooling script stops itself after 30 seconds, plus CLI start-up. */
+const TOOLING_SETUP_CHECK_TIMEOUT_MS = 60_000;
+
+/** Long enough to reclaim a dead owner and retry once; a live owner makes a second refresh exit after this wait. */
+const TOOLING_REFRESH_LOCK_WAIT_MS = 1_000;
+
+/** `REPO_HARNESS_TOOLING_ADVISORY_SYNC=1` branch: populate the cache synchronously, then render exactly like the fresh-cache path. On any subprocess failure, mirrors bash: no cache write, no render. */
 function toolingUpdateSyncPopulateAndRender(
   repoRoot: string,
   env: NodeJS.ProcessEnv,
   target: string,
   reportFile: string,
   markerFile: string,
-): string | null {
-  const stdout = repoHarnessSetupCheckSubprocess(repoRoot, env, target);
+): ToolingUpdateAdvisory | null {
+  const stdout = repoHarnessSetupCheckSubprocess(repoRoot, env, target, TOOLING_SETUP_CHECK_TIMEOUT_MS);
   if (stdout === null) return null;
   writeFileSync(join(repoRoot, reportFile), stdout);
   if (toolingUpdateReportWasRendered(repoRoot, reportFile, markerFile)) return null;
-  const content = renderToolingUpdateContext(repoRoot, reportFile);
-  toolingUpdateMarkReportRendered(repoRoot, reportFile, markerFile);
-  return content;
+  return renderToolingUpdateAdvisory(repoRoot, reportFile, markerFile);
 }
-
-/** `evt-` lock's own crashed-holder threshold (`workflow_with_lock`'s 60s) reused for the tooling-advisory lock -- see `acquireToolingAdvisoryLock`'s doc comment for why this exists even though bash's own async branch had no such handling. */
-const TOOLING_ADVISORY_LOCK_STALE_SECONDS = 60;
 
 /**
  * Marks a `<entrypoint> <flag> <repoRoot> <target> <reportFile> <lockDir>`
@@ -1165,11 +1044,16 @@ export const DETACHED_TOOLING_POPULATE_FLAG = '--detached-tooling-populate';
  * OWN separate, `unref()`'d process (spawned by `triggerDetachedToolingPopulate`
  * below) so it outlives the triggering SessionStart hook, which exits
  * immediately after spawning -- that is the entire point of "detached".
- * Mirrors bash's backgrounded subshell exactly: populate the report cache
- * on success, and ALWAYS remove the lock dir when done (success OR
- * failure), so a later session's trigger can acquire it again. Never
- * renders/marks-rendered here -- exactly like bash, only a LATER session
- * that finds the cache fresh does that.
+ * Populates the report cache on success. Never renders/marks-rendered here
+ * -- exactly like bash, only a LATER session that finds the cache fresh
+ * does that.
+ *
+ * This process, not the short-lived trigger, owns the refresh lock, so the
+ * lock names a process that is alive for the whole check. A live refresh
+ * is never evicted by age; only a dead owner (crash, forced kill) or an
+ * abandoned ownerless directory is reclaimed. A second refresh that finds
+ * a live owner exits after a short wait. Release removes only this
+ * process' own token.
  */
 export function runDetachedToolingPopulate(
   repoRoot: string,
@@ -1177,56 +1061,35 @@ export function runDetachedToolingPopulate(
   target: string,
   reportFile: string,
   lockDir: string,
+  timeoutMs: number = TOOLING_SETUP_CHECK_TIMEOUT_MS,
 ): void {
+  if (authorizedSessionSecurityHome(env) === null) return;
+  let lock: ExclusiveDirectoryLockHandle;
   try {
-    const stdout = repoHarnessSetupCheckSubprocess(repoRoot, env, target);
+    lock = acquireExclusiveDirectoryLock(realpathSync(repoRoot), lockDir, {
+      waitTimeoutMs: TOOLING_REFRESH_LOCK_WAIT_MS,
+      reclaimStaleEmptyDirectory: true,
+    });
+  } catch (error) {
+    if (error instanceof ExclusiveLockContentionError) return;
+    throw error;
+  }
+  try {
+    // Every stale SessionStart spawns a refresh. One that gets the lock after
+    // another refresh published a fresh report has nothing left to do.
+    if (toolingUpdateCacheIsFresh(repoRoot, reportFile, env, Date.now())) return;
+    const stdout = repoHarnessSetupCheckSubprocess(repoRoot, env, target, timeoutMs);
     if (stdout !== null) {
-      writeFileSync(join(repoRoot, reportFile), stdout);
+      // Publish only as the current owner, and atomically, so a reader never
+      // sees a partial report.
+      lock.assertOwned();
+      const report = join(repoRoot, reportFile);
+      const temp = `${report}.tmp-${process.pid}`;
+      writeFileSync(temp, stdout);
+      renameSync(temp, report);
     }
   } finally {
-    try {
-      rmdirSync(join(repoRoot, lockDir));
-    } catch {
-      // Already removed / never fully created -- matches bash's own
-      // `rmdir "$lock_dir" 2>/dev/null || true`.
-    }
-  }
-}
-
-/**
- * `if mkdir "$lock_dir" 2>/dev/null; then ... fi` port, PLUS a deliberate
- * improvement bash's own async branch never had: bash's backgrounded
- * subshell is the ONLY thing that ever removes this lock dir, so if it dies
- * mid-flight (OOM, forced kill, host sleep) before reaching its own
- * `rmdir`, the lock is left behind FOREVER and every future session's
- * `mkdir` attempt fails forever, permanently suppressing the refresh cycle
- * -- a latent bash bug, not a behavior worth preserving. Reuses
- * `workflow_with_lock`'s own 60s crashed-holder threshold (the only "sane
- * age" precedent this codebase already establishes) to break a stale lock
- * and retry once; a lock younger than that is left alone (a populate is
- * plausibly still genuinely in progress).
- */
-function acquireToolingAdvisoryLock(repoRoot: string, lockDir: string): boolean {
-  const absLockDir = join(repoRoot, lockDir);
-  try {
-    mkdirSync(absLockDir);
-    return true;
-  } catch {
-    let mtimeSec: number | null;
-    try {
-      mtimeSec = Math.floor(statSync(absLockDir).mtimeMs / 1000);
-    } catch {
-      return false; // vanished between the failed mkdir and this stat; next session tries again
-    }
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (nowSec - mtimeSec < TOOLING_ADVISORY_LOCK_STALE_SECONDS) return false;
-    try {
-      rmdirSync(absLockDir);
-      mkdirSync(absLockDir);
-      return true;
-    } catch {
-      return false;
-    }
+    lock.release();
   }
 }
 
@@ -1239,7 +1102,8 @@ function acquireToolingAdvisoryLock(repoRoot: string, lockDir: string): boolean 
  * backgrounded, independent subshell instead of "do it later in the same
  * script"). `detached: true` + `unref()` means the parent never waits, and
  * the child is reparented (survives the parent exiting), matching bash's
- * own orphaned-background-job semantics.
+ * own orphaned-background-job semantics. The child acquires the refresh
+ * lock itself (see `runDetachedToolingPopulate`).
  */
 function triggerDetachedToolingPopulate(
   repoRoot: string,
@@ -1248,35 +1112,27 @@ function triggerDetachedToolingPopulate(
   reportFile: string,
   lockDir: string,
 ): void {
-  if (!acquireToolingAdvisoryLock(repoRoot, lockDir)) return;
-  try {
-    const child = spawn(
-      process.execPath,
-      [fileURLToPath(import.meta.url), DETACHED_TOOLING_POPULATE_FLAG, repoRoot, target, reportFile, lockDir],
-      { cwd: repoRoot, env, detached: true, stdio: 'ignore' },
-    );
-    child.unref();
-  } catch {
-    // Spawn itself failed; release the lock we just acquired instead of
-    // leaking it, so a later session can try again.
-    try {
-      rmdirSync(join(repoRoot, lockDir));
-    } catch {
-      /* ignore */
-    }
-  }
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(import.meta.url), DETACHED_TOOLING_POPULATE_FLAG, repoRoot, target, reportFile, lockDir],
+    { cwd: repoRoot, env, detached: true, stdio: 'ignore' },
+  );
+  child.unref();
 }
 
 /**
  * 7. `tooling_update_advisory_context`. The fresh-cache render path (the
- * steady-state case) and the `REPO_HARNESS_TOOLING_ADVISORY_SYNC=1` path are
- * both ported with full fidelity. The DEFAULT stale-cache path now also
+ * steady-state case) and the `REPO_HARNESS_TOOLING_ADVISORY_SYNC=1` path require
+ * startup scan authorization. The authorized stale-cache path also
  * triggers a detached background populate (see `triggerDetachedToolingPopulate`)
  * restoring bash's own cross-session TTL refresh cycle; either way it
  * contributes ZERO content to the *triggering* session's own stdout, exactly
  * like bash's backgrounded subshell.
  */
-function toolingUpdateAdvisoryContext(repoRoot: string, env: NodeJS.ProcessEnv, nowMs: number): string | null {
+function toolingUpdateAdvisoryContext(repoRoot: string, env: NodeJS.ProcessEnv, nowMs: number): ToolingUpdateAdvisory | null {
+  // setup check runs the doctor security scan and probes host configuration.
+  // Gate both sync/async refresh and cached advice before any provider effects.
+  if (authorizedSessionSecurityHome(env) === null) return null;
   if (!fileExists(repoRoot, '.ai/harness/workflow-contract.json')) return null;
   if (env.REPO_HARNESS_TOOLING_ADVISORY === '0') return null;
 
@@ -1287,9 +1143,7 @@ function toolingUpdateAdvisoryContext(repoRoot: string, env: NodeJS.ProcessEnv, 
 
   if (toolingUpdateCacheIsFresh(repoRoot, reportFile, env, nowMs)) {
     if (toolingUpdateReportWasRendered(repoRoot, reportFile, markerFile)) return null;
-    const content = renderToolingUpdateContext(repoRoot, reportFile);
-    toolingUpdateMarkReportRendered(repoRoot, reportFile, markerFile);
-    return content;
+    return renderToolingUpdateAdvisory(repoRoot, reportFile, markerFile);
   }
 
   mkdirSync(join(repoRoot, TOOLING_ADVISORY_STATE_DIR), { recursive: true });
@@ -1319,11 +1173,11 @@ function appendBlock(context: string, block: string | null): string {
  * bash's pervasive `|| true` fail-open style: one section's bug must never
  * take down the rest of SessionStart).
  */
-function safely(
+function safely<T>(
   providerId: SessionContextProviderId,
   observeDiagnostic: ((diagnostic: SessionContextProviderDiagnostic) => void) | undefined,
-  fn: () => string | null,
-): string | null {
+  fn: () => T | null,
+): T | null {
   try {
     return fn();
   } catch (error) {
@@ -1339,12 +1193,12 @@ function safely(
  * separator, then the whole thing prefixed with the input-priority block IFF
  * non-empty.
  */
-export function sessionStartMainContent(
+function sessionStartMain(
   collector: SessionContextCollector,
   env: NodeJS.ProcessEnv,
   nowMs: number,
   observeDiagnostic?: (diagnostic: SessionContextProviderDiagnostic) => void,
-): string | null {
+): { readonly content: string; readonly tooling: ToolingUpdateAdvisory | null } | null {
   const repoRoot = collector.getRepoRoot();
 
   // Cold-path housekeeping, matching the base script's own call order
@@ -1356,15 +1210,25 @@ export function sessionStartMainContent(
   context = appendBlock(context, safely('pending-plan-capture', observeDiagnostic, () => pendingPlanCaptureContext(repoRoot, collector, nowMs)));
   context = appendBlock(context, safely('current-status-snapshot', observeDiagnostic, () => currentStatusSnapshotContext(repoRoot)));
   context = appendBlock(context, safely('active-sprint', observeDiagnostic, () => activeSprintContext(repoRoot)));
-  context = appendBlock(context, safely('tooling-update-advisory', observeDiagnostic, () => toolingUpdateAdvisoryContext(repoRoot, env, nowMs)));
+  const tooling = safely('tooling-update-advisory', observeDiagnostic, () => toolingUpdateAdvisoryContext(repoRoot, env, nowMs));
+  context = appendBlock(context, tooling?.content ?? null);
 
   if (!context) return null;
-  return `${INPUT_PRIORITY_CONTEXT}\n${context}`;
+  return { content: `${INPUT_PRIORITY_CONTEXT}\n${context}`, tooling };
 }
 
-/** Headers that flip the old script-loop branch's `actionable` bit for this id (mirrors runtime.ts's retired `scriptActionable` regex verbatim). */
+export function sessionStartMainContent(
+  collector: SessionContextCollector,
+  env: NodeJS.ProcessEnv,
+  nowMs: number,
+  observeDiagnostic?: (diagnostic: SessionContextProviderDiagnostic) => void,
+): string | null {
+  return sessionStartMain(collector, env, nowMs, observeDiagnostic)?.content ?? null;
+}
+
+/** Headers that flip the old script-loop branch's `actionable` bit for this id. The tooling advisory names an agent update action, so it counts too. */
 const SESSION_START_ACTIONABLE_HEADERS =
-  /^# (Pending Plan Capture|Capability Context Queue|Architecture Queue|Architecture Model Guidance|Active Sprint)/m;
+  /^# (Pending Plan Capture|Active Sprint|Tooling Update Advisory)/m;
 
 export function sessionStartMainSection(
   collector: SessionContextCollector,
@@ -1372,15 +1236,16 @@ export function sessionStartMainSection(
   nowMs: number,
   observeDiagnostic?: (diagnostic: SessionContextProviderDiagnostic) => void,
 ): SessionContextSection | null {
-  const content = sessionStartMainContent(collector, env, nowMs, observeDiagnostic);
-  if (!content) return null;
+  const main = sessionStartMain(collector, env, nowMs, observeDiagnostic);
+  if (!main) return null;
   return {
     id: 'session-start-context.sh',
     priority: 5,
-    content,
+    content: main.content,
     mandatory: false,
-    actionable: SESSION_START_ACTIONABLE_HEADERS.test(content),
+    actionable: SESSION_START_ACTIONABLE_HEADERS.test(main.content),
     reference: 'repo-harness state resolve --json',
+    ...(main.tooling ? { onDelivered: main.tooling.markDelivered } : {}),
   };
 }
 

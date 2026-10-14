@@ -1,12 +1,12 @@
 # Refactor Program
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-refactor-program" sourceDigest="sha256:e62d682d1acc2005b21ec95c10b7d564f58d7974b9190f8bd2352ae2f89574b9" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:281710e8acc1b2e7fa7a7e0521833566e98430f128f36147674832cef046126d" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-refactor-program" sourceDigest="sha256:79b9ef0aca4830ed612d94936465fa9b42f0a4eb5f44accec52b3bbd246a4ad3" rendererVersion="archcontext.docs-renderer/v5" outputDigest="sha256:13c281a005bf4975b21b976d76067f39b8d697c4b8a0b5c846b732de4143000d" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.runtime-harness.refactor-program`(kind `capability`)
 > **Matched Prefixes**:`src/core/refactor/**`、`src/effects/refactor/**`、`src/cli/commands/refactor.ts`
 > **Local Contracts**:`AGENTS.md`、`CLAUDE.md`
 > **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與源碼度量投影生成,手改會在下次投影被覆蓋。本文檔不記錄出處;本次投影所驗證的 commit 見 `docs/architecture/.projection-manifest.json`。
 
-Orchestrates ArchContext-backed refactor discovery, accountable proposal authoring, conservative workflow routing, execution evidence, and post-merge resolution without duplicating structural authority.
+Shows measured ArchContext refactor suggestions with their evidence and records the user decision; it never executes a refactor.
 
 ## 1. P1:能力架構地圖
 
@@ -14,40 +14,32 @@ Orchestrates ArchContext-backed refactor discovery, accountable proposal authori
 
 ```mermaid
 flowchart LR
-  p1_capability_runtime_harness_refactor_program_75614af4["Refactor Program"]:::component
+  p1_capability_runtime_harness_refactor_program_75614af4["Refactor Recommendations"]:::component
   p1_component_refactor_program_archctx_provider_66030fac["Refactor ArchContext Provider Boundary"]:::component
-  p1_component_refactor_program_lifecycle_2ce6d5e2["Refactor Program Lifecycle Plane"]:::component
-  p1_capability_runtime_harness_refactor_program_75614af4 -->|"Run proposal-free discovery and proposal-bound assessment through the exact package-local ArchContext contract"| p1_component_refactor_program_archctx_provider_66030fac
-  p1_capability_runtime_harness_refactor_program_75614af4 -->|"Execute authorized program transitions and publish only exact lifecycle evidence through the capability-owned effect plane"| p1_component_refactor_program_lifecycle_2ce6d5e2
+  p1_capability_runtime_harness_refactor_program_75614af4 -->|"Scan for structural observations and record user decisions through the pinned package-local ArchContext CLI"| p1_component_refactor_program_archctx_provider_66030fac
   classDef actor fill:#111827,color:#ffffff,stroke:#f9fafb,stroke-width:2px
   classDef component fill:#075985,color:#ffffff,stroke:#bae6fd,stroke-width:2px
   classDef datastore fill:#3f6212,color:#ffffff,stroke:#d9f99d,stroke-width:2px
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:73e4995f7ad0fbe27bda040c8e7307891a8407b81069c37844a98b1157da846d`).
-- Semantic nodes: `3`; declared relations: `2`.
+- Proof: `proven` (`sha256:af8597794113e9dd3284c6f4a7f390912ac84a60dd44b32adf7c3aab8810ab9a`).
+- Semantic nodes: `2`; declared relations: `1`.
 
 ### 1.2 模組職責表
 
 | 宣告入口 | 錨點 | 職責 |
 | --- | --- | --- |
-| `entrypoint.refactor-program.discover` | `src/effects/refactor/discovery-authoring.ts#discoverRefactorCandidates` | `sink.refactor-program.provider-scan` → `src/effects/refactor/archctx-provider.ts#runRefactorScan` |
-| `entrypoint.refactor-program.discover` | `src/effects/refactor/discovery-authoring.ts#assessRefactorProposal` | `sink.refactor-program.proposal-assessment` → `src/effects/refactor/archctx-provider.ts#runRefactorScan` |
-| `entrypoint.refactor-program.lifecycle` | `src/cli/commands/refactor.ts#runRefactorStart` | `sink.refactor-program.create` → `src/effects/refactor/program-store.ts#createRefactorProgram` |
-| `entrypoint.refactor-program.lifecycle` | `src/cli/commands/refactor.ts#runRefactorStatus` | `sink.refactor-program.status` → `src/effects/refactor/program-store.ts#readRefactorProgramStatus` |
-| `entrypoint.refactor-program.lifecycle` | `src/cli/commands/refactor.ts#runRefactorStop` | `sink.refactor-program.stop` → `src/effects/refactor/program-store.ts#appendRefactorProgramEvent` |
-| `entrypoint.refactor-program.lifecycle` | `src/cli/commands/refactor.ts#runRefactorMaterialize` | `sink.refactor-program.materialize` → `src/effects/refactor/materialization.ts#materializeRefactorProgram` |
-| `entrypoint.refactor-program.lifecycle` | `src/cli/commands/refactor.ts#runRefactorArchitectureRequest` | `sink.refactor-program.architecture-intervention` → `src/effects/refactor/architecture-intervention.ts#prepareRefactorArchitectureIntervention` |
-| `entrypoint.refactor-program.lifecycle` | `src/cli/commands/refactor.ts#runRefactorCandidateVerify` | `sink.refactor-program.candidate-verification` → `src/effects/refactor/candidate-verification.ts#verifyRefactorCandidate` |
-| `entrypoint.refactor-program.lifecycle` | `src/cli/commands/refactor.ts#runRefactorBindExecution` | `sink.refactor-program.execution-binding` → `src/effects/refactor/execution-binding-store.ts#appendRefactorExecutionBinding` |
-| `entrypoint.refactor-program.lifecycle` | `src/cli/commands/refactor.ts#runRefactorPostMerge` | `sink.refactor-program.post-merge-resolution` → `src/effects/refactor/post-merge-resolution.ts#resolveRefactorPostMerge` |
-| `entrypoint.refactor-program.lifecycle` | `src/cli/commands/refactor.ts#runRefactorBoard` | `sink.refactor-program.board-projection` → `src/effects/refactor/post-merge-resolution.ts#rebuildRefactorBoard` |
-| `entrypoint.refactor-program.lifecycle` | `src/cli/commands/refactor.ts#runRefactorActivationPromote` | `sink.refactor-program.activation-ledger` → `src/effects/refactor/activation-store.ts#advanceRefactorActivation` |
+| `entrypoint.refactor-program.observe` | `src/effects/refactor/recommendations.ts#discoverRefactorRecommendations` | `sink.refactor-program.provider-scan` → `src/effects/refactor/archctx-provider.ts#runRefactorScan` |
+| `entrypoint.refactor-program.decide` | `src/cli/commands/refactor.ts#decideRefactorRecommendation` | `sink.refactor-program.decision` → `src/effects/refactor/archctx-provider.ts#decideRecommendation` |
+
+組件入口:
+
+- 組件均未宣告 `source.entrypoints`。
 
 ### 1.3 規模信號
 
-- 規模量級:`20–50` 個文件 / `2000–5000` 行
+- 規模量級:`2–5` 個文件 / `200–500` 行
 - 匹配前綴:`src/core/refactor/**`、`src/effects/refactor/**`、`src/cli/commands/refactor.ts`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
@@ -55,30 +47,42 @@ flowchart LR
 
 出向關係:
 
-- `calls` → `component.refactor-program.archctx-provider` — Run proposal-free discovery and proposal-bound assessment through the exact package-local ArchContext contract
-- `calls` → `component.refactor-program.lifecycle` — Execute authorized program transitions and publish only exact lifecycle evidence through the capability-owned effect plane
+- `calls` → `component.refactor-program.archctx-provider` — Scan for structural observations and record user decisions through the pinned package-local ArchContext CLI
+- `calls` → `capability.runtime-harness.mcp-sidecar` — Resolve the canonical repository path through the repo registry
 
 入向關係:
 
-- 無。
+- `calls` ← `component.global-runtime-reconciliation.cli-root` — Register the refactor command
+
+組件出向關係:
+
+- `component.refactor-program.archctx-provider`:
+  - `calls` → `capability.runtime-harness.evidence-ledger` — Canonicalize refactor provider records
+  - `calls` → `capability.runtime-harness.global-runtime-reconciliation` — Run the pinned package-local archctx CLI through the shared architecture provider
+
+### 1.5 組件結構
+
+| 組件 | 名稱 | 規模量級 | 宣告入口 |
+| --- | --- | --- | --- |
+| `component.refactor-program.archctx-provider` | Refactor ArchContext Provider Boundary | `1–2` 個文件 / `50–100` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:73e4995f7ad0fbe27bda040c8e7307891a8407b81069c37844a98b1157da846d`); selectors `8/8`.
+> **Proof**: `proven` (`sha256:af8597794113e9dd3284c6f4a7f390912ac84a60dd44b32adf7c3aab8810ab9a`); selectors `2/2`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
 sequenceDiagram
   autonumber
-  participant p2_refactor_program_a8b792d5 as Refactor Program
+  participant p2_refactor_program_a8b792d5 as Refactor Recommendations
   participant p2_archctx_provider_3b536550 as Refactor ArchContext Provider Boundary
-  p2_refactor_program_a8b792d5->>p2_archctx_provider_3b536550: Run an exact proposal-free scan and accept only structural observations with null proposal digest and scale
-  alt An accountable proposal is assessed by the same provider boundary
-  p2_refactor_program_a8b792d5->>p2_archctx_provider_3b536550: Validate file scope and rerun the original request with the authored proposal
-    Note over p2_refactor_program_a8b792d5: Return the provider-owned non-null scale bound to the proposal digest
-  else Invalid author， scope， provider handshake， or scan transition fails closed
-  p2_refactor_program_a8b792d5->>p2_archctx_provider_3b536550: Preserve zero local structural output when the provider contract is not exact
-    Note over p2_refactor_program_a8b792d5: Return one typed error without route， materialization， or recommendation-state mutation
+  p2_refactor_program_a8b792d5->>p2_archctx_provider_3b536550: Record the scan when needed#44; then send accept#44; defer or reject with the user reason
+  alt ArchContext stores the decision and later scans hide the suggestion
+  p2_refactor_program_a8b792d5->>p2_archctx_provider_3b536550: Return the new lifecycle status
+    Note over p2_refactor_program_a8b792d5: Report the recorded status
+  else An unknown suggestion or a provider error records nothing
+  p2_refactor_program_a8b792d5->>p2_archctx_provider_3b536550: Return the provider error code
+    Note over p2_refactor_program_a8b792d5: Exit with the error
   end
 ```
 
@@ -86,57 +90,80 @@ sequenceDiagram
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
 sequenceDiagram
   autonumber
-  participant p2_operator_97b83da8 as Refactor Program
-  participant p2_program_store_c54d7d72 as Refactor Program Lifecycle Plane
-  p2_operator_97b83da8->>p2_program_store_c54d7d72: Bind an account-level ProgramAuthorization to the exact protected target revision and append the created event
-  alt Rebuild current state from the immutable event chain
-  p2_operator_97b83da8->>p2_program_store_c54d7d72: Validate the program and every event before comparing the cached projection
-    Note over p2_operator_97b83da8: Return the deterministic current projection and durable events
-  else Publish one exact Refactor Program execution graph atomically
-  p2_operator_97b83da8->>p2_program_store_c54d7d72: Bind recommendations to contract-gated Work Packages and publish Program， Sprint， Plans， Work Graph， acceptance policies， and rollback boundaries in one Git CAS
-    Note over p2_operator_97b83da8: Return the materialized commit and planning-state receipt
-  else Route architecture-scale work through the existing human projection acceptance authority
-  p2_operator_97b83da8->>p2_program_store_c54d7d72: Bind the accepted ArchContext target delta and stop at architecture_approval_required
-    Note over p2_operator_97b83da8: Use the returned digest-derived approval reference with architecture-projection accept before materialization
-  else Verify an exact candidate through all four gates in fixed order
-  p2_operator_97b83da8->>p2_program_store_c54d7d72: Run Contract， Cutover Closure， ArchContext candidate preverify， then AcceptanceReceipt and persist an immutable receipt
-    Note over p2_operator_97b83da8: Return exact evidence references without projecting a final architecture disposition
-  else Append an explicit stopped terminal transition
-  p2_operator_97b83da8->>p2_program_store_c54d7d72: Recheck grant， protected target policy， target movement， and expected current digest before append
-    Note over p2_program_store_c54d7d72: Persist stopped without claiming completed
-  else Off mode， shadow-forbidden work， stale authority， moved target， or conflicting replay fails closed
-  p2_operator_97b83da8->>p2_program_store_c54d7d72: Reject the requested mutation before publishing a new durable event
-    Note over p2_operator_97b83da8: Observe a non-zero mutation failure with no synthesized state
+  participant p2_refactor_program_a8b792d5 as Refactor Recommendations
+  participant p2_archctx_provider_3b536550 as Refactor ArchContext Provider Boundary
+  p2_refactor_program_a8b792d5->>p2_archctx_provider_3b536550: Scan the repository for structural observations and read their lifecycle records
+  alt Open suggestions are shown with their metrics and module statistics
+  p2_refactor_program_a8b792d5->>p2_archctx_provider_3b536550: Keep observations without a recorded user decision
+    Note over p2_refactor_program_a8b792d5: Return evidence-backed suggestions for the user to decide
+  else A missing model#44; provider or complete code facts produces no suggestion
+  p2_refactor_program_a8b792d5->>p2_archctx_provider_3b536550: Report the provider failure or the incomplete code facts
+    Note over p2_refactor_program_a8b792d5: Return an unavailable or proof_required status
   end
 ```
 <!-- END ARCHCONTEXT:generated target="projection_target.entity.capability-runtime-harness-refactor-program" -->
 ## 3. P3:設計決策與不變量
 
-- No local module statistics, dependency analysis, cycle detection, refactor scoring, or scale inference.
-- No copied recommendation status or locally synthesized resolution.
-- Materialization re-reads ArchContext lifecycle authority and accepts only exact `recommendationId` + fingerprint pairs whose current status is `accepted`, and binds Program scale, affected nodes, assessment, proposal, baseline and major-change reasons to the complete recommendation payload.
-- Every generated Work Package ID must be present in the account-level ProgramAuthorization allowlist.
-- Every mutating program transition is append-only, idempotent by exact event identity, and rejected on conflicting replay.
-- Candidate worktrees cannot relax the target revision's policy or authorization.
-- Architecture-scale work always crosses the existing human architecture-acceptance boundary.
-- An architecture approval reference is derived from the complete target delta; the existing projection receipt must bind that reference, the exact affected nodes, and the exact provider major-change reasons.
-- Projection-owned architecture file changes join the same Git CAS as the Refactor Program artifacts; the refactor lane never renders architecture docs itself.
-- Workflow route is a pure three-input projection of provider-owned scale, scale reason codes, and major-change reasons; a supplied route is accepted only when it equals that projection.
-- Materialization never creates a Lease: it writes only Program bindings, canonical Sprint tasks, Work Packages, Plans, and their exact acceptance and rollback references.
-- One affected architecture node maps to one Work Package, one rollback boundary, and one repo-scoped concurrency key; dependency topology must validate before the Git CAS.
-- A failed CAS leaves the append-only program at `materializing`; replay recognizes only the exact authorized child commit and finishes the `planning` transition idempotently. Execution and verification accept only that durable materialization revision while the grant stays pinned to its original baseline.
-- Program bindings may fan one exact recommendation out to multiple Work Packages with a consistent fingerprint/alias and distinct canonical task references. Candidate and execution receipts select that recommendation/task pair.
-- Completion requires Cutover Closure plus exact post-merge ArchContext measurement. Multi-task candidate measurements may be partially resolved or unchanged while each task closes its own cutover; stale/regressed candidates fail, and single-task candidates still require resolved.
-- Final-main measurement groups every mapped task in Program order and resolves each recommendation once. Board cards expose Work Package/task reference identity and require every mapped execution receipt before projecting recommendation resolution.
-- Candidate verification preserves the fixed four-gate order. A closure failure prevents provider and acceptance calls; an unavailable Stage 2 provider is recorded explicitly and never weakens Contract, closure, or AcceptanceReceipt gates.
-- Execution bindings contain only immutable references. The PR head must equal the verified candidate; the shared merge predicate proves ancestry or an absorbed squash. Candidate verification is a separate receipt because PR and merge identities do not exist at preverify time; no nullable or lifecycle fields represent a partial binding.
-- Program and execution bindings identify recommendations by ID plus fingerprint. Provider resolution evidence has a different opaque recommendation digest and joins by unique recommendation ID after exact recommendation readback. Duplicate authorities fail closed.
-- Merge observation alone is `merged_pending_measurement`. A card resolves only when provider evidence binds the exact final-main commit and provider lifecycle readback is `resolved`; every recorded merge must be an ancestor of that final main. A persisted measurement retries an interrupted provider lifecycle write, while stale evidence requires reconciliation and all other non-resolved dispositions require follow-up.
-- The public discovery selection binds exact recommendation ID and fingerprint. Git supplies regular-file paths from the scan HEAD to the bounded author; upstream owns the structural interpretation. Board writes reject symlink ancestors.
-- Discovery re-reads ArchContext lifecycle state and excludes exact resolved or superseded recommendation identities before assigning candidate aliases.
-- Runtime policy is an intent ceiling, not activation evidence: shadow requires the shadow rung, active execution requires `active_module`, and cross-module materialization additionally requires `active_cross_module`.
-- Activation events are append-only, advance exactly one rung, and bind the fixed canary receipt subset to the same repository and exact target revision. Architecture intervention retains its independent human approval at every rung.
+### 3.1 必须保持的不变量
+
+1. **ArchContext 是结构观测的唯一权威。** repo-harness 不计算模块统计、依赖、环、重构评分或规模。建议的 id、生命周期状态和度量都来自 `archctx refactor scan` 和 `book recommendations`（`src/effects/refactor/archctx-provider.ts:28-37`）。
+2. **只展示同一次扫描的证据。** 每条建议带上产生它的观测度量和受影响模块的统计（`recommendations.ts:70-91`）。repo-harness 不合成其他内容。
+3. **有决定的建议不再显示。** 状态为 accepted、rejected、deferred、waived、resolved、superseded、expired 的建议被过滤（`recommendations.ts:52`、`:63`）。repo-harness 不保存投递账本、冷却时间或本地建议状态。
+4. **证据不完整时不给建议。** code facts 不完整或被截断时返回 `proof_required`（`recommendations.ts:103-105`）。任何文件有多个归属 capability 时也返回 `proof_required`，因为模块统计会重复计数这些文件（`recommendations.ts:106-110`）。模型未初始化时返回 `unavailable`（`:100`）。
+5. **只记录用户决定，从不执行重构。** `refactor decide` 在建议尚未记录时先记录扫描，再把 accept、defer 或 reject 连同理由交给 ArchContext（`src/cli/commands/refactor.ts:33-40`）。接受的建议走普通的 plan 和 PR 流程。
+6. **建议是按需证据，不是推送。** 没有 hook 扫描建议。Bot 调用 `repo-harness refactor recommendations --json` 读取证据，再决定是否调度工作（PR #617；`assets/skill-commands/repo-harness-check/references/architecture-evidence.md`）。
+7. **包内 archctx 先过版本检查。** 每个仓库根第一次调用时检查 `capabilities --json` 的精确版本（`archctx-provider.ts:17-20`）。provider 错误统一转成 `refactor_provider_unavailable`（`:24`）。
+
+### 3.2 关键权衡
+
+| 决策 | 权衡 |
+| --- | --- |
+| 删除 Refactor Program 执行栈（PR #617） | 没有 skill 或 MCP 工具使用它，Stop 也只打印 `recommended: undefined`。删除后本 capability 只剩 4 个文件、约 285 行。代价是接受的建议要由 Bot 或人重新写成 plan。 |
+| 多归属文件存在时一律 `proof_required` | 不会给出基于重复计数的建议。代价是本仓库目前有 45 个多归属文件，所以 `refactor recommendations` 在本仓库总是返回 `proof_required`，直到 arch-context#296 和 resolver 改动完成。 |
+| `decide` 每次重新扫描 | 决定总是针对当前扫描里存在的建议，未知 id 直接报错（`refactor.ts:36`）。代价是每次决定都付一次完整扫描（provider 超时 120 秒，`archctx-provider.ts:21`）。 |
+| CLI 退出码区分证据状态 | `unavailable` 和 `proof_required` 退出码为 1（`refactor.ts:56`），Bot 可以不解析 JSON 就知道证据不可用。代价是"没有建议"与"无法给建议"在退出码层面不同，调用方必须区分。 |
+
+### 3.3 组件与关系（2026-10-11）
+
+| 节点 | footprint | 说明 |
+| --- | --- | --- |
+| `component.refactor-program.archctx-provider` | `src/effects/refactor/archctx-provider.ts` | 运行 scan、读取建议记录、记录扫描、提交决定 |
+| capability 自身 | `src/core/refactor/**`、`src/effects/refactor/recommendations.ts`、`src/cli/commands/refactor.ts` | 证据整理、proof 判定、CLI |
+
+对外关系：
+
+- archctx-provider → `global-runtime-reconciliation`：调用 `runPackageLocalArchctxJson`（`archctx-provider.ts:9`、`:21`），并使用 `assertArchctxVersion`（`:2`）。
+- capability → `mcp-sidecar`：`refactor.ts` 用 `canonicalRepoPath` 解析仓库根（`refactor.ts:2`）。
+
+### 3.4 开放问题
+
+- `archctx-provider.ts:4` 引用 `src/core/evidence/canonical-json.ts`。该文件归 `evidence-ledger`。集成步骤声明了 archctx-provider → evidence-ledger。
 
 ## Verification
 
-Run the root required checks and the focused Refactor Program tests recorded in the capability node.
+Run the root required checks and the focused tests recorded in the capability node.
+
+## 4. 历史决策记录（append-only）
+
+### 执行栈退役，只保留证据和决定（2026-10-11，PR #617）
+
+- 删除事件链状态机、授权 grant、Sprint 与 Work Package 物化、激活 canary、Codex shadow author、候选验证、执行绑定和合并后解决，以及 81 个测试。
+- `refactor recommendations` 显示建议和同一次扫描的度量。`refactor decide <id> accept|defer|reject --reason` 记录决定。
+- Stop 不再扫描建议，全局 `refactor_recommendations` 设置被删除。证据由 Bot 按需读取。
+- 恢复多归属文件的 proof 门：`multiplyOwnedFileCount > 0` 时返回 `proof_required`。
+
+### 旧版 P3 原文（2026-10-11 之前，逐字保留）
+
+旧版最后一条与 PR #617 的最终状态冲突：Stop 已不再扫描建议，所以"Stop 时静默"不再适用。
+
+> - repo-harness has no local module statistics, dependency analysis, cycle detection, refactor scoring or scale inference. ArchContext owns structural observations, recommendation identity and lifecycle status.
+> - A suggestion is shown with the evidence of the scan that produced it: the observation metrics and the statistics of each affected module. Nothing else is synthesized.
+> - repo-harness keeps no delivery ledger, cooldown or local recommendation state. A suggestion with a recorded decision (accepted, rejected, deferred, waived, resolved, superseded, expired) is not shown again.
+> - `decide` records the scan in ArchContext only when the suggestion is not yet recorded, then sends the decision with the user's reason.
+> - repo-harness never executes a refactor. An accepted suggestion goes through the normal plan and pull request workflow. The previous Refactor Program (state machine, materialization, activation canaries, execution binding, post-merge resolution) was deleted on 2026-10-10.
+> - An unavailable provider is silent at Stop, so repositories without an architecture model see no noise. Incomplete code facts print `proof_required` with the `codegraph init` remedy.
+
+## Optimization Backlog
+
+- capability 名称仍是 "Refactor Recommendations"，id 仍是 `refactor-program`。id 是持久数据键，按用户决定不改名。文档和 Bot 引用时需要说明两者对应。
+- `refactor recommendations` 在本仓库被多归属文件阻塞（§3.2）。arch-context#296 完成并收窄 umbrella include 后，用本命令验证 proof 门是否放开。

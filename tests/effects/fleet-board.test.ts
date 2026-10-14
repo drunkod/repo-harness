@@ -117,9 +117,7 @@ function createReviewingProviderFixture(
     const receipt = buildPublicationReceipt({
       repo_id: repoId, task_id: taskId, task_revision: taskRevision, claim_id: claimId, generation: 1,
       target_ref: 'main', base_sha: base, branch: 'codex/fleet-provider', head_sha: head, tree_sha: tree,
-      review_subject_sha256: `sha256:${'1'.repeat(64)}`,
-      verification_evidence_sha256: `sha256:${'2'.repeat(64)}`,
-      merge_seal_sha256: `sha256:${'3'.repeat(64)}`,
+      candidate_diff_fingerprint: `sha256:${'1'.repeat(64)}`,
       provider: 'github', provider_repo_id: 'R_fleet_provider', pr_number: index + 1,
       pr_url: `https://example.invalid/pr/${index + 1}`, created_at: '2026-08-23T00:00:00.000Z',
     });
@@ -243,7 +241,8 @@ describe('fleet board collector', () => {
       })}\n`);
       const registryBefore = readFileSync(join(home, 'registered-repos.json'), 'utf8');
       const statusBefore = execFileSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8' });
-      const result = await collectFleetBoard({ env: { ...process.env, REPO_HARNESS_HOME: home }, timeout_ms: 1_000 });
+      // Real Git and readiness reads share process startup with the file pool.
+      const result = await collectFleetBoard({ env: { ...process.env, REPO_HARNESS_HOME: home }, timeout_ms: 15_000 });
       expect(result.repositories[0]).toMatchObject({ repository_id: repositoryId, status: 'ok' });
       expect(result.repositories[0]?.cards).toHaveLength(1);
       // The label is the digest's own preimage: the same sprint row cell the
@@ -265,7 +264,8 @@ describe('fleet board collector', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  }, 10_000);
+  // The 15-second collector bound needs setup and assertion time as well.
+  }, 30_000);
 
   test('bounds ten independent repository reads and isolates the damaged tenth row', async () => {
     const repos = Array.from({ length: 10 }, (_, index) => repo(index));

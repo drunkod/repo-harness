@@ -80,10 +80,8 @@ describe("prepare-handoff helper integration", () => {
       expect(handoff).toContain("**Reason**: manual-checkpoint");
       expect(handoff).toContain("Plan: plans/plan-20260327-2200-alpha.md");
       expect(handoff).toContain("Contract: tasks/contracts/alpha.contract.md");
-      expect(handoff).toContain("Checks: .ai/harness/checks/latest.json");
-      // EPC-07: the old "Latest trace/checks file:" line re-derived evidence
-      // directly from checks/latest.json content (a single-hop violation this
-      // package fixes); the recovery materializer's "## Evidence" section now
+      expect(handoff).not.toContain(".ai/harness/checks/latest.json");
+      // The recovery materializer's "## Evidence" section
       // sources only from the checkpoint, rendering a typed minimal state when
       // none is published yet (this fixture seeds no ledger/checkpoint).
       expect(handoff).toContain("- Checkpoint: (none published yet -- no ledger evidence recorded in this worktree)");
@@ -164,4 +162,18 @@ describe("prepare-handoff helper integration", () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+test('prepare-handoff fails closed when an explicit library is missing', () => {
+  const cwd = tmpWorkspace('helper-prepare-handoff-missing');
+  try {
+    const result = run('bash', [join(HELPER_DIR, 'prepare-handoff.sh'), '--status'], cwd, {
+      REPO_HARNESS_TARGET_REPO_ROOT: cwd,
+      REPO_HARNESS_WORKFLOW_STATE_LIB: join(cwd, 'missing-library.sh'),
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('workflow-state library is unavailable');
+    expect(result.stdout).not.toContain('Active plan: (none)');
+    expect(existsSync(join(cwd, '.ai/harness/handoff/current.md'))).toBe(false);
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
 });

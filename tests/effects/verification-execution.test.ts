@@ -4,13 +4,17 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, wr
 import { tmpdir } from "os";
 import { join } from "path";
 
+import legacyHashedCheckFixture from "../fixtures/evidence/legacy-hashed-check-id.json";
 import type { JsonValue } from "../../src/core/evidence/types";
+import { redactPayloadStrings } from "../../src/core/evidence/redaction";
+import { appendEvidenceEvent, readAcceptedEvents } from "../../src/effects/evidence/event-log";
 import { buildEvidenceEvent } from "../../src/effects/evidence/event-writer";
 import {
   captureGitVirtualTreeSnapshot,
   evaluateVerificationContract,
   executeVerificationContract,
   validateMaterializedVerificationExecutionReport,
+  verificationOutcomeProvenance,
 } from "../../src/effects/evidence/verification-execution";
 
 const CLI = join(import.meta.dir, "..", "..", "scripts", "verification-plan.ts");
@@ -62,9 +66,10 @@ function setupRepo(name: string): { readonly root: string; readonly contractPath
   writeFileSync(join(root, "source.txt"), "source\n");
   const contractPath = "tasks/contracts/fixture.contract.md";
   writeFileSync(join(root, contractPath), contract({ protocol: 1, checks: [commandCheck()] }));
+  mkdirSync(join(root, ".ai", "harness", "runs"), { recursive: true });
   git(root, "add", ".");
   git(root, "commit", "-q", "-m", "fixture");
-  return { root, contractPath, counterPath: join(root, "..", `${name}-counter-${Date.now()}.txt`) };
+  return { root, contractPath, counterPath: join(root, ".ai", "harness", "runs", "counter.txt") };
 }
 
 function withRepo(name: string, fn: (repoRoot: string, contractPath: string, counterPath: string) => void): void {
@@ -73,7 +78,6 @@ function withRepo(name: string, fn: (repoRoot: string, contractPath: string, cou
     fn(fixture.root, fixture.contractPath, fixture.counterPath);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
-    rmSync(fixture.counterPath, { force: true });
   }
 }
 
@@ -81,6 +85,7 @@ function projectReportThroughEvidenceWriter(
   repoRoot: string,
   report: ReturnType<typeof executeVerificationContract>,
 ): ReturnType<typeof executeVerificationContract> {
+  if (report.kind !== "verification_execution_report") throw new Error("fixture needs executed verification facts");
   const event = buildEvidenceEvent(repoRoot, {
     worktreeId: "verification-report-projection",
     eventType: "repository-integrity.result",
@@ -125,6 +130,91 @@ describe("Git virtual tree snapshot", () => {
 });
 
 describe("verification execution lifecycle", () => {
+  test("reads the unchanged e853649e hashed-id ledger and its real run record", () => {
+    const fixture = legacyHashedCheckFixture;
+    withRepo("verification-base-legacy-id", (repoRoot) => {
+      writeFileSync(join(repoRoot, fixture.contract_path), fixture.contract);
+      mkdirSync(join(repoRoot, ".ai/harness/evidence/events"), { recursive: true });
+      const ledger = join(repoRoot, ".ai/harness/evidence/events/log.jsonl");
+      writeFileSync(ledger, fixture.ledger);
+      writeFileSync(join(repoRoot, fixture.run_file), fixture.run_record);
+      const input = { repoRoot, contractPath: fixture.contract_path, report: fixture.report };
+      expect(readAcceptedEvents(repoRoot).accepted).toHaveLength(1);
+      expect(validateMaterializedVerificationExecutionReport(input).valid).toBe(true);
+      expect(verificationOutcomeProvenance(input, fixture.report.results[0].id).result.passed).toBe(true);
+      expect(readFileSync(ledger, "utf8")).toBe(fixture.ledger);
+      expect(readFileSync(join(repoRoot, fixture.run_file), "utf8")).toBe(fixture.run_record);
+      // Exact evaluation must reject this older runner's different toolchain.
+      expect(evaluateVerificationContract({ repoRoot, contractPath: fixture.contract_path }).passed).toBe(false);
+    });
+  }, 30_000);
+
+  test("reads a legacy hashed check id only when its immutable execution matches", () => {
+    withRepo("verification-legacy-id", (repoRoot, contractPath, counterPath) => {
+      const id = "package-test-packages-client-tests-requires-package-config-test-ts";
+      writeFileSync(join(repoRoot, contractPath), contract({
+        protocol: 1,
+        checks: [commandCheck({ id })],
+      }));
+      const env = { ...process.env, COUNTER_PATH: counterPath };
+      const executed = executeVerificationContract({ repoRoot, contractPath, env });
+      const event = readAcceptedEvents(repoRoot).accepted.find(item => item.event_type === "verification_execution.result")!;
+      const payload = event.payload as Record<string, JsonValue>;
+      expect(payload.check_id).toBe(id);
+      expect(executed.passed).toBe(true);
+
+      // e853649e used the same entropy pass without the check_id exemption.
+      // Keep the real run and all bindings. Rebuild only its ledger envelope.
+      const legacyId = (redactPayloadStrings({ id }, []) as { id: string }).id;
+      expect(legacyId).toBe("sha256:11909f483f62fb4a6e81e5f9fb21e6a4ec5a794af0f32bff1b4845e27f9e70a0");
+      const ledger = join(repoRoot, ".ai/harness/evidence/events/log.jsonl");
+      const genesis = readFileSync(ledger, "utf8").split("\n")[0]! + "\n";
+      const writeLegacy = (checkId: string, overrides: Record<string, JsonValue> = {}) => {
+        writeFileSync(ledger, genesis);
+        appendEvidenceEvent(repoRoot, {
+          worktreeId: event.worktree_id,
+          eventType: event.event_type,
+          producer: event.producer,
+          trustClass: event.trust_class,
+          correlationRunId: event.correlation_run_id,
+          subjectIdentity: event.subject_identity,
+          payload: { kind: "json", value: { ...payload, check_id: checkId, ...overrides } },
+        });
+      };
+      writeLegacy(legacyId);
+      const legacyBytes = readFileSync(ledger, "utf8");
+      const evaluated = evaluateVerificationContract({ repoRoot, contractPath, env });
+      expect(evaluated.status).toBe("passed");
+      expect(evaluated.passed).toBe(true);
+      expect(evaluated.results[0]!.id).toBe(id);
+      expect(evaluated.results[0]!.execution_id).toBe(executed.results[0]!.execution_id);
+      expect(validateMaterializedVerificationExecutionReport({ repoRoot, contractPath, report: evaluated, env }).valid).toBe(true);
+      expect(verificationOutcomeProvenance({ repoRoot, contractPath, report: evaluated, env }, id).result.passed).toBe(true);
+      expect(executeVerificationContract({ repoRoot, contractPath, env }).results[0]!.execution).toBe("reused");
+      expect(readFileSync(ledger, "utf8")).toBe(legacyBytes);
+      expect(readFileSync(counterPath, "utf8").trim().split("\n")).toHaveLength(1);
+
+      for (const [checkId, overrides] of [
+        [`${id}-different`, {}],
+        [`sha256:${"0".repeat(64)}`, {}],
+        [legacyId, { execution_id: "vx-mismatch" }],
+        [legacyId, { run_record_hash: `sha256:${"0".repeat(64)}` }],
+        [legacyId, { check_fingerprint: `sha256:${"0".repeat(64)}` }],
+        [legacyId, { toolchain_hash: `sha256:${"0".repeat(64)}` }],
+        [legacyId, { passed: false }],
+      ] as const) {
+        writeLegacy(checkId, overrides);
+        expect(evaluateVerificationContract({ repoRoot, contractPath, env }).passed).toBe(false);
+        expect(() => validateMaterializedVerificationExecutionReport({ repoRoot, contractPath, report: evaluated, env }))
+          .toThrow("not backed by immutable evidence");
+      }
+
+      writeLegacy(legacyId);
+      writeFileSync(join(repoRoot, "source.txt"), "changed\n");
+      expect(evaluateVerificationContract({ repoRoot, contractPath, env }).passed).toBe(false);
+    });
+  }, 30_000);
+
   test("an admitted long check id reuses one exact expensive execution", () => {
     withRepo("verification-long-id-reuse", (repoRoot, contractPath, counterPath) => {
       writeFileSync(join(repoRoot, contractPath), contract({
@@ -195,13 +285,65 @@ describe("verification execution lifecycle", () => {
     });
   }, 30_000);
 
-  test("an explicit empty executable plan evaluates as a bound vacuous pass", () => {
+  test("an empty executable plan is unavailable before snapshot and toolchain capture", () => {
     withRepo("verification-empty", (repoRoot, contractPath) => {
       writeFileSync(join(repoRoot, contractPath), contract({ protocol: 1, checks: [] }, "artifact-only contract"));
       const report = evaluateVerificationContract({ repoRoot, contractPath });
-      expect(report.status).toBe("passed");
+      expect(report.status).toBe("missing");
+      expect(report.passed).toBe(false);
       expect(report.results).toEqual([]);
-      expect(validateMaterializedVerificationExecutionReport({ repoRoot, contractPath, report }).valid).toBe(true);
+      expect(report.kind).toBe("verification_unavailable");
+      expect(() => validateMaterializedVerificationExecutionReport({ repoRoot, contractPath, report })).toThrow();
+      expect(executeVerificationContract({ repoRoot, contractPath, env: { PATH: "/missing" } })).toEqual(report);
+      expect(existsSync(join(repoRoot, ".ai/harness/evidence/events/log.jsonl"))).toBe(false);
+    });
+  });
+
+  test("missing plan returns typed missing but malformed and duplicate plans remain invalid", () => {
+    withRepo("verification-no-plan", (repoRoot, contractPath) => {
+      writeFileSync(join(repoRoot, contractPath), "# Contract\n");
+      const report = evaluateVerificationContract({ repoRoot, contractPath, env: { PATH: "/missing" } });
+      expect(report).toEqual({ kind: "verification_unavailable", status: "missing", passed: false, reason: "missing_plan", contract: contractPath, results: [] });
+      const reportFile = ".ai/harness/runs/no-plan.report.json";
+      expect(executeVerificationContract({ repoRoot, contractPath, reportFile })).toEqual(report);
+      expect(existsSync(join(repoRoot, reportFile))).toBe(false);
+      expect(existsSync(join(repoRoot, ".ai/harness/evidence/events/log.jsonl"))).toBe(false);
+      const evaluated = spawnSync("bun", [CLI, "evaluate", "--repo", repoRoot, "--contract", contractPath], { encoding: "utf8" });
+      expect(evaluated.status).toBe(1);
+      expect(JSON.parse(evaluated.stdout).reason).toBe("missing_plan");
+      const validate = spawnSync("bun", [CLI, "validate", "--repo", repoRoot, "--contract", contractPath], { encoding: "utf8" });
+      expect(validate.status).toBe(2);
+      writeFileSync(join(repoRoot, contractPath), "## Verification Plan\n\n" + String.fromCharCode(96).repeat(3) + "json\n{bad}\n" + String.fromCharCode(96).repeat(3) + "\n");
+      expect(() => evaluateVerificationContract({ repoRoot, contractPath })).toThrow("invalid JSON");
+      writeFileSync(join(repoRoot, contractPath), contract({ protocol: 1, checks: [] }) + contract({ protocol: 1, checks: [] }));
+      expect(() => evaluateVerificationContract({ repoRoot, contractPath })).toThrow("exactly one");
+    });
+  });
+
+  test("observed records cannot replace authoritative execution evidence", () => {
+    withRepo("verification-observed-not-authority", (repoRoot, contractPath, counterPath) => {
+      const env = { ...process.env, COUNTER_PATH: counterPath };
+      const report = executeVerificationContract({ repoRoot, contractPath, env });
+      const event = readAcceptedEvents(repoRoot).accepted.find(event => event.event_type === "verification_execution.result")!;
+      expect(event.trust_class).toBe("authoritative_machine");
+      const ledger = join(repoRoot, ".ai/harness/evidence/events/log.jsonl");
+      writeFileSync(ledger, readFileSync(ledger, "utf8").split("\n")[0]! + "\n");
+      appendEvidenceEvent(repoRoot, { worktreeId: event.worktree_id, eventType: event.event_type, producer: event.producer,
+        trustClass: "observed", correlationRunId: event.correlation_run_id, subjectIdentity: event.subject_identity,
+        payload: { kind: "json", value: event.payload! } });
+      expect(evaluateVerificationContract({ repoRoot, contractPath, env }).passed).toBe(false);
+      expect(() => validateMaterializedVerificationExecutionReport({ repoRoot, contractPath, report, env })).toThrow("immutable evidence");
+    });
+  });
+
+  test("old vacuous materialized passes refuse despite valid frozen tree and plan hashes", () => {
+    withRepo("verification-old-empty-report", (repoRoot, contractPath) => {
+      writeFileSync(join(repoRoot, contractPath), contract({ protocol: 1, checks: [] }));
+      const snapshot = captureGitVirtualTreeSnapshot(repoRoot);
+      expect(() => validateMaterializedVerificationExecutionReport({ repoRoot, contractPath, report: {
+        protocol: 1, kind: "verification_execution_report", status: "passed", passed: true,
+        target: { contract: contractPath, ...snapshot, plan_hash: "old-plan" }, results: [],
+      } })).toThrow("empty_plan");
     });
   });
 
@@ -313,6 +455,7 @@ describe("verification execution lifecycle", () => {
       const afterEmptyCommit = executeVerificationContract({ repoRoot, contractPath, env });
       expect(afterEmptyCommit.status).toBe("passed");
       expect(afterEmptyCommit.results[0]!.execution).toBe("reused");
+      if (first.kind !== "verification_execution_report" || afterEmptyCommit.kind !== "verification_execution_report") throw new Error("fixture requires non-empty execution");
       expect(afterEmptyCommit.target.head_commit).not.toBe(first.target.head_commit);
       expect(afterEmptyCommit.target.snapshot_hash).toBe(first.target.snapshot_hash);
       expect(validateMaterializedVerificationExecutionReport({ repoRoot, contractPath, report: afterEmptyCommit, env }).valid).toBe(true);
@@ -410,7 +553,7 @@ describe("verification execution lifecycle", () => {
         });
         expect(forcedFailure.status).toBe("failed");
         expect(forcedFailure.results[0]!.exit_code).toBe(7);
-        expect(evaluateVerificationContract({ repoRoot, contractPath, env }).status).toBe("missing");
+        expect(evaluateVerificationContract({ repoRoot, contractPath, env }).status).toBe("failed");
 
         const ordinary = executeVerificationContract({ repoRoot, contractPath, env });
         expect(ordinary.status).toBe("failed");
@@ -443,7 +586,7 @@ describe("verification execution lifecycle", () => {
         });
         expect(forcedTimeout.status).toBe("failed");
         expect(forcedTimeout.results[0]!.timed_out).toBe(true);
-        expect(evaluateVerificationContract({ repoRoot, contractPath, env }).status).toBe("missing");
+        expect(evaluateVerificationContract({ repoRoot, contractPath, env }).status).toBe("failed");
 
         const ordinary = executeVerificationContract({ repoRoot, contractPath, env });
         expect(ordinary.status).toBe("needs_verification_plan");
@@ -564,7 +707,7 @@ describe("verification execution lifecycle", () => {
       const report = executeVerificationContract({ repoRoot, contractPath, env });
       const projected = projectReportThroughEvidenceWriter(repoRoot, report);
 
-      expect(projected.results[0]!.id).not.toBe(LONG_CHECK_ID);
+      expect(projected.results[0]!.id).toBe(LONG_CHECK_ID);
       expect(validateMaterializedVerificationExecutionReport({ repoRoot, contractPath, report: projected, env }).valid).toBe(true);
       const tampered = {
         ...projected,
@@ -624,12 +767,12 @@ describe("verification execution lifecycle", () => {
       expect(validateMaterializedVerificationExecutionReport({ repoRoot, contractPath, contractText, report, env }).valid).toBe(true);
       const archivedHeader = contractText.replace("# Task Contract: fixture", "# Task Contract: archived-fixture");
       expect(validateMaterializedVerificationExecutionReport({
-        repoRoot,
-        contractPath,
-        contractText: archivedHeader,
-        report,
-        env: { ...env, COUNTER_PATH: `${counterPath}-changed-after-run` },
+        repoRoot, contractPath, contractText, report,
+        env: { ...env, COUNTER_PATH: counterPath + "-changed-after-run" },
       }).valid).toBe(true);
+      expect(() => validateMaterializedVerificationExecutionReport({
+        repoRoot, contractPath, contractText: archivedHeader, report, env,
+      })).toThrow("immutable evidence");
       expect(() => validateMaterializedVerificationExecutionReport({
         repoRoot,
         contractPath,
@@ -637,6 +780,24 @@ describe("verification execution lifecycle", () => {
         report,
         env,
       })).toThrow("plan hash");
+
+      // Historical proof uses the toolchain identity bound into the event.
+      // Only current validation needs the live toolchain.
+      const brokenBash = `${counterPath}-bash-broken`;
+      writeFileSync(brokenBash, "#!/bin/sh\nexit 9\n");
+      chmodSync(brokenBash, 0o755);
+      for (const [bash, error] of [
+        [`${counterPath}-bash-absent`, "toolchain executable is unavailable"],
+        [brokenBash, "toolchain version probe failed"],
+      ] as const) {
+        const unavailable = { ...env, REPO_HARNESS_BASH_BIN: bash };
+        expect(validateMaterializedVerificationExecutionReport({
+          repoRoot, contractPath, contractText, report, env: unavailable,
+        }).valid).toBe(true);
+        expect(() => validateMaterializedVerificationExecutionReport({
+          repoRoot, contractPath, contractText, report, env: unavailable, current: true,
+        })).toThrow(error);
+      }
     });
   }, 30_000);
 
@@ -677,8 +838,11 @@ describe("verification execution lifecycle", () => {
       const secondBash = `${counterPath}-bash-two`;
       const brokenBash = `${counterPath}-bash-broken`;
       try {
+        // Delay only version discovery past the old five-second bound.
         for (const path of [firstBash, secondBash]) {
-          writeFileSync(path, '#!/bin/sh\nexec /bin/bash "$@"\n');
+          writeFileSync(path, `#!/bin/sh
+${path === secondBash ? 'if [ "$1" = --version ]; then sleep 5.1; fi\n' : ''}exec /bin/bash "$@"
+`);
           chmodSync(path, 0o755);
         }
         writeFileSync(brokenBash, "#!/bin/sh\nexit 9\n");
@@ -706,7 +870,8 @@ describe("verification execution lifecycle", () => {
         rmSync(brokenBash, { force: true });
       }
     });
-  }, 30_000);
+  // Three bounded inventory probes need margin within the test deadline.
+  }, 60_000);
 
   test("baseline evidence is historical and only passes with explicit current exact delta", () => {
     withRepo("verification-baseline", (repoRoot, contractPath, counterPath) => {
@@ -806,7 +971,7 @@ describe("verification execution lifecycle", () => {
       expect(failed.results[0]!.exit_code).toBe(7);
       expect(failed.results[0]!.failure_log_file).toBeString();
       expect(existsSync(join(repoRoot, failed.results[0]!.failure_log_file!))).toBe(true);
-      expect(evaluateVerificationContract({ repoRoot, contractPath }).status).toBe("missing");
+      expect(evaluateVerificationContract({ repoRoot, contractPath }).status).toBe("failed");
 
       const timed = { protocol: 1, checks: [commandCheck({ command: "sleep 2", cost: "normal", inputs: { env: [] } })] };
       writeFileSync(join(repoRoot, contractPath), contract(timed));
@@ -814,7 +979,7 @@ describe("verification execution lifecycle", () => {
       expect(timeout.status).toBe("failed");
       expect(timeout.results[0]!.timed_out).toBe(true);
       expect(timeout.results[0]!.failure_log_file).toBeString();
-      expect(evaluateVerificationContract({ repoRoot, contractPath }).status).toBe("missing");
+      expect(evaluateVerificationContract({ repoRoot, contractPath }).status).toBe("failed");
       expect(counterPath).toBeString();
     });
   }, 30_000);
@@ -870,14 +1035,63 @@ describe("verification execution lifecycle", () => {
         ],
       };
       writeFileSync(join(repoRoot, contractPath), contract(plan));
-      const report = executeVerificationContract({
-        repoRoot,
-        contractPath,
-        env: { ...process.env, COUNTER_PATH: counterPath },
-      });
+      const env = { ...process.env, COUNTER_PATH: counterPath };
+      const report = executeVerificationContract({ repoRoot, contractPath, env });
       expect(report.status).toBe("failed");
       expect(report.results.find((result) => result.id === "full")?.execution).toBe("missing");
       expect(existsSync(counterPath)).toBe(false);
+
+      // The skipped sibling must not erase the authority of the recorded failure.
+      const failure = verificationOutcomeProvenance({ repoRoot, contractPath, report, env }, "preflight");
+      expect(failure.result.passed).toBe(false);
+      expect(failure.result.exit_code).toBe(9);
+      expect(failure.execution_order).toBeGreaterThan(0);
+      expect(() => verificationOutcomeProvenance({ repoRoot, contractPath, report, env }, "full"))
+        .toThrow("verification sequence is unavailable");
+      expect(() => validateMaterializedVerificationExecutionReport({ repoRoot, contractPath, report, env }))
+        .toThrow("not a passing evaluation");
+      const forged = {
+        ...report,
+        results: report.results.map((result) => result.id === "full"
+          ? { ...result, run_file: ".ai/harness/runs/forged.json" }
+          : result),
+      };
+      expect(() => verificationOutcomeProvenance({ repoRoot, contractPath, report: forged, env }, "preflight"))
+        .toThrow("invalid disposition: full");
+    });
+  }, 30_000);
+
+  test("a failed delta check keeps outcome provenance when its baseline sibling fails", () => {
+    withRepo("verification-failed-delta", (repoRoot, contractPath, counterPath) => {
+      const env = { ...process.env, COUNTER_PATH: counterPath };
+      const full = executeVerificationContract({ repoRoot, contractPath, env }).results[0]!;
+      const delta = commandCheck({
+        id: "delta",
+        command: "exit 7",
+        cost: "normal",
+        necessity: "covers the current delta",
+        inputs: { env: [] },
+      });
+      const baseline = commandCheck({
+        evidence_policy: "baseline_with_delta",
+        baseline: { run_file: full.run_file, execution_id: full.execution_id },
+        delta_checks: ["delta"],
+      });
+      writeFileSync(join(repoRoot, contractPath), contract({ protocol: 1, checks: [delta, baseline] }, "failed delta"));
+      const executed = executeVerificationContract({ repoRoot, contractPath, env });
+      expect(executed.status).toBe("failed");
+      expect(executed.results.find((result) => result.id === "full")?.passed).toBe(false);
+      const report = projectReportThroughEvidenceWriter(repoRoot, executed);
+
+      const failure = verificationOutcomeProvenance({ repoRoot, contractPath, report, env }, "delta");
+      expect(failure.result.passed).toBe(false);
+      expect(failure.result.exit_code).toBe(7);
+      const tampered = {
+        ...report,
+        results: report.results.map((result) => result.id === "full" ? { ...result, message: "forged" } : result),
+      };
+      expect(() => verificationOutcomeProvenance({ repoRoot, contractPath, report: tampered, env }, "delta"))
+        .toThrow("baseline result was altered");
     });
   }, 30_000);
 

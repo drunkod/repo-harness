@@ -6,24 +6,10 @@ import { spawnSync } from "child_process";
 import { defaultPolicy } from "../src/core/adoption/standard-plan";
 import { parseExternalSourcesPolicy } from "../src/effects/external-sources/policy";
 import { ARCHCTX_REQUIRED_VERSION, readArchitectureProjectionPolicy } from "../src/core/architecture/projection";
-import { REFACTOR_PROVIDER_VERSION, readRefactorPolicy } from "../src/core/refactor/policy";
 
 const ROOT = join(import.meta.dir, "..");
 const REFERENCE_STUB_MARKER = "<!-- repo-harness: reference-config-stub v1 -->";
 const RUNTIME_SMOKE_TIMEOUT_MS = 15000;
-
-/**
- * scripts/ensure-task-workflow.sh embeds its policy fallback as a quoted
- * `POLICY_EOF` heredoc, so the body is literal JSON with no shell expansion.
- * Parsing it directly keeps this seeder in the cross-seeder parity assertions
- * without having to scaffold a whole workspace.
- */
-function ensureTaskWorkflowSeedPolicy(): Record<string, any> {
-  const source = readFileSync(join(ROOT, "scripts/ensure-task-workflow.sh"), "utf-8");
-  const match = source.match(/<<'POLICY_EOF'\n([\s\S]*?)\nPOLICY_EOF\n/);
-  if (!match) throw new Error("scripts/ensure-task-workflow.sh POLICY_EOF heredoc not found");
-  return JSON.parse(match[1]);
-}
 
 function expectReferenceConfigStub(cwd: string, docId: string): void {
   const content = readFileSync(join(cwd, "docs/reference-configs", `${docId}.md`), "utf-8");
@@ -85,7 +71,7 @@ describe("create-project-dirs runtime smoke", () => {
       expect(existsSync(join(cwd, "docs/architecture/index.md"))).toBe(true);
       expect(existsSync(join(cwd, "docs/architecture/domains/.gitkeep"))).toBe(true);
       expect(existsSync(join(cwd, "docs/architecture/modules/.gitkeep"))).toBe(true);
-      expect(existsSync(join(cwd, "docs/architecture/requests/.gitkeep"))).toBe(true);
+      expect(existsSync(join(cwd, "docs/architecture/requests"))).toBe(false);
       expect(existsSync(join(cwd, "docs/architecture/snapshots/.gitkeep"))).toBe(true);
       expect(existsSync(join(cwd, "docs/architecture/diagrams/.gitkeep"))).toBe(true);
       expect(existsSync(join(cwd, "docs/api"))).toBe(false);
@@ -131,12 +117,12 @@ describe("create-project-dirs runtime smoke", () => {
       expect(gitignore).not.toContain("docs/researches");
       expect(existsSync(join(cwd, ".ai/context/context-map.json"))).toBe(true);
       expect(existsSync(join(cwd, ".ai/context/capabilities.json"))).toBe(true);
-      expect(existsSync(join(cwd, ".ai/harness/checks/latest.json"))).toBe(true);
-      expect(existsSync(join(cwd, ".ai/harness/workflow-contract.json"))).toBe(true);
+      expect(existsSync(join(cwd, ".ai/harness/checks/latest.json"))).toBe(false);
+      expect(existsSync(join(cwd, ".ai/harness/workflow-contract.json"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/harness/policy.json"))).toBe(true);
       expect(existsSync(join(cwd, ".ai/harness/brain-manifest.json"))).toBe(true);
       expect(existsSync(join(cwd, ".ai/harness/events.jsonl"))).toBe(true);
-      expect(existsSync(join(cwd, ".ai/harness/architecture/events.jsonl"))).toBe(true);
+      expect(existsSync(join(cwd, ".ai/harness/architecture"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/harness/workstreams/events.jsonl"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/harness/failures/latest.jsonl"))).toBe(true);
       expect(existsSync(join(cwd, ".ai/harness/handoff/current.md"))).toBe(true);
@@ -168,7 +154,6 @@ describe("create-project-dirs runtime smoke", () => {
         "capability-config.ts",
         "architecture-queue.sh",
         "archive-architecture-request.sh",
-        "context-contract-sync.sh",
         "workstream-sync.sh",
         "ensure-task-workflow.sh",
         "check-task-workflow.sh",
@@ -189,7 +174,7 @@ describe("create-project-dirs runtime smoke", () => {
       expect(existsSync(join(cwd, "scripts/skill-factory-create.sh"))).toBe(false);
       expect(existsSync(join(cwd, "scripts/skill-factory-check.sh"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/hooks/README.md"))).toBe(true);
-      expect(existsSync(join(cwd, ".ai/hooks/lib/workflow-state.sh"))).toBe(true);
+      expect(existsSync(join(cwd, ".ai/hooks/lib/workflow-state.sh"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/hooks/lib/session-state.sh"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/hooks/run-hook.sh"))).toBe(false);
       expect(existsSync(join(cwd, ".codex/hooks.json"))).toBe(false);
@@ -237,13 +222,12 @@ describe("create-project-dirs runtime smoke", () => {
       expect(readFileSync(join(cwd, ".ai/hooks/README.md"), "utf-8")).toContain("repo-harness-hook");
 
       const architectureIndex = readFileSync(join(cwd, "docs/architecture/index.md"), "utf-8");
-      expect(architectureIndex).toContain("<!-- BEGIN ARCHITECTURE PENDING REQUESTS -->");
-      expect(architectureIndex).toContain("- (none)");
-      expect(architectureIndex).toContain("<!-- END ARCHITECTURE PENDING REQUESTS -->");
+      expect(architectureIndex).toContain("## Architecture Flow");
+      expect(architectureIndex).not.toContain("ARCHITECTURE PENDING REQUESTS");
 
       expect(existsSync(join(cwd, "docs/PROGRESS.md"))).toBe(false);
-      const workflowContract = JSON.parse(readFileSync(join(cwd, ".ai/harness/workflow-contract.json"), "utf-8"));
-      expect(workflowContract.helpers.runtimeDirectory).toBe("package:assets/templates/helpers");
+      const workflowContract = JSON.parse(readFileSync(join(ROOT, "assets/workflow-contract.v1.json"), "utf-8"));
+      expect(workflowContract.helpers.runtimeDirectory).toBe("package:scripts");
       expect(workflowContract.helpers.runtimeSource).toBe("package");
       expect(Object.hasOwn(workflowContract.helpers, "compatibilityDirectory")).toBe(false);
       expect(workflowContract.documentation.referenceConfigs.source).toBe("user-level-runtime-docs");
@@ -254,7 +238,7 @@ describe("create-project-dirs runtime smoke", () => {
       expect(workflowContract.helpers.scripts).toContain("check-brain-manifest.sh");
       expect(workflowContract.helpers.scripts).toContain("sync-brain-docs.sh");
       expect(workflowContract.helpers.scripts).toContain("check-deploy-sql-order.sh");
-      expect(workflowContract.helpers.scripts).toContain("check-architecture-sync.sh");
+      expect(workflowContract.helpers.scripts).not.toContain("check-architecture-sync.sh");
       expect(workflowContract.helpers.scripts).toContain("check-task-workflow.sh");
       expect(workflowContract.helpers.scripts).toContain("sprint-backlog.sh");
       expect(workflowContract.helpers.scripts).toContain("contract-worktree.sh");
@@ -263,11 +247,11 @@ describe("create-project-dirs runtime smoke", () => {
       expect(workflowContract.helpers.scripts).toContain("select-agent-context-blocks.sh");
       expect(workflowContract.helpers.scripts).not.toContain("context-budget.ts");
       expect(workflowContract.helpers.scripts).toContain("capability-resolver.ts");
-      expect(workflowContract.helpers.scripts).toContain("architecture-event.ts");
+      expect(workflowContract.helpers.scripts).not.toContain("architecture-event.ts");
       expect(workflowContract.helpers.scripts).toContain("capability-config.ts");
-      expect(workflowContract.helpers.scripts).toContain("architecture-queue.sh");
-      expect(workflowContract.helpers.scripts).toContain("archive-architecture-request.sh");
-      expect(workflowContract.helpers.scripts).toContain("context-contract-sync.sh");
+      expect(workflowContract.helpers.scripts).not.toContain("architecture-queue.sh");
+      expect(workflowContract.helpers.scripts).not.toContain("archive-architecture-request.sh");
+      expect(workflowContract.helpers.scripts).not.toContain("context-contract-sync.sh");
       expect(workflowContract.helpers.scripts).toContain("workstream-sync.sh");
       expect(workflowContract.artifacts.requiredFiles).not.toContain(".ai/harness/context-budget/latest.json");
       expect(workflowContract.artifacts.requiredFiles).not.toContain(".ai/harness/handoff/resume.md");
@@ -276,7 +260,7 @@ describe("create-project-dirs runtime smoke", () => {
       expect(workflowContract.artifacts.runtimeFiles).not.toContain(".ai/harness/context-budget/latest.json");
       expect(workflowContract.artifacts.runtimeFiles).toContain(".ai/harness/handoff/resume.md");
       expect(workflowContract.artifacts.runtimeFiles).toContain(".ai/harness/planning/");
-      expect(workflowContract.artifacts.runtimeFiles).toContain(".ai/harness/architecture/events.jsonl");
+      expect(workflowContract.artifacts.runtimeFiles).not.toContain(".ai/harness/architecture/events.jsonl");
       expect(workflowContract.artifacts.runtimeFiles).toContain(".ai/harness/active-plan");
       expect(workflowContract.artifacts.runtimeFiles).toContain(".ai/harness/active-worktree");
       expect(workflowContract.artifacts.runtimeFiles).toContain(".ai/harness/triage/inbox.md");
@@ -324,7 +308,7 @@ describe("create-project-dirs runtime smoke", () => {
       expect(contextMap.discoverable_contexts.find((entry: { path: string }) => entry.path === "tasks/workstreams/**/*.md").purpose).toBe("capability-workstream");
       const policy = JSON.parse(readFileSync(join(cwd, ".ai/harness/policy.json"), "utf-8"));
       expect(policy.harness.helper_source).toBe("package");
-      expect(policy.harness.helper_runtime_dir).toBe("package:assets/templates/helpers");
+      expect(policy.harness.helper_runtime_dir).toBe("package:scripts");
       expect(policy.harness.helper_compat_dir).toBeUndefined();
       expect(policy.sprints.helper_script).toBe("repo-harness run sprint-backlog");
       expect(policy.external_tooling.routing).toEqual({
@@ -374,7 +358,6 @@ describe("create-project-dirs runtime smoke", () => {
         capability_source_key: ".ai/harness/policy.json#context.capability_source",
       };
       expect(policy.external_tooling.archctx).toEqual(archctxEntry);
-      expect(ensureTaskWorkflowSeedPolicy().external_tooling.archctx).toEqual(archctxEntry);
       expect(
         JSON.parse(readFileSync(join(ROOT, ".ai/harness/policy.json"), "utf-8")).external_tooling.archctx
       ).toEqual(archctxEntry);
@@ -410,6 +393,7 @@ describe("create-project-dirs runtime smoke", () => {
         report_path: ".ai/harness/checks/minimal-change.latest.json",
         event_dedupe: true,
       });
+      expect(policy.information_lifecycle.evidence.cache_globs).toEqual([".ai/harness/checks/*.latest.json", ".ai/harness/checks/*.latest.md"]);
       expect(policy.minimal_change.protected_concerns).toContain("security");
       expect(policy.minimal_change.protected_concerns).toContain("tests");
       expect(policy.tasks.notes_dir).toBe("tasks/notes");
@@ -459,42 +443,35 @@ describe("create-project-dirs runtime smoke", () => {
       expect(policy.context.capability_registry_file).toBe(".ai/context/capabilities.json");
       expect(policy.context.capability_resolver).toBe("repo-harness run capability-resolver");
       expect(policy.context.capability_config).toBe("repo-harness run capability-config");
-      // All three independently hardcoded policy seeders must agree on the capability
-      // authority switch; downstream repos stay on the JSON registry by default.
-      // Seeders: scripts/lib/project-init-lib.sh (bash `policy` above),
-      // src/core/adoption/standard-plan.ts (`tsDefaultPolicy`), and
-      // scripts/ensure-task-workflow.sh (its embedded POLICY_EOF fallback seed).
-      const fallbackSeedPolicy = ensureTaskWorkflowSeedPolicy();
+      // Both policy initializers use the JSON capability registry by default.
+      // ensure-task-workflow only prepares runtime directories; it does not seed policy.
       const repoPolicy = JSON.parse(readFileSync(join(ROOT, ".ai/harness/policy.json"), "utf-8"));
-      for (const seeded of [policy, tsDefaultPolicy, fallbackSeedPolicy, repoPolicy]) {
+      for (const seeded of [policy, tsDefaultPolicy, repoPolicy]) {
         expect(seeded.circuit_breakers.semantic_reviews_per_work_package).toBe(1);
       }
-      for (const seeded of [policy, tsDefaultPolicy, fallbackSeedPolicy]) {
+      for (const seeded of [policy, tsDefaultPolicy]) {
         expect(seeded.context.capability_source).toBe("registry");
       }
       // External source intake is disabled by absence in every initializer
       // surface. A generated repository must never infer provider access from
       // a URL, CLI installation, or registry grant.
-      for (const seeded of [policy, tsDefaultPolicy, fallbackSeedPolicy]) {
+      for (const seeded of [policy, tsDefaultPolicy]) {
         expect(parseExternalSourcesPolicy(seeded.external_sources).mode).toBe("off");
       }
       expect(parseExternalSourcesPolicy(repoPolicy.external_sources).mode).toBe("off");
-      for (const seeded of [policy, tsDefaultPolicy, fallbackSeedPolicy, repoPolicy]) {
-        expect(seeded.development_campaign).toEqual({ version: 1, mode: "off" });
-      }
       // This repo cut its own authority over to archcontext nodes (Stage 2); the
       // seeded default above is what a newly generated repo gets, not what this repo
       // runs on. Both shapes share the one selector and the one rule string.
       expect(repoPolicy.context.capability_source).toBe("archcontext");
       expect(existsSync(join(ROOT, ".archcontext/model/nodes"))).toBe(true);
       expect(existsSync(join(ROOT, ".ai/context/capabilities.json"))).toBe(false);
-      for (const seeded of [policy, tsDefaultPolicy, fallbackSeedPolicy, repoPolicy]) {
+      for (const seeded of [policy, tsDefaultPolicy, repoPolicy]) {
         expect(seeded.context.capability_source_rule).toBe(tsDefaultPolicy.context.capability_source_rule);
         expect(seeded.context.capability_source_rule).toContain("no dual-read and no fallback");
       }
-      // capability_config is seeded by the three file-writing seeders; standard-plan.ts
+      // capability_config is emitted by the shell initializer and this repo policy; standard-plan.ts
       // does not carry it, so it is asserted separately from the switch itself.
-      for (const seeded of [policy, fallbackSeedPolicy, repoPolicy]) {
+      for (const seeded of [policy, repoPolicy]) {
         expect(seeded.context.capability_config).toBe("repo-harness run capability-config");
       }
       expect(policy.documentation.profile).toBe("minimal-agentic");
@@ -502,15 +479,16 @@ describe("create-project-dirs runtime smoke", () => {
       expect(policy.documentation.reference_stub_marker).toBe(REFERENCE_STUB_MARKER);
       expect(policy.documentation.reference_resolver).toBe("repo-harness docs path <doc-id>");
       expect(policy.documentation.required).toContain("docs/architecture/index.md");
-      expect(policy.architecture.diagram_skill).toBe("mermaid");
-      expect(policy.architecture.vendoring_policy).toBe("do-not-vendor-diagram-skill-assets");
+      expect(policy.architecture).toBeUndefined();
       expect(policy.external_tooling.diagram_design.sync_mode).toBe("external-installed-skill");
-      expect(policy.harness.architecture_events_file).toBe(".ai/harness/architecture/events.jsonl");
+      expect(policy.harness.architecture_events_file).toBeUndefined();
       expect(policy.harness.workstream_events_file).toBeUndefined();
       expect(policy.workstreams.scope).toBe("capability");
       expect(policy.workstreams.projection).toBe("local-contract-active-pointer-and-current-slice");
       expect(policy.documentation.on_demand).toContain("docs/architecture.md");
       expect(policy.lsp_profiles.selection).toBe("functional-block-first");
+      expect(policy.worktree_strategy.worktree_dir_template).toBe('{{system_tmp}}/{{repo}}-wt-{{slug}}');
+      expect(policy.worktree_strategy.worktree_dir_template).toBe(tsDefaultPolicy.worktree_strategy.worktree_dir_template);
       expect(policy.worktree_strategy.auto_on_conflict).toBe(true);
       expect(policy.worktree_strategy.auto_for_contract_tasks).toBe(true);
       expect(policy.worktree_strategy.start_script).toBe("repo-harness run contract-worktree start --plan <plan-file>");
@@ -548,9 +526,9 @@ describe("create-project-dirs runtime smoke", () => {
       const pkg = JSON.parse(readFileSync(join(cwd, "package.json"), "utf-8"));
       expect(pkg.scripts["check:context-files"]).toBe("repo-harness run check-context-files");
       expect(pkg.scripts["check:deploy-sql"]).toBe("repo-harness run check-deploy-sql-order");
-      expect(pkg.scripts["check:architecture-sync"]).toBe("repo-harness run check-architecture-sync");
+      expect(pkg.scripts["check:architecture-sync"]).toBeUndefined();
       expect(pkg.scripts["check:task-sync"]).toBe("repo-harness run check-task-sync");
-      expect(pkg.scripts["check:task-workflow"]).toBe("repo-harness run check-task-workflow --strict");
+      expect(pkg.scripts["check:task-workflow"]).toBeUndefined();
       expect(pkg.scripts["sync:brain-docs"]).toBe("repo-harness run sync-brain-docs --all");
       expect(existsSync(join(cwd, "scripts/contract-worktree.sh"))).toBe(false);
       expect(existsSync(join(cwd, "scripts/ship-worktrees.sh"))).toBe(false);
@@ -730,7 +708,7 @@ describe("create-project-dirs runtime smoke", () => {
     }
   }, RUNTIME_SMOKE_TIMEOUT_MS);
 
-  test("should ignore retired hook_source and install operator helper libraries only", () => {
+  test("should ignore retired hook_source and use package operator libraries", () => {
     const cwd = mkdtempSync(join(tmpdir(), "create-project-dirs-hook-pin-"));
     try {
       mkdirSync(join(cwd, ".ai/harness"), { recursive: true });
@@ -745,7 +723,7 @@ describe("create-project-dirs runtime smoke", () => {
       expect(existsSync(join(cwd, ".ai/hooks/run-hook.sh"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/hooks/post-tool-observer.sh"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/hooks/post-bash.sh"))).toBe(false);
-      expect(existsSync(join(cwd, ".ai/hooks/lib/workflow-state.sh"))).toBe(true);
+      expect(existsSync(join(cwd, ".ai/hooks/lib/workflow-state.sh"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/hooks/lib/session-state.sh"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/hooks/AGENTS.md"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/hooks/projection.json"))).toBe(false);
@@ -780,7 +758,7 @@ describe("create-project-dirs runtime smoke", () => {
 
       expect(res.status).toBe(0);
       expect(existsSync(join(cwd, ".ai/hooks/README.md"))).toBe(true);
-      expect(existsSync(join(cwd, ".ai/hooks/lib/workflow-state.sh"))).toBe(true);
+      expect(existsSync(join(cwd, ".ai/hooks/lib/workflow-state.sh"))).toBe(false);
       expect(existsSync(join(cwd, ".ai/hooks/lib/session-state.sh"))).toBe(false);
       expect(readFileSync(join(cwd, ".ai/hooks/run-hook.sh"), "utf-8")).toBe(staleRuntime);
       expect(readFileSync(join(cwd, ".ai/hooks/prompt-guard.sh"), "utf-8")).toBe(staleRuntime);
@@ -1048,14 +1026,11 @@ describe("create-project-dirs runtime smoke", () => {
   }, RUNTIME_SMOKE_TIMEOUT_MS);
 
   /**
-   * `scripts/` ships inside the npm package, so a seeder that hardcodes a stale archctx pin
-   * reaches every generated repository. `readRefactorPolicy` fail-closes on an exact
-   * `provider_version` mismatch, so a stale seed makes the generated repo's own refactor
-   * stages unreadable rather than merely out of date. The guard runs the real seeders and
-   * feeds their output to the real readers instead of comparing version literals, so it
-   * fails on the behavior the consumer actually depends on.
+   * The archctx pin lives in the package (`ARCHCTX_REQUIRED_VERSION`). Repository
+   * seeders must not author archctx execution or refactor settings, because no
+   * runtime reader consumes them.
    */
-  test("every policy seeder emits an archctx pin the runtime readers accept", () => {
+  test("policy seeders author no repository archctx execution or refactor settings", () => {
     const cwd = mkdtempSync(join(tmpdir(), "seeder-archctx-pin-parity-"));
     const libPath = join(ROOT, "scripts/lib/project-init-lib.sh");
 
@@ -1069,26 +1044,17 @@ describe("create-project-dirs runtime smoke", () => {
 
       const seeders: Array<[string, Record<string, any>]> = [
         ["scripts/lib/project-init-lib.sh", JSON.parse(readFileSync(join(cwd, ".ai/harness/policy.json"), "utf-8"))],
-        ["scripts/ensure-task-workflow.sh", ensureTaskWorkflowSeedPolicy()],
         [".ai/harness/policy.json", JSON.parse(readFileSync(join(ROOT, ".ai/harness/policy.json"), "utf-8"))],
       ];
 
       for (const [source, seeded] of seeders) {
-        // readRefactorPolicy takes the whole policy and throws on an exact
-        // provider_version mismatch, so a stale seed surfaces here as the generated
-        // repo's real failure, not as a string diff.
-        const refactor = readRefactorPolicy(seeded);
-        expect([source, refactor.stages.scan.provider_version]).toEqual([source, REFACTOR_PROVIDER_VERSION]);
-        expect([source, refactor.stages.verify.provider_version]).toEqual([source, REFACTOR_PROVIDER_VERSION]);
-
-        // Projection execution is global; repository seeders must not author it.
+        expect([source, seeded.refactor]).toEqual([source, undefined]);
         for (const key of ['projection_provider', 'projection_apply', 'projection_version', 'projection_failure_gate', 'projection_timeout_ms']) {
           expect([source, seeded.architecture?.[key]]).toEqual([source, undefined]);
         }
         expect(readArchitectureProjectionPolicy({}).requiredVersion).toBe(ARCHCTX_REQUIRED_VERSION);
       }
 
-      expect(REFACTOR_PROVIDER_VERSION).toBe(ARCHCTX_REQUIRED_VERSION);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

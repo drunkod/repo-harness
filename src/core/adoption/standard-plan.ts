@@ -1,3 +1,4 @@
+import { DEFAULT_WORKTREE_TEMPLATE } from "../worktree-location.mjs";
 import { createHash } from "crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync } from "fs";
 import { basename, dirname, join, relative, resolve, sep } from "path";
@@ -7,13 +8,11 @@ import { makeOperationId } from "./operations";
 import { adoptionTemplateFile } from "./manifest-templates";
 import { gitignoreManagedBlockOperation } from "./gitignore-plan";
 import { managedBlockNeedsUpdate } from "./managed-block";
-import { loadWorkflowContractAsset, readWorkflowContractAsset } from "./workflow-contract-asset";
-import { isRepoHarnessSourceCheckout } from "./source-checkout";
-import { stripRepoHarnessManagedHooks } from "./managed-hook-config";
+import { renderWorkflowContractMarker } from "./workflow-contract-asset";
+import { planLegacyLeftovers, stripLegacyHookEntries } from "../upgrade/legacy-inventory";
 
 const ASSET_ROOT = join(import.meta.dir, "..", "..", "..", "assets");
 const TEMPLATE_ROOT = join(ASSET_ROOT, "templates");
-const HOOK_ROOT = join(ASSET_ROOT, "hooks");
 const REFERENCE_ROOT = join(ASSET_ROOT, "reference-configs");
 
 const STANDARD_DIRS = [
@@ -32,14 +31,12 @@ const STANDARD_DIRS = [
   "docs/reference-configs",
   "docs/architecture/domains",
   "docs/architecture/modules",
-  "docs/architecture/requests",
   "docs/architecture/snapshots",
   "docs/architecture/diagrams",
   ".ai/context",
   ".ai/harness/checks",
   ".ai/harness/handoff",
   ".ai/harness/failures",
-  ".ai/harness/architecture",
   ".ai/harness/security",
   ".ai/harness/planning",
   ".ai/harness/delegation",
@@ -72,13 +69,10 @@ const MINIMAL_DIRS = [
 ] as const;
 
 const STATE_FILES: ReadonlyArray<{ path: string; content: string }> = [
-  { path: ".ai/harness/checks/latest.json", content: "{}\n" },
   { path: ".ai/harness/handoff/current.md", content: "# Harness Handoff\n\n> **Reason**: bootstrap\n" },
   { path: ".ai/harness/handoff/resume.md", content: "# Codex Resume Packet\n\n> **Reason**: bootstrap\n" },
   { path: ".ai/context/capability-source-map.json", content: '{\n  "version": 1,\n  "capabilities": {}\n}\n' },
   { path: ".ai/harness/events.jsonl", content: "" },
-  { path: ".ai/harness/architecture/events.jsonl", content: "" },
-  { path: ".ai/harness/architecture/.gitkeep", content: "" },
   { path: ".ai/harness/failures/latest.jsonl", content: "" },
   { path: ".ai/harness/security/.gitkeep", content: "" },
   { path: ".ai/harness/planning/.gitkeep", content: "" },
@@ -88,7 +82,6 @@ const STATE_FILES: ReadonlyArray<{ path: string; content: string }> = [
   { path: "tasks/workstreams/.gitkeep", content: "" },
   { path: "docs/architecture/domains/.gitkeep", content: "" },
   { path: "docs/architecture/modules/.gitkeep", content: "" },
-  { path: "docs/architecture/requests/.gitkeep", content: "" },
   { path: "docs/architecture/snapshots/.gitkeep", content: "" },
   { path: "docs/architecture/diagrams/.gitkeep", content: "" },
   { path: "deploy/env/.gitkeep", content: "" },
@@ -105,21 +98,6 @@ export interface StandardPlanOptions {
   readonly repoRoot: string;
   readonly mode: AdoptionMode;
   readonly env?: NodeJS.ProcessEnv;
-}
-
-interface WorkflowContractAsset {
-  readonly migrations?: {
-    readonly upgrade?: {
-      readonly actions?: ReadonlyArray<{
-        readonly id?: string;
-        readonly action?: string;
-        readonly ownership?: string;
-        readonly cleanupMode?: string;
-        readonly paths?: readonly string[];
-        readonly fingerprints?: Readonly<Record<string, string>>;
-      }>;
-    };
-  };
 }
 
 function safePath(repoRoot: string, path: string): string {
@@ -339,6 +317,7 @@ export function defaultPolicy(documentationProfile: string, documentationLanguag
       capability_source_rule: "single authority selected by capability_source; registry reads .ai/context/capabilities.json, archcontext reads .archcontext/model/nodes/*.yaml; no dual-read and no fallback",
     },
     worktree_strategy: {
+      worktree_dir_template: DEFAULT_WORKTREE_TEMPLATE,
       base_branch: "main",
       review_base: "main",
       merge_back: {
@@ -347,7 +326,6 @@ export function defaultPolicy(documentationProfile: string, documentationLanguag
     },
     harness: {
       policy_file: ".ai/harness/policy.json",
-      checks_file: ".ai/harness/checks/latest.json",
       handoff_file: ".ai/harness/handoff/current.md",
       helper_runtime_dir: "package:scripts",
       helper_source: "package",
@@ -357,10 +335,6 @@ export function defaultPolicy(documentationProfile: string, documentationLanguag
       adapters: {
         "herdr-cli-agent": { enabled: false },
       },
-    },
-    development_campaign: {
-      version: 1,
-      mode: "off",
     },
     operations: {
       dir: "deploy",
@@ -377,11 +351,19 @@ export function defaultPolicy(documentationProfile: string, documentationLanguag
     external_tooling: {
       // Projection of the canonical repository pin; herdr-runtime-pin tests guard drift.
       herdr: {
-        "min_version": "0.9.0",
+        "min_version": "0.9.3",
         "release_assets": {
           "linux-x86_64": {
-            "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.0/herdr-linux-x86_64",
-            "sha256": "4fa1a01158dd8043da92d31b270780b0dcc10603038d9b61cac4d81ab63fb71f"
+            "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.3/herdr-linux-x86_64",
+            "sha256": "18a8dc65f1c2fa485884344356dea1cfd911c6f06cf46fa78e193f4087f4dba7"
+          },
+          "macos-aarch64": {
+            "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.3/herdr-macos-aarch64",
+            "sha256": "5173a3e0ae42d5d1ab7ebfa5d5e6329f7c3d23f8e1a3677c7ce3231da2884157"
+          },
+          "macos-x86_64": {
+            "url": "https://github.com/herdrdev/herdr/releases/download/v0.9.3/herdr-macos-x86_64",
+            "sha256": "db62d548ff3e832b087a96b1894a08d26be3905f1830309cd556783f215d4054"
           }
         }
       },
@@ -436,7 +418,7 @@ This is the root routing contract for Claude Code and Codex. Load this before ta
 
 - Use first principles, one source of truth, and no steady-state compatibility paths.
 - Treat \`docs/spec.md\` as product truth; \`tasks/current.md\` is derived state and \`tasks/todos.md\` is the deferred-goal ledger.
-- Keep current execution in the active plan's \`## Task Breakdown\`; use contracts, reviews, notes, workstreams, and handoff artifacts for durable progress.
+- Write a plan before cross-module changes, architecture changes, and dependency upgrades. Small changes do not need a plan.
 - Read \`.ai/context/capabilities.json\` and \`.ai/context/context-map.json\` before adding scoped agent context.
 - Write human-facing documents (\`docs/\`, \`plans/prds/\`, design briefs) in the language set by \`.ai/harness/policy.json#documentation.language\`; keep section headers, field keys, and technical terms in English. Agent-facing artifacts stay English.
 - Keep \`_ref/\` ignored external reference material and \`_ops/\` ignored local operations state.
@@ -446,18 +428,12 @@ This is the root routing contract for Claude Code and Codex. Load this before ta
 function architectureIndexContent(): string {
   return `# Architecture Index
 
-> Umbrella architecture ledger for current boundaries, drift requests, snapshots, and diagrams.
+> Umbrella architecture ledger for current boundaries, snapshots, and diagrams.
 
 ## Current Snapshot
 
 - Latest snapshot: (none yet)
 - Semantic diagram source: (none yet)
-
-## Pending Requests
-
-<!-- BEGIN ARCHITECTURE PENDING REQUESTS -->
-- (none)
-<!-- END ARCHITECTURE PENDING REQUESTS -->
 `;
 }
 
@@ -487,22 +463,6 @@ function referenceStub(name: string): string {
 This repo keeps workflow facts and runtime artifacts locally under \`.ai/\`.
 Use \`repo-harness docs show ${docId}\` for the full generic runtime guide.
 `;
-}
-
-function knownGeneratedFile(repoRoot: string, path: string, declaredFingerprint?: string): boolean {
-  if (declaredFingerprint !== undefined && !/^sha256:[0-9a-f]{64}$/.test(declaredFingerprint)) {
-    throw new Error(`invalid known-generated fingerprint for ${path}`);
-  }
-  const target = safePath(repoRoot, path);
-  if (!existsSync(target) || !lstatSync(target).isFile()) return false;
-  const content = readFileSync(target, "utf-8");
-  if (declaredFingerprint !== undefined) return contentHash(content) === declaredFingerprint;
-  const helperAsset = join(TEMPLATE_ROOT, "helpers", path.replace(/^scripts\//, ""));
-  if (path.startsWith("scripts/") && existsSync(helperAsset) && readFileSync(helperAsset, "utf-8") === content) return true;
-  if (path.startsWith(".ai/hooks/") && existsSync(join(HOOK_ROOT, path.slice(".ai/hooks/".length)))) {
-    return readFileSync(join(HOOK_ROOT, path.slice(".ai/hooks/".length)), "utf-8") === content;
-  }
-  return false;
 }
 
 function isCanonicalDeferredLedger(content: string): boolean {
@@ -612,82 +572,40 @@ function addLegacySprintMoves(repoRoot: string, operations: AdoptionOperation[])
   }
 }
 
-function addKnownGeneratedCleanup(repoRoot: string, operations: AdoptionOperation[]): AdoptionWarning[] {
+function addLegacyCleanup(repoRoot: string, operations: AdoptionOperation[]): AdoptionWarning[] {
+  const plan = planLegacyLeftovers({ scope: "project", cwd: repoRoot, home: repoRoot, packageRoot: join(ASSET_ROOT, "..") });
   const warnings: AdoptionWarning[] = [];
-  // The source package owns its canonical scripts. They may be byte-identical
-  // to package helpers, but that is not evidence that this source repo is a
-  // downstream generated runtime copy.
-  if (isRepoHarnessSourceCheckout(repoRoot)) return warnings;
-  const contract = loadWorkflowContractAsset<WorkflowContractAsset>();
-  const actions = contract.migrations?.upgrade?.actions ?? [];
-  for (const action of actions) {
-    if (action.action !== "remove" || action.ownership !== "known_generated") continue;
-    const paths = action.paths ?? [];
-    if (action.cleanupMode === "exact_fingerprint") {
-      if (new Set(paths).size !== paths.length) {
-        throw new Error(`duplicate path in exact-fingerprint migration action ${action.id ?? "<unnamed>"}`);
-      }
-      const fingerprints = action.fingerprints ?? {};
-      for (const path of paths) {
-        if (path.includes("*")) {
-          throw new Error(`wildcard is not allowed in exact-fingerprint migration action: ${path}`);
-        }
-        if (fingerprints[path] === undefined) {
-          throw new Error(`missing exact fingerprint for ${path} in migration action ${action.id ?? "<unnamed>"}`);
-        }
-      }
-      for (const path of Object.keys(fingerprints)) {
-        if (!paths.includes(path)) {
-          throw new Error(`fingerprint declared for undeclared migration path ${path}`);
-        }
-      }
+  const hookPaths = new Set<string>();
+  for (const item of plan.items) {
+    const path = relative(resolve(repoRoot), item.path).split(sep).join("/");
+    if (item.action === "strip-entry") {
+      hookPaths.add(path);
+      continue;
     }
-    for (const path of paths) {
-      if (path.includes("*")) continue;
-      if (!knownGeneratedFile(repoRoot, path, action.fingerprints?.[path])) {
-        if (action.fingerprints?.[path] && existsSync(safePath(repoRoot, path))) {
-          warnings.push({
-            code: "known-generated-fingerprint-mismatch",
-            message: `Preserving ${path}: current bytes do not match the declared retired generated asset`,
-            risk: "medium",
-          });
-        }
-        continue;
+    if (item.action === "report") {
+      if (item.reason === "Current bytes do not match the declared retired generated asset.") {
+        warnings.push({ code: "known-generated-fingerprint-mismatch", message: `Preserving ${path}: current bytes do not match the declared retired generated asset`, risk: "medium" });
       }
-      const remove = removeOperation(repoRoot, path, "Remove known-generated retired workflow asset");
-      if (remove) operations.push(remove);
-      const untrack: AdoptionOperation = {
-        id: makeOperationId("gitUntrack", path),
-        kind: "gitUntrack",
-        path,
-        reason: "Untrack removed known-generated workflow asset from the git index",
-        risk: "medium",
-        status: "planned",
-      };
-      operations.push(untrack);
+      continue;
     }
+    if (item.action !== "remove") continue;
+    // Adoption's existing transaction format snapshots regular files only.
+    if (item.surface !== "file") continue;
+    const remove = removeOperation(repoRoot, path, "Remove known-generated retired workflow asset");
+    if (remove) operations.push(remove);
+    operations.push({
+      id: makeOperationId("gitUntrack", path), kind: "gitUntrack", path,
+      reason: "Untrack removed known-generated workflow asset from the git index", risk: "medium", status: "planned",
+    });
+  }
+  for (const path of hookPaths) {
+    const current = jsonFile(repoRoot, path);
+    if (!current) continue;
+    const stripped = stripLegacyHookEntries(current, { location: "project" });
+    operations.push(writeOperation(repoRoot, path, jsonContent(stripped.config),
+      "Remove repo-local repo-harness host adapters after the user-level typed adapter cutover", { risk: "medium" }));
   }
   return warnings;
-}
-
-function addLegacyHostAdapterCleanup(repoRoot: string, operations: AdoptionOperation[]): void {
-  for (const path of [".codex/hooks.json", ".claude/settings.json"] as const) {
-    const current = jsonFile(repoRoot, path);
-    if (!current || current.hooks === undefined) continue;
-    const stripped = stripRepoHarnessManagedHooks(current.hooks);
-    if (stripped.removed.length === 0) continue;
-
-    const next: JsonObject = { ...current };
-    if (Object.keys(stripped.hooks).length === 0) delete next.hooks;
-    else next.hooks = stripped.hooks;
-    operations.push(writeOperation(
-      repoRoot,
-      path,
-      jsonContent(next),
-      "Remove repo-local repo-harness host adapters after the user-level typed adapter cutover",
-      { risk: "medium" },
-    ));
-  }
 }
 
 function addTemplateOperations(repoRoot: string, operations: AdoptionOperation[]): void {
@@ -710,22 +628,10 @@ function addTemplateOperations(repoRoot: string, operations: AdoptionOperation[]
 }
 
 function addHookOperations(repoRoot: string, operations: AdoptionOperation[]): void {
-  const hookFiles = readdirSync(HOOK_ROOT).filter((name) => name.endsWith(".sh"));
-  for (const name of hookFiles) {
-    const target = `.ai/hooks/${name}`;
-    if (knownGeneratedFile(repoRoot, target)) {
-      const remove = removeOperation(repoRoot, target, "Remove stale repo-local hook runtime after typed handler cutover");
-      if (remove) operations.push(remove);
-    }
-  }
-  for (const name of readdirSync(join(HOOK_ROOT, "lib")).filter((entry) => entry.endsWith(".sh")).sort()) {
-    const source = join(HOOK_ROOT, "lib", name);
-    operations.push(writeOperation(repoRoot, `.ai/hooks/lib/${name}`, readFileSync(source, "utf-8"), "Install repo-local hook helper library", { mode: 0o755, risk: "medium" }));
-  }
   operations.push(writeOperation(
     repoRoot,
     ".ai/hooks/README.md",
-    "# Repo-Local Workflow Helpers\n\nHost events execute through the user-level `repo-harness-hook` typed runtime. Files under `.ai/hooks/lib/` are operator helper libraries only; no repo-local host-event dispatcher or route script is supported.\n",
+    "# Workflow Helpers\n\nHost events use the user-level `repo-harness-hook` typed runtime. Operator helpers use the installed package. Run `repo-harness hook-lib path` to locate `workflow-state.sh`. Use `repo-harness run <helper>` to run helpers. Init preserves legacy files under `.ai/hooks/lib/`. Run `repo-harness doctor` for migration guidance.\n",
     "Document typed hook authority and operator-only helper boundary",
     { risk: "medium" },
   ));
@@ -764,12 +670,40 @@ function addPackageOperation(repoRoot: string, operations: AdoptionOperation[]):
     "check:brain-manifest": "repo-harness run check-brain-manifest",
     "check:context-files": "repo-harness run check-context-files",
     "check:deploy-sql": "repo-harness run check-deploy-sql-order",
-    "check:architecture-sync": "repo-harness run check-architecture-sync",
     "check:task-sync": "repo-harness run check-task-sync",
-    "check:task-workflow": "repo-harness run check-task-workflow --strict",
     "sync:brain-docs": "repo-harness run sync-brain-docs --all",
   });
+  if (scripts["check:task-workflow"] === "repo-harness run check-task-workflow --strict") {
+    delete scripts["check:task-workflow"];
+  }
+  if (scripts["check:architecture-sync"] === "repo-harness run check-architecture-sync") {
+    delete scripts["check:architecture-sync"];
+  }
   operations.push(writeOperation(repoRoot, "package.json", jsonContent({ ...current, private: current.private ?? true, scripts }), "Install canonical repo-harness workflow package scripts", { risk: "medium" }));
+}
+
+// Generated repository architecture settings that no reader consumes after the
+// projection queue and request-card queue retirement. Execution settings now
+// live in the host configuration; architecture truth lives in .archcontext/.
+const RETIRED_ARCHITECTURE_POLICY_KEYS = [
+  'projection_provider', 'projection_apply', 'projection_failure_gate', 'projection_version', 'projection_timeout_ms',
+  'index_file', 'requests_dir', 'snapshots_dir', 'diagrams_dir', 'domains_dir', 'modules_dir',
+  'diagram_skill', 'diagram_skill_source', 'vendoring_policy', 'freshness_gate', 'gate_min_severity',
+  'pending_card_scope', 'pending_block_begin', 'pending_block_end', 'queue_script',
+  'contract_block_begin', 'contract_block_end',
+] as const;
+const GENERATED_ARCHITECTURE_RULES = new Set([
+  'hooks record architecture queue cards and sync controlled local context blocks; agents author semantic snapshots and diagrams',
+  'Architecture documents and the archctx model are on-demand references; update real responsibility changes explicitly. Hooks do not queue per-edit drift, sync workstreams or author agent-context blocks.',
+]);
+
+function retireArchitecturePolicy(policy: Record<string, unknown>): void {
+  if (isObject(policy.harness)) delete policy.harness.architecture_events_file;
+  if (!isObject(policy.architecture)) return;
+  const architecture = policy.architecture;
+  for (const key of RETIRED_ARCHITECTURE_POLICY_KEYS) delete architecture[key];
+  if (typeof architecture.rule === 'string' && GENERATED_ARCHITECTURE_RULES.has(architecture.rule)) delete architecture.rule;
+  if (Object.keys(architecture).length === 0) delete policy.architecture;
 }
 
 function addActivePlanMigration(repoRoot: string, operations: AdoptionOperation[]): void {
@@ -795,9 +729,9 @@ export function planStandardAdoption(opts: StandardPlanOptions): { operations: A
   delete policy.hook_source;
   // Operator-invoked adoption retires the old execution authority. Never copy
   // repository preferences into the host-wide configuration.
-  if (isObject(policy.architecture)) {
-    for (const key of ['projection_provider', 'projection_apply', 'projection_failure_gate', 'projection_version', 'projection_timeout_ms']) delete policy.architecture[key];
-  }
+  retireArchitecturePolicy(policy);
+  // Refactor execution is retired; recommendations read no repository refactor policy.
+  delete policy.refactor;
   const externalTooling = isObject(policy.external_tooling) ? policy.external_tooling : {};
   const externalRouting = isObject(externalTooling.routing) ? externalTooling.routing : {};
   const retiredComplexProvider = typeof externalRouting.complex === "string" ? externalRouting.complex : null;
@@ -840,7 +774,7 @@ export function planStandardAdoption(opts: StandardPlanOptions): { operations: A
     operations.push(writeOperation(opts.repoRoot, file.path, file.content, file.reason, { ifMissing: true }));
   }
   addTodoMigrations(opts.repoRoot, operations);
-  operations.push(writeOperation(opts.repoRoot, ".ai/harness/workflow-contract.json", readWorkflowContractAsset(), "Install canonical repo-harness workflow contract manifest"));
+  operations.push(writeOperation(opts.repoRoot, ".ai/harness/workflow-contract.json", renderWorkflowContractMarker(), "Install the repo-harness opt-in marker"));
 
   const gitignore = fileContent(opts.repoRoot, ".gitignore") ?? "";
   const gitignoreOperation = gitignoreManagedBlockOperation("planned");
@@ -852,7 +786,7 @@ export function planStandardAdoption(opts: StandardPlanOptions): { operations: A
   });
 
   if (opts.mode === "minimal") {
-    return { operations, warnings: [] };
+    return { operations, warnings: addLegacyCleanup(opts.repoRoot, operations) };
   }
 
   operations.push(writeOperation(opts.repoRoot, ".ai/harness/policy.json", jsonContent(policy), "Merge canonical harness policy defaults without discarding explicit repo settings", { risk: "medium" }));
@@ -889,13 +823,12 @@ export function planStandardAdoption(opts: StandardPlanOptions): { operations: A
 
   addActivePlanMigration(opts.repoRoot, operations);
   addTemplateOperations(opts.repoRoot, operations);
-  addLegacyHostAdapterCleanup(opts.repoRoot, operations);
   addHookOperations(opts.repoRoot, operations);
   addReferenceOperations(opts.repoRoot, documentationProfile, operations);
   addLegacyDocumentMigrations(opts.repoRoot, operations);
   addLegacySprintMoves(opts.repoRoot, operations);
   addPackageOperation(opts.repoRoot, operations);
-  const cleanupWarnings = addKnownGeneratedCleanup(opts.repoRoot, operations);
+  const cleanupWarnings = addLegacyCleanup(opts.repoRoot, operations);
 
   const warnings: AdoptionWarning[] = [
     ...cleanupWarnings,

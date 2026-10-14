@@ -10,8 +10,10 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
+  unlinkSync,
 } from "fs";
-import { basename, dirname, join, relative, resolve } from "path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { acquireExclusiveDirectoryLock } from "./locking/exclusive-directory-lock";
 
 export type SkillTreeCommitResult =
@@ -43,6 +45,57 @@ function prospectiveCanonicalPath(path: string): string {
     ancestor = parent;
   }
   return resolve(realpathSync(ancestor), relative(ancestor, path));
+}
+
+export interface OwnedSkillLinkRecord {
+  readonly path: string;
+  readonly type: string;
+  readonly symlink_target: string | null;
+  readonly authority?: string;
+  readonly removal?: string;
+}
+
+/** Remove missing-target links with current-package or exact manifest proof. */
+export function removeOwnedDanglingSkillLinks(
+  sourceRoot: string,
+  skillRoots: readonly string[],
+  dryRun = false,
+  ownershipManifest: readonly OwnedSkillLinkRecord[] = [],
+): string[] {
+  const packageRoot = realpathSync(sourceRoot);
+  const removed: string[] = [];
+  for (const root of skillRoots) {
+    if (!root || !pathEntryExists(root)) continue;
+    // This cleanup does not follow a symlinked skill root.
+    if (!lstatSync(root).isDirectory()) continue;
+    for (const name of readdirSync(root)) {
+      const link = join(root, name);
+      let canonicalTarget: string;
+      let manifestOwned = false;
+      try {
+        if (!lstatSync(link).isSymbolicLink()) continue;
+        try {
+          statSync(link);
+          continue;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
+        }
+        const raw = readlinkSync(link);
+        manifestOwned = ownershipManifest.some((entry) => entry.authority === 'repo-harness-install-transaction'
+          && entry.removal === 'managed-surfaces-only'
+          && entry.type === 'symlink' && resolve(entry.path) === resolve(link) && entry.symlink_target === raw);
+        const target = isAbsolute(raw) ? raw : `${dirname(link)}${sep}${raw}`;
+        canonicalTarget = prospectiveCanonicalPath(target);
+      } catch {
+        // Unknown ownership is never permission to remove a shared entry.
+        continue;
+      }
+      if (!manifestOwned && !canonicalTarget.startsWith(`${packageRoot}${sep}`)) continue;
+      if (!dryRun) unlinkSync(link);
+      removed.push(link);
+    }
+  }
+  return removed;
 }
 
 /** Content-address one installed Skill tree without following nested symlinks. */

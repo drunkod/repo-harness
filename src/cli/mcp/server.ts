@@ -1,3 +1,4 @@
+import { createPmMcpServer, type createPmMcpBinding, type PmMcpAuthorization } from './pm-server';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID } from 'crypto';
@@ -33,6 +34,8 @@ export interface McpServerOptions {
   codingRuntime?: McpCodingRuntime | null;
   engineerAuthorizationId?: string;
   verifyEngineerAuthorization?: (token: string, authorizationId: string) => void;
+  pmBinding?: ReturnType<typeof createPmMcpBinding>;
+  pmAuthorization?: PmMcpAuthorization;
 }
 
 export interface McpCodingRuntime {
@@ -206,7 +209,6 @@ export function createMcpToolContext(opts: McpServerOptions): McpToolContext {
   const runnerTimeoutMs = parseTimeoutMs(
     opts.devRunnerTimeoutMs ?? process.env.REPO_HARNESS_MCP_DEV_RUNNER_TIMEOUT_MS ?? config?.devMode?.timeoutMs,
   );
-  const fullDiskRead = false;
   const configuredAllowedRoots = Array.from(new Set([
     ...(opts.allowedRoots ?? []),
     ...(config?.permissions?.allowedRoots ?? []),
@@ -244,7 +246,6 @@ export function createMcpToolContext(opts: McpServerOptions): McpToolContext {
     devAgentRunner,
     allowedAgents,
     runnerTimeoutMs,
-    fullDiskRead,
     enableReader: readerEnabled,
     allowedRoots: policyAllowedRoots,
     discoveryRoots,
@@ -266,6 +267,13 @@ export function createMcpToolContext(opts: McpServerOptions): McpToolContext {
 }
 
 export function createRepoHarnessMcpServer(opts: McpServerOptions): Server {
+  if (opts.profile === 'pm') {
+    if (opts.enableReader || opts.enableChatgptBrowser || opts.enableDevRunner || opts.allowedRoots?.length
+      || opts.devRunnerAgents || opts.devRunnerTimeoutMs || opts.codingRuntime || opts.engineerAuthorizationId) {
+      throw new Error('PM MCP does not permit workspace, browser, runner, or authorization overrides');
+    }
+    return createPmMcpServer(undefined, { binding: opts.pmBinding, authorization: opts.pmAuthorization });
+  }
   const ctx = createMcpToolContext(opts);
   const codingRuntime = codingRuntimeForContext.get(ctx);
   const ownsCodingRuntime = codingRuntime !== undefined && opts.codingRuntime === undefined;

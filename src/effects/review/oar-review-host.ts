@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readSessionArtifact, writeSessionArtifact, type TaskRequest } from '../terminal/task-session';
+import { processIdentity, readSessionArtifact, writeSessionArtifact, type TaskRequest } from '../terminal/task-session';
 import type { AvailableInstallation } from '@botiverse/oar';
 import { dirname } from 'node:path';
 import { reviewHostTemporaryDirectory, reviewIsolationPolicy, prepareReviewLauncher, assertReviewIsolation, type ReviewIsolationAdmission } from './review-isolation';
@@ -99,6 +99,24 @@ export async function runHostFileRequest(host: OarReviewHost, spec: ReviewHostSp
   return observation;
 }
 
+/** Serves file requests until close. A close request also reaches a pending
+ * turn: disposal aborts it, and the aborted turn is not a turn failure. */
+export async function serveHostFileRequests(host: OarReviewHost, spec: ReviewHostSpec, close: () => Promise<void>, closing: () => boolean): Promise<void> {
+  const closeRequest = join(spec.controlDirectory, 'close.request');
+  const watch = setInterval(() => { if (existsSync(closeRequest)) void close(); }, 25);
+  try {
+    for (let round = 1; !closing() && !existsSync(closeRequest);) {
+      const path = join(spec.requestDirectory, `request-${round}.json`);
+      if (!existsSync(path)) { await new Promise(resolve => setTimeout(resolve, 25)); continue; }
+      if (round > 3) throw new Error('OAR_REVIEW_ROUND_BUDGET_EXHAUSTED');
+      const observation = await runHostFileRequest(host, spec, readSessionArtifact<TaskRequest>(path));
+      if (closing()) return;
+      if (observation.kind !== 'ended' || observation.outcome !== 'completed') throw new Error('OAR_REVIEW_TURN_FAILED');
+      round++;
+    }
+  } finally { clearInterval(watch); }
+}
+
 export async function openReviewHost(spec: ReviewHostSpec, print: (event: unknown) => void): Promise<OarReviewHost> {
   assertOarHostNode();
   if (spec.controlDirectory !== spec.isolation.paths.journal || spec.output !== spec.isolation.paths.output
@@ -116,6 +134,9 @@ export async function openReviewHost(spec: ReviewHostSpec, print: (event: unknow
   if (spec.options.cwd !== spec.output) throw new Error('OAR_REVIEW_OUTPUT_CWD_REQUIRED');
   process.env.TMPDIR = reviewHostTemporaryDirectory(spec.output);
   delete process.env.OAR_CODEX_SANDBOX; // Never inherit: stock OAR default under the admitted child profile.
+  // From here a native reviewer child can exist until disposal. Cleanup of an
+  // unbound host that exits without disposed.json must stay pending.
+  writeSessionArtifact(join(spec.controlDirectory, 'session-opening.json'), { pid: process.pid });
   return new OarReviewHost(await reviewRuntime(spec.kind).session(spec.installation, spec.options), print);
 }
 
@@ -138,6 +159,10 @@ async function main(): Promise<void> {
       { kind: 'available', via: 'bundled' }, { cwd: spec.cwd }), view => console.log(JSON.stringify({ fixture: true, view })));
   } else {
     if (process.platform !== 'darwin' || spec.options.cwd !== spec.output) throw new Error('OAR_REVIEW_ISOLATION_UNSUPPORTED');
+    // An operator terminal can repeat the launch command. Only the first host
+    // claims the control directory; a later one exits before any Session or
+    // ready/disposed artifact.
+    writeSessionArtifact(join(spec.controlDirectory, 'host-claim.json'), { pid: process.pid, identity: processIdentity(process.pid) });
     // OAR launches the reviewer through the proved child Seatbelt executable.
     delete process.env.OAR_CODEX_SANDBOX;
     host = await openReviewHost(spec, view => console.log(JSON.stringify({ oar: view })));
@@ -149,7 +174,10 @@ async function main(): Promise<void> {
   const close = () => closing ??= host.dispose();
   // Disposal ack is written by finally, not inferred from a signal/idle.
   const signal = () => { void close(); };
-  process.once('SIGTERM', signal); process.once('SIGINT', signal);
+  // A closed terminal tab sends SIGHUP and removes the tty. Dispose anyway;
+  // console output is observation only, so a lost tty must not stop disposal.
+  process.stdout.on('error', () => {});
+  process.once('SIGTERM', signal); process.once('SIGINT', signal); process.once('SIGHUP', signal);
   try {
     writeSessionArtifact(readyFile, { pid: process.pid, session_id: host.sessionId, fixture: spec.mode === 'scripted' });
     console.log('OAR_HOST_READY');
@@ -157,17 +185,7 @@ async function main(): Promise<void> {
       for (const input of spec.inputs) await host.prompt(input);
       console.log('OAR_HOST_ROUNDS_DONE_FIXTURE');
       while (!existsSync(closeRequest) && !closing) await new Promise(resolve => setTimeout(resolve, 25));
-    } else {
-      for (let round = 1; !closing && !existsSync(closeRequest);) {
-        const path = join(spec.requestDirectory, `request-${round}.json`);
-        if (!existsSync(path)) { await new Promise(resolve => setTimeout(resolve, 25)); continue; }
-        if (round > 3) throw new Error('OAR_REVIEW_ROUND_BUDGET_EXHAUSTED');
-        const request = readSessionArtifact<TaskRequest>(path);
-        const observation = await runHostFileRequest(host, spec, request);
-        if (observation.kind !== 'ended' || observation.outcome !== 'completed') throw new Error('OAR_REVIEW_TURN_FAILED');
-        round++;
-      }
-    }
+    } else await serveHostFileRequests(host, spec, close, () => closing !== undefined);
   } catch (error) {
     if (spec.mode === 'review') writeSessionArtifact(join(spec.controlDirectory, 'error.json'), { error: String(error) });
     throw error;
@@ -175,7 +193,7 @@ async function main(): Promise<void> {
     await close();
     writeSessionArtifact(disposedFile, { disposed: true, fixture: spec.mode === 'scripted' });
     console.log('OAR_HOST_DISPOSED');
-    process.removeListener('SIGTERM', signal); process.removeListener('SIGINT', signal);
+    process.removeListener('SIGTERM', signal); process.removeListener('SIGINT', signal); process.removeListener('SIGHUP', signal);
   }
 }
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {

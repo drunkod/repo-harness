@@ -23,7 +23,6 @@ if [[ -f "$PI_LIB_DIR/project-init-lib.sh" ]]; then
     . "$PI_LIB_DIR/project-init-lib.sh"
 fi
 ASSETS_REF_DIR="$SCRIPT_DIR/../assets/reference-configs"
-ASSETS_HOOKS_DIR="$SCRIPT_DIR/../assets/hooks"
 ASSETS_TEMPLATES_DIR="$SCRIPT_DIR/../assets/templates"
 ASSETS_FACTOR_FACTORY_DIR="$ASSETS_TEMPLATES_DIR/factor-factory"
 ASSETS_WORKFLOW_CONTRACT="$SCRIPT_DIR/../assets/workflow-contract.v1.json"
@@ -61,12 +60,8 @@ ensure_gitignore_entry() {
 }
 
 install_hook_assets() {
-    pi_install_hook_assets "$PWD" "$ASSETS_HOOKS_DIR" "apply"
-    echo -e "${GREEN}Repo-local hook fallback installed to .ai/hooks/${NC}"
-}
-
-install_workflow_contract() {
-    pi_install_workflow_contract "$PWD" "$ASSETS_WORKFLOW_CONTRACT" "apply"
+    pi_install_hook_assets "$PWD" "apply"
+    echo -e "${GREEN}Package helper guidance written to .ai/hooks/README.md${NC}"
 }
 
 create_contract_directories() {
@@ -303,7 +298,6 @@ EOF
     local helper_names
     helper_names="$(pi_workflow_contract_query_lines "$ASSETS_WORKFLOW_CONTRACT" "helpers.scripts" | xargs)"
     pi_install_helpers "$PWD" "$ASSETS_TEMPLATES_DIR/helpers" "apply" "$helper_names"
-    install_workflow_contract
     if pi_should_enable_factor_factory "$(pi_plan_type "$STACK")"; then
         pi_install_factor_factory "$PWD" "$ASSETS_FACTOR_FACTORY_DIR" "$SCRIPT_DIR" "apply"
     fi
@@ -312,9 +306,7 @@ EOF
     # - .ai/context/context-map.json
     # - .ai/harness/policy.json
     # - .ai/harness/brain-manifest.json
-    # - .ai/harness/checks/latest.json
     # - .ai/harness/events.jsonl
-    # - .ai/harness/architecture/events.jsonl
     # - .ai/harness/handoff/current.md
     # - .ai/harness/handoff/resume.md
     # - .ai/harness/failures/latest.jsonl
@@ -344,7 +336,6 @@ EOF
     ensure_gitignore_entry .gitignore ""
     ensure_gitignore_entry .gitignore "# External references"
     ensure_gitignore_entry .gitignore "_ref/"
-    ensure_gitignore_entry .gitignore ".archcontext/"
     ensure_gitignore_entry .gitignore ".codegraph/"
     ensure_gitignore_entry .gitignore ""
     ensure_gitignore_entry .gitignore "# Local operations state"
@@ -450,34 +441,13 @@ STAMP_EOF
     echo -e "${GREEN}Version stamp written to $stamp_file${NC}"
 }
 
-# Run a skill lifecycle hook (if bun is available)
-run_skill_hook() {
-    local event="$1"
-    local hook_script="$SCRIPT_DIR/run-skill-hook.ts"
-
-    if command_exists bun && [ -f "$hook_script" ]; then
-        bun "$hook_script" "$event" --context "{\"projectName\":\"$PROJECT_NAME\",\"stack\":\"$STACK\"}" 2>&1 || {
-            if [[ "$event" == pre-* ]]; then
-                echo -e "${RED}Pre-hook $event failed, aborting.${NC}"
-                return 1
-            else
-                echo -e "${YELLOW}Post-hook $event warning (non-fatal).${NC}"
-            fi
-        }
-    fi
-}
-
 # Main execution
 main() {
-    run_skill_hook "pre-init" || exit 1
-
     check_package_manager
     create_project
     create_structure
     install_dev_tools
     write_version_stamp
-
-    run_skill_hook "post-init"
 
     echo ""
     echo -e "${GREEN}=== Project initialized successfully! ===${NC}"

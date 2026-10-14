@@ -1,4 +1,4 @@
-import { ensureGlobalRefactorRecommendations } from './refactor-recommendation-configuration';
+import { bunGlobalPackageRoot, isBunGlobalPackageSource, skillLinkMatches } from "../installer/skill-projection";
 import { ensureGlobalArchitectureProjection } from './architecture-configuration';
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "fs";
 import { homedir, tmpdir, userInfo } from "os";
@@ -11,9 +11,11 @@ import {
   type InitRuntimeDependencies,
 } from "./init";
 import { runInstall, type InstallTargetSpec } from "./install";
+import { configureRequiredHerdrSkill } from "./herdr-skill";
 import { compareVersions, readLatestPackageVersion } from "./doctor";
 import { configureCodegraph } from "../tools/codegraph";
-import { runProcess as runBoundedProcess } from "../../effects/process-runner";
+import { DEFAULT_PROCESS_MAX_BUFFER_BYTES, redactProcessOutput, runProcess as runBoundedProcess } from "../../effects/process-runner";
+import { formatLegacyLeftoverSummary, type LeftoverItem } from "../../core/upgrade/legacy-inventory";
 import { commitVerifiedSkillTree, skillTreeSha256 } from "../../effects/skill-tree-integrity";
 import {
   PROFILE_COMPONENTS,
@@ -322,8 +324,11 @@ function hostIds(target: InstallTargetSpec): Array<"codex" | "claude"> {
   return ["claude", "codex"];
 }
 
-function targetFromHostIds(hosts: readonly ("codex" | "claude")[]): InstallTargetSpec {
-  return hosts.length === 2 ? "both" : hosts[0]!;
+function targetFromHostIds(hosts: readonly ("codex" | "claude" | "pi")[]): InstallTargetSpec {
+  if (hosts.some(host => host === 'pi')) throw new Error('Pi packages use the Pi installer');
+  const first = hosts[0];
+  if (first !== 'codex' && first !== 'claude') throw new Error('No install host selected');
+  return hosts.length === 2 ? "both" : first;
 }
 
 function homeDir(env?: NodeJS.ProcessEnv): string {
@@ -379,13 +384,6 @@ function parsePackedTarballFilename(stdout: string): string | null {
 function appendOutput(...values: Array<string | undefined>): string | undefined {
   const output = values.filter((value) => value && value.trim()).join("\n");
   return output || undefined;
-}
-
-function bunGlobalPackageRoot(env?: NodeJS.ProcessEnv): string | null {
-  const bunInstall = env?.BUN_INSTALL ?? process.env.BUN_INSTALL;
-  const home = env?.HOME ?? process.env.HOME ?? process.env.USERPROFILE;
-  const bunRoot = bunInstall ? resolve(bunInstall) : home ? join(resolve(home), ".bun") : null;
-  return bunRoot ? join(bunRoot, "install", "global", "node_modules", "repo-harness") : null;
 }
 
 interface PackageManifest {
@@ -475,7 +473,6 @@ function readManagedRuntime(
       policy: {
         provider: "archctx" as const,
         applyMode: "manual" as const,
-        failureGate: "advisory" as const,
         requiredVersion: String(dependencies.archctx),
         timeoutMs: 10_000,
       },
@@ -536,7 +533,7 @@ function inspectManagedDaemonRuntime(cwd: string, env: NodeJS.ProcessEnv): Globa
     if (typeof requiredVersion !== 'string') throw new Error('managed archctx dependency version is unavailable');
     verifyArchctxDaemonRuntime(cwd, {
       consumerRoot, env,
-      policy: { provider: 'archctx', applyMode: 'manual', failureGate: 'advisory', requiredVersion, timeoutMs: 10_000 },
+      policy: { provider: 'archctx', applyMode: 'manual', requiredVersion, timeoutMs: 10_000 },
     });
     return { step: 'check shared ArchContext daemon', status: 'ok', detail: 'daemon is compatible or cleanly stopped' };
   } catch (error) {
@@ -559,17 +556,6 @@ export function verifyInstalledManagedRuntime(
   if (packages.status !== 'ok') return packages;
   const daemon = inspectManagedDaemonRuntime(cwd, env);
   return daemon.status === 'failed' ? { ...packages, status: 'failed', detail: daemon.detail } : packages;
-}
-
-function isBunGlobalPackageSource(sourceRoot: string, env?: NodeJS.ProcessEnv): boolean {
-  const globalPackageRoot = bunGlobalPackageRoot(env);
-  if (globalPackageRoot === null) return false;
-  if (resolve(sourceRoot) === globalPackageRoot) return true;
-  try {
-    return realpathSync(join(sourceRoot, "package.json")) === realpathSync(join(globalPackageRoot, "package.json"));
-  } catch (_error) {
-    return false;
-  }
 }
 
 // Best-effort: readLatestPackageVersion() already swallows offline/npm-missing/
@@ -789,6 +775,41 @@ function reconcileWithInstalledCandidate(
       stderr: child.stderr,
     };
   }
+}
+
+/**
+ * Bun replaces the package files in place, but the updater keeps its
+ * predecessor modules. Old modules cannot be trusted to parse new assets, so
+ * the package that now owns the runtime runs the leftover check.
+ */
+export function updateLeftoverSummary(cwd: string, installedCli: boolean): string {
+  const bunExecutable = resolveBunExecutable();
+  const env = bindBunRuntimeEnv(commandEnv(defaultSourceRoot()), bunExecutable);
+  const packageRoot = installedCli ? bunGlobalPackageRoot(env) : defaultSourceRoot();
+  if (packageRoot === null) return leftoverCheckWarning('unable to resolve the installed package root');
+  // Parse the payload before any redaction or cap: a path such as token=x
+  // would otherwise lose its closing quote. Only the parsed count is printed.
+  const check = runBoundedProcess(bunExecutable, [join(realPathOrResolved(packageRoot), 'src', 'cli', 'index.ts'), 'upgrade', '--json'], {
+    cwd,
+    env,
+    redactions: [],
+    maxOutputBytes: DEFAULT_PROCESS_MAX_BUFFER_BYTES,
+  });
+  let items: unknown;
+  try {
+    items = JSON.parse(check.stdout);
+  } catch (_error) {
+    items = null;
+  }
+  // The check exits 1 when leftovers exist. An empty list with exit 1 is a failed check.
+  if (!Array.isArray(items) || (!check.ok && items.length === 0)) {
+    return leftoverCheckWarning(redactProcessOutput((check.stderr || check.error).trim()) || 'upgrade --json returned no leftover list');
+  }
+  return formatLegacyLeftoverSummary(items as LeftoverItem[]);
+}
+
+function leftoverCheckWarning(reason: string): string {
+  return `Leftover check failed: ${reason}. Run: repo-harness upgrade`;
 }
 
 const AGENT_FLEET_STEP = 'install agent fleet';
@@ -1085,10 +1106,8 @@ function preflightStagedSkillProjection(
     for (const root of roots) {
       const destination = join(root.path, skill);
       if (!pathEntryExists(destination)) continue;
-      try {
-        if (existsSync(join(source, 'SKILL.md')) && realpathSync(destination) === realpathSync(source)) continue;
-      } catch { /* the fail-closed result below owns unreadable projections */ }
-      return { step, status: 'failed', detail: `refusing to refresh unowned host skill ${destination}` };
+      if (skillLinkMatches(destination, source)) continue;
+      return { step, status: 'failed', detail: `refusing to refresh unowned host skill ${destination}; preserve or move this path, then run: repo-harness install --profile full --target ${target}` };
     }
   }
   return null;
@@ -1129,7 +1148,7 @@ function projectStagedSkills(
         const invalidAfter = invalidProjectionRoot(root.path, root.expected);
         if (invalidAfter) return fail(invalidAfter);
         if (pathEntryExists(destination)) {
-          if (realpathSync(destination) === realpathSync(source)) {
+          if (skillLinkMatches(destination, source)) {
             projected.push(destination);
             continue;
           }
@@ -1483,9 +1502,6 @@ export function runGlobalRuntimeSetup(
   const architectureConfiguration = ensureGlobalArchitectureProjection(env);
   steps.push(architectureConfiguration);
   if (architectureConfiguration.status === 'failed') return finalizeRuntimeResult(steps);
-  const recommendations = ensureGlobalRefactorRecommendations(env);
-  steps.push(recommendations);
-  if (recommendations.status === 'failed') return finalizeRuntimeResult(steps);
 
   if (opts.syncSkill !== false) steps.push(syncRuntimeSkill(sourceRoot, profile, env));
   else steps.push({ step: "sync repo-harness skill runtime", status: "skipped", detail: "disabled" });
@@ -1610,5 +1626,6 @@ export function runGlobalRuntimeSetup(
     steps.push({ step: "configure CodeGraph MCP", status: "skipped", detail: "disabled" });
   }
 
+  if (steps.every((step) => step.status !== "failed")) steps.push(configureRequiredHerdrSkill(target, env));
   return finalizeRuntimeResult(steps);
 }

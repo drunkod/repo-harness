@@ -13,9 +13,8 @@ import {
   unlinkSync,
   writeSync,
 } from 'fs';
-import { homedir } from 'os';
 import { join } from 'path';
-import { createHash, randomUUID } from 'crypto';
+import { randomUUID } from 'crypto';
 
 import {
   buildPublicationCreateIntent,
@@ -35,8 +34,9 @@ import {
   type PublicationCreateIntentV1,
   type PublicationJournalEvidenceV1,
   type PublicationPrepareEnvelopeV1,
-  type PublicationReceiptV1,
+  type PublicationReceiptV3,
 } from '../../core/publication/publication-receipt';
+import { candidate } from '../../../scripts/merge-gate';
 import { readLease, withTaskLock } from '../state/coordination-lease-store';
 import { resolveGitCommonDirectory } from '../git/common-directory';
 
@@ -80,14 +80,6 @@ export interface ProviderPullRequestIntegrationV1 extends ProviderPullRequestV1,
   readonly merge_commit_sha: string | null;
 }
 
-export interface MergeSealEvidenceV1 {
-  readonly path: string;
-  readonly sha256: string;
-  readonly base_sha: string;
-  readonly head_sha: string;
-  readonly review_subject_sha256: string;
-}
-
 export interface PublicationReceiptEnsureInput {
   readonly repo_root: string;
   readonly task_id: string;
@@ -100,8 +92,6 @@ export interface PublicationReceiptEnsureInput {
   readonly create_intent_journal_path?: string;
   readonly gh_bin?: string;
   readonly git_bin?: string;
-  readonly merge_seal_path?: string;
-  readonly checks_path?: string;
 }
 
 export type PublicationReceiptPrepareInput = Omit<PublicationReceiptEnsureInput, 'create_intent'>;
@@ -111,12 +101,17 @@ export interface PublicationReceiptRebuildInput {
   readonly pr_number: number;
   readonly gh_bin?: string;
   readonly git_bin?: string;
-  readonly merge_seal_path?: string;
-  readonly checks_path?: string;
+}
+
+export interface PublicationIdentityInput {
+  readonly repo_root: string;
+  readonly receipt: PublicationReceiptV3;
+  readonly gh_bin?: string;
+  readonly git_bin?: string;
 }
 
 export interface PublicationReceiptResult {
-  readonly receipt: PublicationReceiptV1;
+  readonly receipt: PublicationReceiptV3;
   readonly cache_path: string;
   readonly marker_changed: boolean;
 }
@@ -242,7 +237,7 @@ export function observeProviderPullRequestState(
   }
 }
 
-/** Shared decoder for the CLI and budget-owned Campaign transport observations. */
+/** Decoder for provider integration observations. */
 export function providerIntegrationFromJson(
   providerRepoId: string, value: unknown, prNumber: number,
 ): ProviderPullRequestIntegrationV1 {
@@ -301,11 +296,6 @@ function gitTreeForHead(repoRoot: string, gitBin: string, headSha: string): stri
   return gitText(repoRoot, gitBin, ['rev-parse', `${headSha}^{tree}`]);
 }
 
-function defaultMergeSealPath(repoRoot: string): string {
-  const repositoryId = createHash('sha256').update(realpathSync(repoRoot)).digest('hex');
-  return join(homedir(), '.repo-harness', 'gates', repositoryId, 'merge-seal.latest.json');
-}
-
 function readRegular(path: string, label: string): Buffer {
   let stat: ReturnType<typeof lstatSync>;
   try {
@@ -321,36 +311,34 @@ function readRegular(path: string, label: string): Buffer {
   }
 }
 
-function readMergeSeal(repoRoot: string, requestedPath?: string): MergeSealEvidenceV1 {
-  const path = requestedPath ?? defaultMergeSealPath(repoRoot);
-  const raw = readRegular(path, 'merge seal');
-  let parsed: unknown;
+/**
+ * The candidate diff is a projection of the published base and head. It needs
+ * only local Git objects, never the host merge seal: a Draft PR is not merge
+ * ready, so main-merge authorization cannot be a publication prerequisite.
+ */
+function candidateDiffFingerprint(repoRoot: string, baseSha: string, headSha: string): string {
+  let current: ReturnType<typeof candidate>;
   try {
-    parsed = JSON.parse(raw.toString('utf-8'));
+    current = candidate(repoRoot, baseSha);
   } catch (error) {
-    throw incomplete(`merge seal is invalid JSON: ${path}`, error);
+    throw incomplete(`candidate diff evidence is unavailable: ${error instanceof Error ? error.message : String(error)}`, error);
   }
-  const value = asRecord(parsed, 'merge seal');
-  if (value.protocol !== 1 || value.kind !== 'repo-harness-merge-seal') throw incomplete('merge seal protocol or kind is invalid');
-  return Object.freeze({
-    path,
-    sha256: publicationSha256(raw),
-    base_sha: requiredString(value.base_sha, 'merge seal base_sha'),
-    head_sha: requiredString(value.head_sha, 'merge seal head_sha'),
-    review_subject_sha256: requiredString(value.acceptance_subject_sha256, 'merge seal acceptance_subject_sha256'),
-  });
+  if (current.baseSha !== baseSha || current.headSha !== headSha) {
+    throw mismatch(`local candidate ${current.headSha} on ${current.baseSha} does not match publication head ${headSha} on ${baseSha}`);
+  }
+  return current.diffFingerprint;
 }
 
-function verificationEvidenceDigest(repoRoot: string, requestedPath?: string): string {
-  return publicationSha256(readRegular(requestedPath ?? join(repoRoot, '.ai/harness/checks/latest.json'), 'verification evidence'));
-}
-
-function assertLiveEvidence(receipt: PublicationReceiptV1, provider: ProviderPullRequestV1, repoRoot: string, gitBin: string, mergeSealPath?: string, checksPath?: string): void {
+/**
+ * Historical publication identity. The provider reports the current target tip
+ * as the PR base, so a later target advance is not an identity change; repair
+ * transitions use this check, and merge readiness reports the moved base.
+ */
+function assertLiveIdentity(receipt: PublicationReceiptV3, provider: ProviderPullRequestV1, repoRoot: string, gitBin: string): void {
   if (provider.provider_repo_id !== receipt.provider_repo_id
     || provider.pr_number !== receipt.pr_number
     || provider.pr_url !== receipt.pr_url
     || provider.base_ref !== receipt.target_ref
-    || provider.base_sha !== receipt.base_sha
     || provider.head_ref !== receipt.branch
     || provider.head_sha !== receipt.head_sha
     || provider.created_at !== receipt.created_at) {
@@ -362,15 +350,16 @@ function assertLiveEvidence(receipt: PublicationReceiptV1, provider: ProviderPul
   if (gitTreeForHead(repoRoot, gitBin, receipt.head_sha) !== receipt.tree_sha) {
     throw mismatch(`local tree no longer matches publication head ${receipt.head_sha}`);
   }
-  if (verificationEvidenceDigest(repoRoot, checksPath) !== receipt.verification_evidence_sha256) {
-    throw mismatch(`verification evidence no longer matches publication ${receipt.publication_id}`);
+}
+
+/** Rebuild evidence: identity plus the unchanged base the receipt was created on. */
+function assertLiveEvidence(receipt: PublicationReceiptV3, provider: ProviderPullRequestV1, repoRoot: string, gitBin: string): void {
+  assertLiveIdentity(receipt, provider, repoRoot, gitBin);
+  if (provider.base_sha !== receipt.base_sha) {
+    throw mismatch(`provider base ${provider.base_sha} no longer matches publication ${receipt.publication_id} base ${receipt.base_sha}`);
   }
-  const seal = readMergeSeal(repoRoot, mergeSealPath);
-  if (seal.sha256 !== receipt.merge_seal_sha256
-    || seal.base_sha !== receipt.base_sha
-    || seal.head_sha !== receipt.head_sha
-    || seal.review_subject_sha256 !== receipt.review_subject_sha256) {
-    throw mismatch(`merge seal no longer matches publication ${receipt.publication_id}`);
+  if (candidateDiffFingerprint(repoRoot, receipt.base_sha, receipt.head_sha) !== receipt.candidate_diff_fingerprint) {
+    throw mismatch(`candidate diff no longer matches publication ${receipt.publication_id}`);
   }
 }
 
@@ -435,13 +424,13 @@ function writeAll(fd: number, content: Buffer): void {
   while (offset < content.length) offset += writeSync(fd, content, offset, content.length - offset);
 }
 
-function assertCacheEquivalent(target: string, expected: PublicationReceiptV1): void {
+function assertCacheEquivalent(target: string, expected: PublicationReceiptV3): void {
   const current = readRegular(target, 'publication receipt cache');
-  let cached: PublicationReceiptV1;
+  let cached: PublicationReceiptV3;
   try {
     cached = validatePublicationReceipt(JSON.parse(current.toString('utf-8')));
   } catch (error) {
-    throw mismatch(`cached publication receipt is invalid: ${target}`, error);
+    throw mismatch(`cached publication receipt is invalid: ${target}: ${error instanceof Error ? error.message : String(error)}`, error);
   }
   if (canonicalPublicationReceiptBytes(cached) !== canonicalPublicationReceiptBytes(expected)) {
     throw mismatch(`cached publication receipt conflicts with ${expected.publication_id}`);
@@ -449,7 +438,7 @@ function assertCacheEquivalent(target: string, expected: PublicationReceiptV1): 
 }
 
 /** Atomically write a receipt cache; a same-id different payload is never overwritten. */
-export function writePublicationReceiptCache(repoRoot: string, receipt: PublicationReceiptV1, gitBin = 'git'): string {
+export function writePublicationReceiptCache(repoRoot: string, receipt: PublicationReceiptV3, gitBin = 'git'): string {
   const valid = validatePublicationReceipt(receipt);
   const directory = receiptDirectory(repoRoot, gitBin);
   const target = publicationReceiptPath(repoRoot, valid.publication_id, gitBin);
@@ -499,17 +488,17 @@ export function writePublicationReceiptCache(repoRoot: string, receipt: Publicat
   return target;
 }
 
-export function readPublicationReceiptCache(repoRoot: string, publicationId: string, gitBin = 'git'): PublicationReceiptV1 | null {
+export function readPublicationReceiptCache(repoRoot: string, publicationId: string, gitBin = 'git'): PublicationReceiptV3 | null {
   const path = publicationReceiptPath(repoRoot, publicationId, gitBin);
   if (!existsSync(path)) return null;
   try {
     return validatePublicationReceipt(JSON.parse(readRegular(path, 'publication receipt cache').toString('utf-8')));
   } catch (error) {
-    throw mismatch(`cached publication receipt is invalid: ${path}`, error);
+    throw mismatch(`cached publication receipt is invalid: ${path}: ${error instanceof Error ? error.message : String(error)}`, error);
   }
 }
 
-function expectedReceipt(input: PublicationReceiptEnsureInput, provider: ProviderPullRequestV1): PublicationReceiptV1 {
+function expectedReceipt(input: PublicationReceiptEnsureInput, provider: ProviderPullRequestV1): PublicationReceiptV3 {
   const gitBin = input.git_bin ?? 'git';
   const owner = assertOwner(input.repo_root, gitBin, input.task_id, input.claim_id, input.branch);
   if (owner.target_ref !== input.target_branch) {
@@ -521,10 +510,6 @@ function expectedReceipt(input: PublicationReceiptEnsureInput, provider: Provide
   }
   if (provider.head_ref !== input.branch) throw mismatch(`provider head ref ${provider.head_ref} does not match receipt branch ${input.branch}`);
   if (provider.head_sha !== head.head_sha) throw mismatch(`provider head ${provider.head_sha} does not match local head ${head.head_sha}`);
-  const seal = readMergeSeal(input.repo_root, input.merge_seal_path);
-  if (seal.head_sha !== head.head_sha || seal.base_sha === '' || provider.base_sha !== seal.base_sha) {
-    throw mismatch(`merge seal does not bind local publication head ${head.head_sha}`);
-  }
   return buildPublicationReceipt({
     repo_id: repositoryIdentity(input.repo_root, gitBin),
     task_id: input.task_id,
@@ -532,13 +517,11 @@ function expectedReceipt(input: PublicationReceiptEnsureInput, provider: Provide
     claim_id: input.claim_id,
     generation: owner.generation,
     target_ref: owner.target_ref,
-    base_sha: seal.base_sha,
+    base_sha: provider.base_sha,
     branch: input.branch,
     head_sha: head.head_sha,
     tree_sha: head.tree_sha,
-    review_subject_sha256: seal.review_subject_sha256,
-    verification_evidence_sha256: verificationEvidenceDigest(input.repo_root, input.checks_path),
-    merge_seal_sha256: seal.sha256,
+    candidate_diff_fingerprint: candidateDiffFingerprint(input.repo_root, provider.base_sha, head.head_sha),
     provider: 'github',
     provider_repo_id: provider.provider_repo_id,
     pr_number: provider.pr_number,
@@ -547,7 +530,7 @@ function expectedReceipt(input: PublicationReceiptEnsureInput, provider: Provide
   });
 }
 
-function assertCreateIntentAgreement(expected: PublicationReceiptV1, intent: PublicationCreateIntentV1): void {
+function assertCreateIntentAgreement(expected: PublicationReceiptV3, intent: PublicationCreateIntentV1): void {
   const valid = validatePublicationCreateIntent(intent);
   if (valid.publication_id !== expected.publication_id
     || valid.provider_repo_id !== expected.provider_repo_id
@@ -590,16 +573,16 @@ function assertDurableCreateIntent(path: string | undefined, expected: Publicati
 }
 
 function assertMarkerAgreement(
-  expected: PublicationReceiptV1,
+  expected: PublicationReceiptV3,
   provider: ProviderPullRequestV1,
   createIntent?: PublicationCreateIntentV1,
   createIntentJournalPath?: string,
 ): void {
-  let marker: PublicationReceiptV1 | null;
+  let marker: PublicationReceiptV3 | null;
   try {
     marker = decodePublicationMarker(provider.body);
   } catch (error) {
-    throw mismatch('provider publication marker is invalid', error);
+    throw mismatch(`provider publication marker is invalid: ${error instanceof Error ? error.message : String(error)}`, error);
   }
   if (marker === null) {
     if (createIntent === undefined) throw mismatch(`provider PR ${provider.pr_number} has no publication marker and no matching create intent`);
@@ -673,19 +656,28 @@ export function ensurePublicationReceipt(input: PublicationReceiptEnsureInput): 
   }
 }
 
+function observeMarkedPublication(
+  repoRoot: string,
+  ghBin: string,
+  prNumber: number,
+): { readonly provider: ProviderPullRequestV1; readonly receipt: PublicationReceiptV3 } {
+  const provider = observeProviderPrByNumber(repoRoot, ghBin, prNumber);
+  let receipt: PublicationReceiptV3 | null;
+  try {
+    receipt = decodePublicationMarker(provider.body);
+  } catch (error) {
+    throw mismatch(`provider publication marker is invalid: ${error instanceof Error ? error.message : String(error)}`, error);
+  }
+  if (receipt === null) throw incomplete(`provider PR ${prNumber} has no publication receipt marker`);
+  return { provider, receipt };
+}
+
 export function rebuildPublicationReceipt(input: PublicationReceiptRebuildInput): PublicationReceiptResult {
   try {
     const ghBin = input.gh_bin ?? process.env.REPO_HARNESS_GH_BIN ?? 'gh';
     const gitBin = input.git_bin ?? 'git';
-    const provider = observeProviderPrByNumber(input.repo_root, ghBin, input.pr_number);
-    let receipt: PublicationReceiptV1 | null;
-    try {
-      receipt = decodePublicationMarker(provider.body);
-    } catch (error) {
-      throw mismatch('provider publication marker is invalid', error);
-    }
-    if (receipt === null) throw incomplete(`provider PR ${input.pr_number} has no publication receipt marker`);
-    assertLiveEvidence(receipt, provider, input.repo_root, gitBin, input.merge_seal_path, input.checks_path);
+    const { provider, receipt } = observeMarkedPublication(input.repo_root, ghBin, input.pr_number);
+    assertLiveEvidence(receipt, provider, input.repo_root, gitBin);
     const cachePath = writePublicationReceiptCache(input.repo_root, receipt, gitBin);
     return Object.freeze({ receipt, cache_path: cachePath, marker_changed: false });
   } catch (error) {
@@ -694,7 +686,27 @@ export function rebuildPublicationReceipt(input: PublicationReceiptRebuildInput)
   }
 }
 
-export function publicationJournalEvidence(receipt: PublicationReceiptV1): PublicationJournalEvidenceV1 {
+/**
+ * Revalidate a known receipt against its live marker, provider identity, and
+ * local repository without requiring the target base to be unchanged.
+ */
+export function verifyPublicationIdentity(input: PublicationIdentityInput): PublicationReceiptV3 {
+  try {
+    const ghBin = input.gh_bin ?? process.env.REPO_HARNESS_GH_BIN ?? 'gh';
+    const expected = validatePublicationReceipt(input.receipt);
+    const { provider, receipt } = observeMarkedPublication(input.repo_root, ghBin, expected.pr_number);
+    if (canonicalPublicationReceiptBytes(receipt) !== canonicalPublicationReceiptBytes(expected)) {
+      throw mismatch(`provider marker conflicts with publication ${expected.publication_id}`);
+    }
+    assertLiveIdentity(expected, provider, input.repo_root, input.git_bin ?? 'git');
+    return expected;
+  } catch (error) {
+    if (error instanceof PublicationReceiptError) throw error;
+    throw incomplete('publication identity verification failed', error);
+  }
+}
+
+export function publicationJournalEvidence(receipt: PublicationReceiptV3): PublicationJournalEvidenceV1 {
   return validatePublicationJournalEvidence({
     provider_repo_id: receipt.provider_repo_id,
     provider_pr_number: receipt.pr_number,
@@ -703,6 +715,6 @@ export function publicationJournalEvidence(receipt: PublicationReceiptV1): Publi
   });
 }
 
-export function canonicalPublicationJournalEvidence(receipt: PublicationReceiptV1): string {
+export function canonicalPublicationJournalEvidence(receipt: PublicationReceiptV3): string {
   return canonicalPublicationJournalEvidenceBytes(publicationJournalEvidence(receipt));
 }

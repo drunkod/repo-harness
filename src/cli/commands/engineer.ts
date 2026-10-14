@@ -41,10 +41,8 @@ import {
 import { repoHarnessRepoIdFor } from '../../effects/repo-registry';
 import { resolveEngineerPrincipal } from '../../effects/engineers/principal';
 import { collectEngineerOffers } from '../../effects/engineers/scheduling';
-import { acquireNextScheduledEngineerTask, prepareEngineerObservation, EngineerObservationError, EngineerAcquisitionLedgerError, inspectAcquisitionReceiptCutover, migrateAcquisitionReceipts } from '../../effects/engineers/scheduling-acquire-next';
-import { CampaignPlanningError } from '../../core/automation/campaign-planning';
-import { IssueBatchStoreError, readIssueBatchIntent } from '../../effects/automation/issue-batch-store';
-import { inspectCampaignAcquisitionCutover, migrateCampaignAcquisitionReceipts } from '../../effects/automation/campaign-acquisition';
+import { acquireSelectedEngineerTask, acquireNextScheduledEngineerTask, prepareEngineerObservation, EngineerObservationError, EngineerAcquisitionLedgerError, EngineerAcquisitionInputError } from '../../effects/engineers/scheduling-acquire-next';
+import { type ScheduledEngineerAcquireAssertionV1 } from '../../effects/engineers/scheduling-acquire';
 import { FleetOffersError } from '../../effects/fleet/acquire';
 import {
   EngineeringOverlayProjectionError,
@@ -60,7 +58,6 @@ import {
   AgentRuntimeEffectStoreError,
   listAgentRuntimeEffects,
   listDueOfferWakes,
-  migrateProviderThreadEffectsV1,
   observeAgentRuntimeEffect,
   prepareAgentRuntimeEffect,
   readAgentRuntimeEffectStatus,
@@ -90,14 +87,13 @@ function emitError(error: unknown): void {
   const code = error instanceof EngineerProfileBindingError || error instanceof EngineerPrincipalError
     || error instanceof EngineerSchedulingError || error instanceof FleetOffersError
     || error instanceof EngineerObservationError || error instanceof EngineerAcquisitionLedgerError
-    || error instanceof CampaignPlanningError || error instanceof IssueBatchStoreError
     || error instanceof ModuleMessageError || error instanceof ModuleInboxError
     || error instanceof AgentRuntimeEffectError || error instanceof AgentRuntimeEffectStoreError
     || error instanceof TaskFreezeError
     || error instanceof WorkDemandError || error instanceof WorkDemandStoreError || error instanceof WorkDemandMaterializationError
     || error instanceof EngineeringOverlayError || error instanceof EngineeringOverlayProjectionError
     ? error.code
-    : error instanceof CliArgumentError
+    : error instanceof CliArgumentError || error instanceof EngineerAcquisitionInputError
       ? 'invalid_argument'
       : 'internal_error';
   const message = error instanceof Error ? error.message : String(error);
@@ -152,40 +148,6 @@ interface CommonExpectedOptions {
 
 export function buildEngineerCommand(): Command {
   const engineer = new Command('engineer').description('Manage repository-backed Module Engineer Profiles and operator bindings');
-
-  // Local operator-only cutover: inspected inventory and quiescence evidence are explicit inputs.
-  const acquisitionCutover = engineer.command('acquisition-cutover').description('Inspect or seal the inner acquisition ledger after operator quiescence');
-  acquisitionCutover.command('inspect').option('--json', 'Emit JSON').action((options: { json?: boolean }) => run(() => {
-    const inventory = inspectAcquisitionReceiptCutover(realpathSync(process.cwd()));
-    emit(inventory, options.json, JSON.stringify(inventory, null, 2));
-  }));
-  acquisitionCutover.command('migrate')
-    .requiredOption('--expected-inventory-sha256 <digest>', 'Previously inspected inventory digest')
-    .requiredOption('--quiescence-evidence <evidence>', 'Evidence that old producers are stopped and inventory is reconciled')
-    .option('--json', 'Emit JSON')
-    .action((options: { expectedInventorySha256: string; quiescenceEvidence: string; json?: boolean }) => run(() => {
-      const seal = migrateAcquisitionReceipts({ repo_root: realpathSync(process.cwd()), expected_inventory_sha256: options.expectedInventorySha256, quiescence_evidence: options.quiescenceEvidence });
-      emit(seal, options.json, JSON.stringify(seal, null, 2));
-    }));
-
-  const campaignCutover = engineer.command('campaign-acquisition-cutover').description('Inspect or seal one persisted campaign intent after operator quiescence');
-  for (const action of ['inspect', 'migrate'] as const) {
-    const command = campaignCutover.command(action)
-      .requiredOption('--campaign-id <id>', 'Persisted campaign identity')
-      .requiredOption('--group-number <number>', 'Persisted intent group number')
-      .requiredOption('--intent-sha256 <digest>', 'Exact persisted intent digest')
-      .option('--json', 'Emit JSON');
-    if (action === 'migrate') command
-      .requiredOption('--expected-inventory-sha256 <digest>', 'Previously inspected full planning inventory digest')
-      .requiredOption('--quiescence-evidence <evidence>', 'Evidence that old campaign and inner producers are stopped');
-    command.action((options: { campaignId: string; groupNumber: string; intentSha256: string; expectedInventorySha256: string; quiescenceEvidence: string; json?: boolean }) => run(() => {
-      const root = realpathSync(process.cwd());
-      const intent = readIssueBatchIntent(root, options.campaignId, integerOption(options.groupNumber, 'group-number'), options.intentSha256);
-      const result = action === 'inspect' ? inspectCampaignAcquisitionCutover(root, intent)
-        : migrateCampaignAcquisitionReceipts({ repo_root: root, intent, expected_inventory_sha256: options.expectedInventorySha256, quiescence_evidence: options.quiescenceEvidence });
-      emit(result, options.json, JSON.stringify(result, null, 2));
-    }));
-  }
 
   engineer
     .command('board')
@@ -375,6 +337,45 @@ export function buildEngineerCommand(): Command {
       const principal = resolveEngineerPrincipal({ repo_root: repoRoot, authorization_id: options.authorizationId });
       const result = prepareEngineerObservation({ repo_root: repoRoot, principal });
       emit(result, options.json, `${result.observation_ref} expires ${result.observation.expires_at_ms}`);
+    }));
+
+  engineer
+    .command('acquire')
+    .description('Acquire one exact observed Work Package through its durable transaction')
+    .requiredOption('--authorization-id <id>', 'Server-minted Engineer OAuth authorization ID')
+    .requiredOption('--idempotency-key <key>', 'Stable selected transaction key')
+    .requiredOption('--observation-ref <digest>', 'Exact server-produced observation reference')
+    .requiredOption('--assertion-file <path>', 'JSON file containing the complete 13-field assertion')
+    .option('--session-id <id>', 'Host session identity')
+    .option('--json', 'Output JSON')
+    .action((options: {
+      authorizationId: string;
+      idempotencyKey: string;
+      observationRef: string;
+      assertionFile: string;
+      sessionId?: string;
+      json?: boolean;
+    }) => run(() => {
+      const repoRoot = realpathSync(process.cwd());
+      const principal = resolveEngineerPrincipal({ repo_root: repoRoot, authorization_id: options.authorizationId });
+      let assertionBytes: string;
+      try {
+        assertionBytes = readFileSync(options.assertionFile, 'utf8');
+      } catch (error) {
+        throw new CliArgumentError('--assertion-file must name a readable file', { cause: error });
+      }
+      const result = acquireSelectedEngineerTask({
+        repo_root: repoRoot,
+        principal,
+        idempotency_key: options.idempotencyKey,
+        observation_ref: options.observationRef,
+        assertion: jsonOption<ScheduledEngineerAcquireAssertionV1>(assertionBytes, 'assertion-file'),
+        session_id: options.sessionId,
+      });
+      emit(result, options.json, result.ok
+        ? `acquired ${result.offer.work_package_id} ${result.envelope.claim_id}`
+        : `${result.error}: ${result.message}`);
+      if (!result.ok) process.exitCode = 1;
     }));
 
   engineer
@@ -698,14 +699,6 @@ export function buildEngineerCommand(): Command {
         observed_at: options.observedAt,
       });
       emit(receipt, options.json, `${receipt.effect_id} ${receipt.receipt_sha256}`);
-    }));
-  runtimeEffect
-    .command('migrate-v1')
-    .requiredOption('--migrated-at <timestamp>', 'Stable RFC3339 migration time')
-    .option('--json', 'Output JSON')
-    .action((options: { migratedAt: string; json?: boolean }) => run(() => {
-      const result = migrateProviderThreadEffectsV1(realpathSync(process.cwd()), options.migratedAt);
-      emit(result, options.json, result ? `${result.source_tree_sha256} ${result.archive_relative_path}` : 'no-v1-store');
     }));
   runtimeEffect
     .command('status')

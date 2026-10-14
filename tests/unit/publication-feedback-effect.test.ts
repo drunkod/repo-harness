@@ -1,3 +1,4 @@
+import { candidate } from '../../scripts/merge-gate';
 import { deriveShipJournalKey } from '../../src/effects/publication/publication-lifecycle';
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'child_process';
@@ -59,9 +60,7 @@ const receipt = buildPublicationReceipt({
   task_revision: '2'.repeat(64),
   claim_id: 'claim-feedback', generation: 1,
   target_ref: 'main', base_sha: BASE, branch: 'codex/feedback', head_sha: HEAD, tree_sha: 'c'.repeat(40),
-  review_subject_sha256: `sha256:${'3'.repeat(64)}`,
-  verification_evidence_sha256: `sha256:${'4'.repeat(64)}`,
-  merge_seal_sha256: `sha256:${'5'.repeat(64)}`,
+  candidate_diff_fingerprint: `sha256:${'3'.repeat(64)}`,
   provider: 'github', provider_repo_id: 'R_feedback', pr_number: 7,
   pr_url: 'https://example.invalid/pr/7', created_at: '2026-08-23T00:00:00Z',
 });
@@ -238,8 +237,6 @@ interface RepairFixture {
   readonly foreign_task_id: string;
   readonly foreign_task_revision: string;
   readonly gh: string;
-  readonly checks: string;
-  readonly seal: string;
 }
 
 function installRepairFixture(): RepairFixture {
@@ -270,17 +267,12 @@ function installRepairFixture(): RepairFixture {
   const head = git(root, 'rev-parse', 'HEAD');
   const tree = git(root, 'rev-parse', 'HEAD^{tree}');
 
-  const checks = join(root, 'checks.json');
-  writeFileSync(checks, '{"status":"pass"}\n');
-  const seal = join(root, 'seal.json');
-  const subject = `sha256:${'3'.repeat(64)}`;
-  writeFileSync(seal, `${JSON.stringify({ protocol: 1, kind: 'repo-harness-merge-seal', base_sha: base, head_sha: head, acceptance_subject_sha256: subject })}\n`);
   const receipt = buildPublicationReceipt({
     repo_id: publicationSha256(resolveGitCommonDirectory(root)), task_id: taskId, task_revision: revision,
     claim_id: 'claim-feedback-repair', generation: 1, target_ref: 'main', base_sha: base,
     branch: 'codex/feedback-repair', head_sha: head, tree_sha: tree,
-    review_subject_sha256: subject, verification_evidence_sha256: publicationSha256(readFileSync(checks)),
-    merge_seal_sha256: publicationSha256(readFileSync(seal)), provider: 'github',
+    candidate_diff_fingerprint: candidate(root, 'main').diffFingerprint,
+    provider: 'github',
     provider_repo_id: 'R_feedback_repair', pr_number: 12, pr_url: 'https://example.invalid/pr/12', created_at: '2026-08-23T06:30:00Z',
   });
   writePublicationReceiptCache(root, receipt);
@@ -337,8 +329,6 @@ function installRepairFixture(): RepairFixture {
     foreign_task_id: foreignTaskId,
     foreign_task_revision: foreignTaskRevision,
     gh,
-    checks,
-    seal,
   };
 }
 
@@ -482,7 +472,7 @@ describe('feedback repair lifecycle integration', () => {
     try {
       const result = reopenFeedbackRepair({
         repo_root: fixture.root, offer: repairOffer(fixture), gh_bin: fixture.gh,
-        checks_path: fixture.checks, merge_seal_path: fixture.seal, delivered_at: '2026-08-23T06:32:00Z',
+        delivered_at: '2026-08-23T06:32:00Z',
       });
       expect(result.lease.state).toBe('bound');
       expect(result.envelope).toMatchObject({ action: 'reopened', claim_id: fixture.receipt.claim_id, generation: 1 });
@@ -538,7 +528,7 @@ describe('feedback repair lifecycle integration', () => {
     try {
       const result = takeoverFeedbackRepair({
         repo_root: fixture.root, offer: repairOffer(fixture), gh_bin: fixture.gh,
-        checks_path: fixture.checks, merge_seal_path: fixture.seal, reason: 'repair CI failure',
+        reason: 'repair CI failure',
         session_id: 'replacement-session', new_claim_id: 'claim-feedback-replacement', source_worktree: fixture.root,
         delivered_at: '2026-08-23T06:33:00Z',
       });
@@ -584,7 +574,6 @@ describe('feedback repair lifecycle integration', () => {
         expected_generation: fixture.receipt.generation, publication_id: fixture.receipt.publication_id,
         expected_head_sha: fixture.receipt.head_sha, reason: 'first takeover', session_id: 'first-session',
         new_claim_id: 'claim-first-takeover', source_worktree: fixture.root, gh_bin: fixture.gh,
-        checks_path: fixture.checks, merge_seal_path: fixture.seal,
       });
       const recovered = takeoverFeedbackRepair({
         repo_root: fixture.root, offer, reason: 'retry must not choose successor', session_id: 'retry-session',
@@ -611,9 +600,7 @@ describe('feedback repair lifecycle integration', () => {
         claim_id: 'claim-foreign-task', generation: 1,
         target_ref: fixture.receipt.target_ref, base_sha: fixture.receipt.base_sha,
         branch: 'codex/foreign-task', head_sha: fixture.receipt.head_sha, tree_sha: fixture.receipt.tree_sha,
-        review_subject_sha256: fixture.receipt.review_subject_sha256,
-        verification_evidence_sha256: fixture.receipt.verification_evidence_sha256,
-        merge_seal_sha256: fixture.receipt.merge_seal_sha256,
+        candidate_diff_fingerprint: fixture.receipt.candidate_diff_fingerprint,
         provider: 'github', provider_repo_id: fixture.receipt.provider_repo_id,
         pr_number: 13, pr_url: 'https://example.invalid/pr/13', created_at: '2026-08-23T06:33:11Z',
       });
@@ -684,7 +671,7 @@ describe('feedback repair lifecycle integration', () => {
       expect(existsSync(foreignLockPath)).toBe(false);
 
       const dispatched = takeoverFeedbackRepair({
-        repo_root: fixture.root, offer, gh_bin: fixture.gh, checks_path: fixture.checks, merge_seal_path: fixture.seal,
+        repo_root: fixture.root, offer, gh_bin: fixture.gh,
         reason: 'source task dispatch', session_id: 'source-session',
         new_claim_id: 'claim-source-takeover', source_worktree: fixture.root, delivered_at: '2026-08-23T06:33:16Z',
       });
@@ -723,7 +710,6 @@ describe('feedback repair lifecycle integration', () => {
         expected_generation: fixture.receipt.generation, publication_id: fixture.receipt.publication_id,
         expected_head_sha: fixture.receipt.head_sha, reason: 'first takeover', session_id: 'first-session',
         new_claim_id: 'claim-first-takeover', source_worktree: fixture.root, gh_bin: fixture.gh,
-        checks_path: fixture.checks, merge_seal_path: fixture.seal,
       });
       writeLeaseOwnerDurably(fixture.root, fixture.task_id, { ...successor, generation: successor.generation + 1 });
       try {
@@ -787,7 +773,6 @@ describe('feedback repair lifecycle integration', () => {
         repo_root: fixture.root, task_id: fixture.task_id, claim_id: fixture.receipt.claim_id,
         expected_generation: fixture.receipt.generation, publication_id: fixture.receipt.publication_id,
         expected_head_sha: fixture.receipt.head_sha, gh_bin: fixture.gh,
-        checks_path: fixture.checks, merge_seal_path: fixture.seal,
       });
       const recovered = reopenFeedbackRepair({
         repo_root: fixture.root, offer, delivered_at: '2026-08-23T06:32:30Z',
@@ -809,7 +794,7 @@ describe('feedback repair lifecycle integration', () => {
     try {
       const dispatch = reopenFeedbackRepair({
         repo_root: fixture.root, offer: repairOffer(fixture), gh_bin: fixture.gh,
-        checks_path: fixture.checks, merge_seal_path: fixture.seal, delivered_at: '2026-08-23T06:33:30Z',
+        delivered_at: '2026-08-23T06:33:30Z',
       });
       expect(() => recordCompletedFeedbackRepair({
         repo_root: fixture.root, publication_id: fixture.receipt.publication_id,
@@ -844,7 +829,7 @@ describe('feedback repair lifecycle integration', () => {
     try {
       const dispatch = reopenFeedbackRepair({
         repo_root: fixture.root, offer: repairOffer(fixture), gh_bin: fixture.gh,
-        checks_path: fixture.checks, merge_seal_path: fixture.seal, delivered_at: '2026-08-23T06:33:40Z',
+        delivered_at: '2026-08-23T06:33:40Z',
       });
       enterCompletionReviewing(fixture, fixture.receipt, 'in_progress');
       try {

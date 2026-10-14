@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+import { buildStrategyCommand } from './commands/strategy';
+import { buildPipelineCommand } from './commands/pipeline';
+import { buildModuleCommand } from './commands/module';
 import { withRuntimeHostTransactionLock } from './installer/runtime-host-lock';
 import { captureConfigurationRestores } from './installer/configuration-ownership';
 /**
@@ -18,15 +21,18 @@ import { fileURLToPath } from 'url';
 import { askConfirm } from './tty-prompt';
 import { runInstall, runUninstall, type InstallTargetSpec } from './commands/install';
 import { writeAllSync } from './runtime/write-all-sync';
-import { runInit, type InitBrainMode } from './commands/init';
-import { runHook } from './commands/hook';
+import { runInit } from './commands/init';
+import { buildHookLibCommand, runHook } from './commands/hook';
 import { CLI_VERSION, formatStatus, runStatus } from './commands/status';
 import { formatDoctor, runDoctor } from './commands/doctor';
 import { buildInitHookCommand, buildSetupCommand, formatInitHook, runInitHook } from './commands/init-hook';
 import { formatMigratePlan, runMigrate } from './commands/migrate';
 import { buildReviewCommand } from './commands/review';
 import { buildTaskAgentCommand } from './commands/task-agent';
+import { buildPmCommand } from './commands/pm';
+import { buildUpgradeCommand } from './commands/upgrade';
 import { buildToolsCommand } from './commands/tools';
+import { buildHerdrCommand } from './commands/herdr';
 import { buildBrainCommand } from './commands/brain';
 import { buildCapabilityContextCommand } from './commands/capability-context';
 import { buildDocsCommand } from './commands/docs';
@@ -37,9 +43,7 @@ import { buildStateCommand } from './commands/state';
 import { buildSprintCommand } from './commands/sprint';
 import { buildPublicationCommand } from './commands/publication';
 import { buildFleetCommand } from './commands/fleet';
-import { buildAutomationCommand } from './commands/automation';
 import { buildRefactorCommand } from './commands/refactor';
-import { buildCampaignCommand } from './commands/campaign';
 import { buildOperatorCommand } from './commands/operator';
 import { buildEngineerCommand } from './commands/engineer';
 import { buildArchitectureProjectionCommand } from './commands/architecture-projection';
@@ -55,6 +59,7 @@ import {
   agentFleetVerified,
   bunVersionIsSupported,
   runGlobalRuntimeSetup,
+  updateLeftoverSummary,
   type GlobalRuntimeOptions,
   type GlobalRuntimeResult,
 } from './commands/global-runtime';
@@ -70,11 +75,13 @@ import {
   type CandidateReconciliationReceipt,
 } from './runtime/candidate-reconciliation';
 import { windowsProtectedHelperConfigPath } from '../effects/runtime/protected-helper-platform';
+import { removeOwnedDanglingSkillLinks } from '../effects/skill-tree-integrity';
 import {
   applyInstallProfile,
   beginInstallHostTransaction,
   commitInstallHostTransaction,
-  installProfileHostMutationPaths,
+  effectiveSkillRoots,
+  installProfileTransactionPaths,
   installedProfileStatus,
   assertInstallProfile,
   planLegacyInstallProfileMigration,
@@ -90,12 +97,6 @@ import {
   type InstallProfile,
   type LegacyInstalledProfileState,
 } from './installer/install-profile';
-import { runPromptGuardDecideCli } from './commands/prompt-guard-decision';
-import { routePromptExplicitFirst } from './hook/prompt-router';
-import { recordCircuitAttempt, type CircuitAttempt } from './hook/circuit-breaker';
-import { runMinimalChangeCli } from './hook/minimal-change-cli';
-import { runReviewRubricCli } from './hook/review-rubric';
-import { runReviewSubjectCli } from './hook/review-subject';
 import { runAdoptionPlan } from './commands/adoption-plan';
 import { rollbackAdoptionTransaction } from '../effects/fs-transaction';
 import {
@@ -105,7 +106,6 @@ import {
   assertTarget,
   assertLocation,
   assertAdoptionMode,
-  assertBrainMode,
 } from './commands/validators';
 import type { HookEvent, RouteId } from './hook/route-registry';
 import type { Location } from './installer/types';
@@ -124,6 +124,7 @@ export const SUBCOMMANDS = [
   'run',
   'setup',
   'tools',
+  'herdr',
   'brain',
   'capability-context',
   'docs',
@@ -267,7 +268,7 @@ function runtimeHostTransactionEnv(env: NodeJS.ProcessEnv | undefined): NodeJS.P
 }
 
 function runtimeHostMutationPaths(env: NodeJS.ProcessEnv): readonly string[] {
-  const paths = [...installProfileHostMutationPaths(env)];
+  const paths = [...installProfileTransactionPaths(env)];
   if (process.platform === 'win32') paths.push(windowsProtectedHelperConfigPath());
   return [...new Set(paths)];
 }
@@ -426,12 +427,19 @@ async function runGlobalRuntimeBootstrap(
     ? planLegacyInstallProfileMigration(profile)
     : planInstallProfile(profile, currentProfile);
   if (rawOpts.dryRun === true) {
-    if (rawOpts.json === true) console.log(JSON.stringify(profilePlan, null, 2));
+    const removedDanglingSkillLinks = rawOpts.syncSkill === false ? [] : removeOwnedDanglingSkillLinks(
+      join(dirname(fileURLToPath(import.meta.url)), '..', '..'),
+      effectiveSkillRoots(),
+      true,
+      currentProfile?.ownership_manifest,
+    );
+    if (rawOpts.json === true) console.log(JSON.stringify({ ...profilePlan, removedDanglingSkillLinks }, null, 2));
     else {
       console.log(`[profile] requested=${profile} current=${currentProfile?.profile ?? 'none'}`);
       console.log(`[profile] install=${profilePlan.install.join(',') || '(none)'}`);
       console.log(`[profile] skip=${profilePlan.skip.join(',') || '(none)'}`);
       console.log(`[profile] remove=${profilePlan.remove.join(',') || '(none)'}`);
+      for (const link of removedDanglingSkillLinks) console.log(`[sync-installed] would remove dangling skill symlink: ${link}`);
     }
     process.exit(0);
   }
@@ -584,11 +592,7 @@ export function buildProgram(): Command {
     .option('--no-verify', 'Skip repo workflow verification after apply')
     .option('--no-codegraph', 'Skip building the CodeGraph index and MCP readiness check')
     .option('--mode <mode>', 'Adoption mode: minimal|standard|self-host', 'standard')
-    .option('--configure-codegraph', 'Deprecated: user-level MCP config belongs to repo-harness update/setup')
     .option('--sync-codegraph', 'Sync the CodeGraph index after ensure')
-    .option('--brain-root <path>', 'Deprecated: user-level brain config belongs to repo-harness update/setup')
-    .option('--brain-mode <mode>', 'Deprecated: init does not perform user-level brain sync', 'skip')
-    .option('--interactive', 'Rejected: interactive host setup belongs to repo-harness install')
     .option('--json', 'Output JSON instead of human-readable text')
     .action(async (action: string | undefined, rawOpts: {
       repo?: string;
@@ -598,11 +602,7 @@ export function buildProgram(): Command {
       verify?: boolean;
       codegraph?: boolean;
       mode?: string;
-      configureCodegraph?: boolean;
       syncCodegraph?: boolean;
-      brainRoot?: string;
-      brainMode?: string;
-      interactive?: boolean;
       json?: boolean;
     }) => {
       if (action) {
@@ -628,26 +628,17 @@ export function buildProgram(): Command {
         process.exit(2);
       }
       const target = assertTarget(rawOpts.target, 'init');
-      assertBrainMode(rawOpts.brainMode ?? 'skip', 'init');
       const mode = assertAdoptionMode(rawOpts.mode ?? 'standard', 'init');
-      if (rawOpts.configureCodegraph === true) {
-        console.error('repo-harness init: --configure-codegraph writes user-level MCP config; run repo-harness update instead');
-        process.exit(2);
-      }
-      if (rawOpts.brainRoot || rawOpts.brainMode !== 'skip') {
-        console.error('repo-harness init: brain configuration writes user-level state; run repo-harness update instead');
-        process.exit(2);
-      }
-      if (rawOpts.interactive === true) {
-        console.error('repo-harness init: --interactive can configure user-level runtime state; use repo-harness install or setup instead');
-        process.exit(2);
-      }
+      // The planner reads documentation authoring env only from its options,
+      // so the public command boundary supplies the real process environment.
+      const env = process.env;
       if (rawOpts.dryRun === true) {
         const plan = runAdoptionPlan({
           repo: rawOpts.repo,
           mode,
           json: rawOpts.json === true,
           explicitRepo: rawOpts.repo !== undefined,
+          env,
         });
         writeAllSync(1, plan.output);
         process.exit(plan.exitCode);
@@ -664,8 +655,8 @@ export function buildProgram(): Command {
         configureCodegraphMcp: false,
         syncCodegraph: rawOpts.syncCodegraph === true,
         mode,
-        brainRoot: rawOpts.brainRoot,
-        brainMode: rawOpts.brainMode as InitBrainMode,
+        brainMode: 'skip' as const,
+        env,
       };
       const result = runInit(common);
       if (rawOpts.json === true) {
@@ -695,13 +686,8 @@ export function buildProgram(): Command {
     .option('--configure-codegraph', 'Refresh CodeGraph CLI/MCP (default during update)')
     .option('--no-codegraph', 'Skip refreshing the global CodeGraph CLI/MCP')
     .option('--brain-root <path>', 'Brain vault root for manifest sync')
-    .option('--repo <path>', 'Deprecated: use repo-harness init --repo <path>')
-    .option('--dry-run', 'Deprecated: use repo-harness init --dry-run for repo-level planning')
-    .option('--interactive', 'Deprecated: use repo-harness init --interactive for repo-level planning')
     .option('--json', 'Output JSON instead of human-readable text')
     .action((rawOpts: {
-      repo?: string;
-      dryRun?: boolean;
       target: string;
       version?: string;
       channel?: string;
@@ -718,18 +704,11 @@ export function buildProgram(): Command {
       codegraph?: boolean;
       configureCodegraph?: boolean;
       brainRoot?: string;
-      interactive?: boolean;
       json?: boolean;
     }) => {
       const target = assertTarget(rawOpts.target, 'update');
       if (rawOpts.channel !== undefined && !['latest', 'next'].includes(rawOpts.channel)) {
         console.error('repo-harness update: invalid --channel (expected: latest, next)');
-        process.exit(2);
-      }
-      if (rawOpts.repo || rawOpts.dryRun || rawOpts.interactive) {
-        console.error(
-          'repo-harness update no longer refreshes repositories. For repo-level refresh, run: repo-harness init --repo <path>',
-        );
         process.exit(2);
       }
       if (rawOpts.check === true || rawOpts.runtimeRefresh === false) {
@@ -758,6 +737,7 @@ export function buildProgram(): Command {
         codegraph: rawOpts.codegraph === false ? false : rawOpts.configureCodegraph === true ? true : undefined,
         brainRoot: rawOpts.brainRoot,
       });
+      if (result.exitCode === 0) result.lines.push(updateLeftoverSummary(process.cwd(), rawOpts.cli !== false));
       if (rawOpts.json === true) {
         console.log(JSON.stringify(result, null, 2));
       } else {
@@ -831,7 +811,11 @@ export function buildProgram(): Command {
   program.command('claude-review', { hidden: true }).helpOption(false).allowUnknownOption().argument('[args...]')
     .action(() => { console.error('UPGRADE_REQUIRED: claude-review is retired; use repo-harness review. Drain old sessions with the previous version and archive old receipts.'); process.exitCode = 1; });
   program.addCommand(buildTaskAgentCommand());
+  program.addCommand(buildPmCommand());
+  program.addCommand(buildPipelineCommand());
+  program.addCommand(buildModuleCommand());
   program.addCommand(buildSetupCommand());
+  program.addCommand(buildUpgradeCommand());
 
   program
     .command('migrate')
@@ -860,25 +844,26 @@ export function buildProgram(): Command {
     });
 
   program.addCommand(buildToolsCommand());
+  program.addCommand(buildHerdrCommand());
   program.addCommand(buildBrainCommand());
   program.addCommand(buildCapabilityContextCommand());
   program.addCommand(buildDocsCommand());
   program.addCommand(buildMcpCommand());
   program.addCommand(buildChatgptCommand());
+  program.addCommand(buildHookLibCommand());
   program.addCommand(buildRunCommand());
   program.addCommand(buildStateCommand());
   program.addCommand(buildSprintCommand());
   program.addCommand(buildPublicationCommand());
   program.addCommand(buildFleetCommand());
   program.addCommand(buildOperatorCommand());
-  program.addCommand(buildAutomationCommand());
   program.addCommand(buildRefactorCommand());
-  program.addCommand(buildCampaignCommand());
   program.addCommand(buildEngineerCommand());
   program.addCommand(buildArchitectureProjectionCommand());
   program.addCommand(buildIntegrationCommand());
   program.addCommand(buildDelegationCommand());
   program.addCommand(buildCollaborationCommand());
+  program.addCommand(buildStrategyCommand());
   program.addCommand(buildVerifiedContextCommand());
   program.addCommand(buildInterfaceChangeCommand());
   program.addCommand(buildExternalSourceCommand());
@@ -894,78 +879,6 @@ export function buildProgram(): Command {
         console.error(`candidate reconciliation: ${(error as Error).message}`);
         process.exit(1);
       }
-    });
-  program
-    .command('circuit-breaker-record', { hidden: true })
-    .description('Internal persistent workflow circuit breaker')
-    .action(() => {
-      try {
-        const attempt = JSON.parse(readFileSync(0, 'utf-8')) as CircuitAttempt;
-        console.log(JSON.stringify(recordCircuitAttempt(process.cwd(), attempt)));
-        process.exit(0);
-      } catch (error) {
-        console.error(`circuit-breaker-record: ${(error as Error).message}`);
-        process.exit(2);
-      }
-    });
-  program
-    .command('prompt-route', { hidden: true })
-    .description('Internal explicit-first prompt router')
-    .action(() => {
-      let prompt = '';
-      try {
-        const input = readFileSync(0, 'utf-8').trim();
-        const parsed = JSON.parse(input) as { prompt?: unknown };
-        if (typeof parsed.prompt === 'string') prompt = parsed.prompt;
-      } catch { /* malformed prompt bypasses advisory routing */ }
-      console.log(JSON.stringify(routePromptExplicitFirst(prompt, {
-        hasActiveTask: process.env.PROMPT_ROUTE_ACTIVE_TASK === '1',
-      })));
-      process.exit(0);
-    });
-  program
-    .command('prompt-guard-decide', { hidden: true })
-    .description('Internal prompt-guard intent/state decision engine')
-    .action(() => {
-      console.log(runPromptGuardDecideCli());
-      process.exit(0);
-    });
-  program
-    .command('minimal-change', { hidden: true })
-    .argument('[args...]')
-    .allowUnknownOption(true)
-    .allowExcessArguments(true)
-    .description('Internal minimal-change hook context renderer')
-    .action((args: string[]) => {
-      // Hidden hook commands exit immediately; commit protocol bytes first.
-      const result = runMinimalChangeCli(args);
-      if (result.stdout) writeAllSync(1, result.stdout);
-      if (result.stderr) writeAllSync(2, result.stderr);
-      process.exit(result.exitCode);
-    });
-  program
-    .command('review-rubric', { hidden: true })
-    .argument('[args...]')
-    .allowUnknownOption(true)
-    .allowExcessArguments(true)
-    .description('Internal review rubric renderer')
-    .action((args: string[]) => {
-      const result = runReviewRubricCli(args);
-      if (result.stdout) writeAllSync(1, result.stdout);
-      if (result.stderr) writeAllSync(2, result.stderr);
-      process.exit(result.exitCode);
-    });
-  program
-    .command('review-subject', { hidden: true })
-    .argument('[args...]')
-    .allowUnknownOption(true)
-    .allowExcessArguments(true)
-    .description('Internal normalized review subject renderer')
-    .action((args: string[]) => {
-      const result = runReviewSubjectCli(args);
-      if (result.stdout) writeAllSync(1, result.stdout);
-      if (result.stderr) writeAllSync(2, result.stderr);
-      process.exit(result.exitCode);
     });
 
   return program;

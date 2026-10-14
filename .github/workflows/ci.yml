@@ -33,7 +33,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.3
       - id: select
         run: bun scripts/select-ci-coverage.ts
       - uses: actions/upload-artifact@v4
@@ -41,7 +41,79 @@ jobs:
         with:
           name: affected-tests
           path: .ci-affected-tests.json
+          include-hidden-files: true
           if-no-files-found: error
+
+  test-home-isolation:
+    name: Test HOME isolation (${{ matrix.os }})
+    needs: selection
+    if: needs.selection.outputs.mode == 'affected' || needs.selection.outputs.mode == 'daily'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      # One platform failure must not cancel the other platforms' evidence (#665).
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.selection.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - name: Run the isolation tests
+        shell: bash
+        run: |
+          source scripts/lib/ci-run-tests.sh
+          run_bun_test_file tests/preload-home-isolation.test.ts
+          run_bun_test_file tests/unit/trusted-gh-executable.test.ts
+      - name: Install pinned Herdr runtime
+        if: matrix.os == 'macos-latest'
+        uses: ./.github/actions/install-pinned-herdr
+      - name: Record native pipeline filesystem
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/pipeline-fs-probe.c" <<'C'
+          #include <stdio.h>
+          #include <sys/mount.h>
+          int main(int argc, char **argv) {
+            for (int i = 1; i < argc; i++) {
+              struct statfs value;
+              if (statfs(argv[i], &value)) { perror("statfs"); return 1; }
+              printf("filesystem path=%s type=%u name=%s local=%d flags=%u\n", argv[i], value.f_type, value.f_fstypename, !!(value.f_flags & MNT_LOCAL), value.f_flags);
+            }
+            return 0;
+          }
+          C
+          clang "$RUNNER_TEMP/pipeline-fs-probe.c" -o "$RUNNER_TEMP/pipeline-fs-probe"
+          "$RUNNER_TEMP/pipeline-fs-probe" /tmp /private/tmp "$GITHUB_WORKSPACE"
+          node -e 'const fs=require("node:fs");for(const path of ["/tmp",process.cwd()]) console.log(JSON.stringify({runtime:"node",path,type:fs.statfsSync(path).type,dev:fs.statSync(path).dev}))'
+          bun -e 'const fs=require("node:fs");for(const path of ["/tmp",process.cwd()]) console.log(JSON.stringify({runtime:"bun",path,type:fs.statfsSync(path).type,dev:fs.statSync(path).dev}))'
+      - name: Run native OAR acceptance tests
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ needs.selection.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          bun -e 'if (process.platform !== "darwin") process.exit(1)'
+          node -e 'if (process.platform !== "darwin" || process.versions.bun || !process.versions.node.startsWith("24.")) process.exit(1)'
+          test -x /usr/bin/sandbox-exec
+          bun install --frozen-lockfile
+          test ! -e dist/oar-review-host.js
+          test ! -e dist/oar-coding-host.js
+          bun run build:oar-hosts
+          test -s dist/oar-review-host.js
+          test -s dist/oar-coding-host.js
+          bun run test:files tests/generic-review.test.ts tests/acceptance-receipt.test.ts tests/cli/cross-review.test.ts tests/herdr-task-lifecycle.test.ts tests/cli/pm.test.ts --timeout 60000 --max-concurrency 1
 
   verify:
     name: Typecheck and affected tests
@@ -60,7 +132,7 @@ jobs:
           node-version: '24'
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.3
       - run: sudo apt-get update && sudo apt-get install -y jq rsync
       - run: |
           git config --global user.name 'github-actions[bot]'
@@ -68,6 +140,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: affected-tests
+      - name: Install pinned Herdr runtime
+        uses: ./.github/actions/install-pinned-herdr
       - run: bash scripts/check-ci.sh affected
 
   governance:
@@ -90,7 +164,7 @@ jobs:
           node-version: '24'
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.3
       - run: sudo apt-get update && sudo apt-get install -y jq rsync
       - run: |
           git config --global user.name 'github-actions[bot]'
@@ -107,7 +181,7 @@ jobs:
       BUN_TEST_MAX_CONCURRENCY: '1'
       BUN_TEST_TIMEOUT_MS: '60000'
       BUN_TEST_ISOLATE_FILES: '1'
-      BUN_TEST_JOBS: '4'
+      BUN_TEST_JOBS: '8'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -119,22 +193,13 @@ jobs:
           node-version: '24'
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.3
       - run: sudo apt-get update && sudo apt-get install -y jq rsync
       - run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
       - name: Install pinned Herdr runtime
-        run: |
-          set -euo pipefail
-          pin='.ai/harness/policy.json'
-          version="$(jq -er '.external_tooling.herdr.min_version' "$pin")"
-          url="$(jq -er '.external_tooling.herdr.release_assets["linux-x86_64"].url' "$pin")"
-          sha256="$(jq -er '.external_tooling.herdr.release_assets["linux-x86_64"].sha256' "$pin")"
-          curl --fail --location --retry 3 "$url" --output "$RUNNER_TEMP/herdr"
-          echo "$sha256  $RUNNER_TEMP/herdr" | sha256sum --check
-          sudo install -m 755 "$RUNNER_TEMP/herdr" /usr/local/bin/herdr
-          test "$(herdr --version)" = "herdr $version"
+        uses: ./.github/actions/install-pinned-herdr
       - run: bash scripts/check-ci.sh functional
 
   mcp-path-matrix:
@@ -158,24 +223,57 @@ jobs:
           node-version: '24'
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.0
+          bun-version: 1.4.3
       - run: bun install --frozen-lockfile
-      - env:
+      - name: Run the native path tests
+        shell: bash
+        env:
+          BUN_TEST_MAX_CONCURRENCY: '1'
           REPO_HARNESS_WINDOWS_PROTECTED_HELPER_SMOKE: '1'
-        run: >-
-          bun test --timeout 60000 --max-concurrency 1
-          tests/cli/mcp-workspaces.test.ts tests/cli/mcp-reader-tools.test.ts
-          tests/cli/mcp-policy.test.ts tests/cli/mcp-http.test.ts tests/cli/mcp-oauth.test.ts
-          tests/cli/mcp-stdio.test.ts tests/effects/fleet-collector-process.test.ts
-          tests/effects/operator-task-diff.test.ts tests/effects/operator-task-context.test.ts
-          tests/effects/operator-task-activity.test.ts tests/effects/task-inbox.test.ts
-          tests/effects/task-reply.test.ts tests/effects/task-inbox-layout-migration.test.ts
-          tests/cli/windows-protected-helper-runtime-smoke.test.ts tests/evidence-checkpoint.test.ts
+        run: |
+          source scripts/lib/ci-run-tests.sh
+          BUN_TEST_ISOLATE_FILES=0 run_bun_tests \
+          tests/preload-home-isolation.test.ts \
+          tests/cli/mcp-workspaces.test.ts tests/cli/mcp-reader-tools.test.ts \
+          tests/cli/mcp-policy.test.ts tests/cli/mcp-http.test.ts tests/cli/mcp-oauth.test.ts \
+          tests/cli/mcp-stdio.test.ts tests/effects/fleet-collector-process.test.ts \
+          tests/effects/operator-task-diff.test.ts tests/effects/operator-task-context.test.ts \
+          tests/effects/operator-task-activity.test.ts tests/effects/task-inbox.test.ts \
+          tests/effects/task-reply.test.ts tests/effects/task-inbox-layout-migration.test.ts \
+          tests/cli/windows-protected-helper-runtime-smoke.test.ts tests/evidence-checkpoint.test.ts \
+          tests/unit/windows-protected-helper-platform-contract.test.ts
+      - name: Run smoke with each installed internal Git first on PATH
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          BUN_TEST_MAX_CONCURRENCY: '1'
+          REPO_HARNESS_WINDOWS_PROTECTED_HELPER_SMOKE: '1'
+        run: |
+          source scripts/lib/ci-run-tests.sh
+          echo "Git Bash installation: $(cygpath -w /)"
+          test -f /cmd/git.exe
+          tested=0
+          for layout in mingw64 ucrt64; do
+            internal="/$layout/bin"
+            if [[ ! -f "$internal/git.exe" ]]; then
+              echo "Layout $layout is not installed; no coverage is claimed."
+              continue
+            fi
+            (
+              export PATH="$internal:$PATH"
+              echo "Native smoke with $layout first on PATH"
+              where.exe git
+              "$internal/git.exe" --version
+              BUN_TEST_ISOLATE_FILES=0 run_bun_tests tests/cli/windows-protected-helper-runtime-smoke.test.ts
+            )
+            tested=$((tested + 1))
+          done
+          test "$tested" -gt 0
 
   required:
     name: Required / CI
     if: always() && github.event_name == 'pull_request'
-    needs: [selection, verify]
+    needs: [selection, verify, test-home-isolation]
     runs-on: ubuntu-latest
     steps:
       - name: Consume the single candidate verification
@@ -183,5 +281,6 @@ jobs:
           SELECTION_RESULT: ${{ needs.selection.result }}
           COVERAGE_MODE: ${{ needs.selection.outputs.mode }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          HOME_ISOLATION_RESULT: ${{ needs.test-home-isolation.result }}
         run: |
-          [ "$SELECTION_RESULT" = success ] && [ "$COVERAGE_MODE" = affected ] && [ "$VERIFY_RESULT" = success ]
+          [ "$SELECTION_RESULT" = success ] && [ "$COVERAGE_MODE" = affected ] && [ "$VERIFY_RESULT" = success ] && [ "$HOME_ISOLATION_RESULT" = success ]

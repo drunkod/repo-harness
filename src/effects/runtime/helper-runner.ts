@@ -8,6 +8,7 @@ import { trustedNodeCandidates } from './node-candidates';
 import {
   protectedHelperRuntimeEnv,
   resolveProtectedHelperPlatform,
+  resolveTrustedGhExecutable,
   type ProtectedHelperPlatform,
 } from './protected-helper-platform';
 
@@ -25,22 +26,7 @@ const ORDINARY_HELPER_TIMEOUT_MS = 120_000;
 const CONTRACT_RUN_OUTER_OVERHEAD_MS = 120_000;
 const CONTRACT_RUN_DEFAULT_OUTER_TIMEOUT_MS = VERIFIER_HELPER_TIMEOUT_MS;
 
-function optionalHostExecutable(candidates: readonly string[]): string | undefined {
-  for (const candidate of candidates) {
-    if (!existsSync(candidate)) continue;
-    const actual = realpathSync(candidate);
-    const stat = lstatSync(actual);
-    if (stat.isFile() && (stat.mode & 0o111) !== 0) return actual;
-  }
-  return undefined;
-}
-
-const HOST_GH = optionalHostExecutable([
-  '/opt/homebrew/bin/gh',
-  '/usr/local/bin/gh',
-  '/usr/bin/gh',
-  '/home/linuxbrew/.linuxbrew/bin/gh',
-]);
+const HOST_GH = resolveTrustedGhExecutable();
 
 function protectedPath(runtime: ProtectedHelperPlatform): string {
   return [...new Set([
@@ -92,6 +78,7 @@ export function protectedChildEnv(
     'NO_COLOR',
     'FORCE_COLOR',
     'HOOK_HOST',
+    'REPO_HARNESS_WORKTREE_ROOT',
   ]);
   return env;
 }
@@ -377,12 +364,13 @@ function resolveFromDir(
   repoRoot: string,
 ): ResolvedHelper {
   const filePath = join(dir, fileName);
+  const description = fileName === 'workflow-state.sh' ? 'workflow-state library' : 'contract helper';
   if (!existsSync(filePath)) {
-    throw new Error(`contract helper is missing from ${source} runtime: ${filePath}`);
+    throw new Error(`${description} is missing from ${source} runtime: ${filePath}`);
   }
   const stat = lstatSync(filePath);
   if (stat.isSymbolicLink() || !stat.isFile()) {
-    throw new Error(`contract helper is not a regular file: ${filePath}`);
+    throw new Error(`${description} is not a regular file: ${filePath}`);
   }
   return { id: helperId(fileName), fileName, path: filePath, source, repoRoot };
 }
@@ -413,6 +401,10 @@ function resolveHelperContext(
 
 export function resolveHelper(helper: string, cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): ResolvedHelper | null {
   return resolveHelperContext(helper, cwd, env).resolved;
+}
+
+export function resolveWorkflowStateLibrary(): string {
+  return resolveFromDir('workflow-state.sh', dirname(PACKAGE_WORKFLOW_STATE), 'package', process.cwd()).path;
 }
 
 export function runHelper(opts: RunHelperOptions): RunHelperResult {
@@ -449,35 +441,37 @@ export function runHelper(opts: RunHelperOptions): RunHelperResult {
     REPO_HARNESS_HELPER_SOURCE_PATH: resolved.path,
     REPO_HARNESS_TARGET_REPO_ROOT: resolved.repoRoot,
   };
-  if (resolved.id === 'prepare-handoff') {
-    const workflowStateRoot = resolved.source === 'package'
-      ? dirname(PACKAGE_WORKFLOW_STATE)
-      : join(dirname(resolved.path), '..', 'assets', 'hooks', 'lib');
-    childEnv.REPO_HARNESS_WORKFLOW_STATE_LIB = resolveFromDir(
-      'workflow-state.sh',
-      workflowStateRoot,
-      resolved.source,
-      resolved.repoRoot,
-    ).path;
-  }
-  if (protectedHelper) {
-    childEnv.REPO_HARNESS_BASH_BIN = trustedBash;
-    childEnv.REPO_HARNESS_GIT_BIN = trustedGit;
-    childEnv.REPO_HARNESS_BUN_BIN = process.execPath;
-    childEnv.REPO_HARNESS_CLI_BIN = resolveFromDir(
-      'index.ts', join(PACKAGE_ROOT, 'src', 'cli'), 'package', resolved.repoRoot,
-    ).path;
-    childEnv.REPO_HARNESS_HOOK_CLI = resolveFromDir(
-      'hook-entry.ts', join(PACKAGE_ROOT, 'src', 'cli'), 'package', resolved.repoRoot,
-    ).path;
-    childEnv.REPO_HARNESS_WORKFLOW_STATE_LIB = resolveFromDir(
-      'workflow-state.sh',
-      dirname(PACKAGE_WORKFLOW_STATE),
-      'package',
-      resolved.repoRoot,
-    ).path;
-    if (HOST_GH) childEnv.REPO_HARNESS_GH_BIN = HOST_GH;
-    else delete childEnv.REPO_HARNESS_GH_BIN;
+  try {
+    if (['prepare-handoff', 'archive-workflow', 'summarize-failures'].includes(resolved.id)) {
+      const workflowStateRoot = resolved.source === 'package'
+        ? dirname(PACKAGE_WORKFLOW_STATE)
+        : join(dirname(resolved.path), '..', 'assets', 'hooks', 'lib');
+      childEnv.REPO_HARNESS_WORKFLOW_STATE_LIB = resolveFromDir(
+        'workflow-state.sh',
+        workflowStateRoot,
+        resolved.source,
+        resolved.repoRoot,
+      ).path;
+    }
+    if (protectedHelper) {
+      childEnv.REPO_HARNESS_BASH_BIN = trustedBash;
+      childEnv.REPO_HARNESS_GIT_BIN = trustedGit;
+      childEnv.REPO_HARNESS_BUN_BIN = process.execPath;
+      childEnv.REPO_HARNESS_CLI_BIN = resolveFromDir(
+        'index.ts', join(PACKAGE_ROOT, 'src', 'cli'), 'package', resolved.repoRoot,
+      ).path;
+      childEnv.REPO_HARNESS_HOOK_CLI = resolveFromDir(
+        'hook-entry.ts', join(PACKAGE_ROOT, 'src', 'cli'), 'package', resolved.repoRoot,
+      ).path;
+      childEnv.REPO_HARNESS_WORKFLOW_STATE_LIB = resolveWorkflowStateLibrary();
+      if (HOST_GH) childEnv.REPO_HARNESS_GH_BIN = HOST_GH;
+      else delete childEnv.REPO_HARNESS_GH_BIN;
+    }
+  } catch (error) {
+    return {
+      exitCode: 1, reason: 'spawn-error', helper: opts.helper, resolved,
+      stderr: error instanceof Error ? error.message : String(error),
+    };
   }
   const child = runBoundedProcess(command, [resolved.path, ...args], {
     cwd: resolved.repoRoot,

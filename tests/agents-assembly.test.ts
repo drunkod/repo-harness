@@ -1,4 +1,6 @@
 import { describe, test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   assembleTemplate,
   getPartials,
@@ -6,6 +8,24 @@ import {
 } from "../scripts/assemble-template";
 
 describe("AGENTS Target Assembly", () => {
+  test('both generated targets keep the root task flow and optional planning boundary', () => {
+    const root = join(import.meta.dir, '..');
+    const flow = 'Read the current request and repo-local agent context, work on a branch, make bounded commits, verify once, then report the PR outcome.';
+    const ordinary = 'Ordinary tasks use the PR description: goal, scope, changes, verification, risk and rollback. No mandatory plan/contract/review/notes chain; notes are only for non-obvious decisions.';
+    for (const target of ['claude', 'agents'] as const) {
+      const source = readFileSync(join(root, target === 'claude' ? 'CLAUDE.md' : 'AGENTS.md'), 'utf8');
+      const output = assembleTemplate({ target, planType: 'C', variables: { PROJECT_NAME: 'TestProject' } });
+      for (const rule of [flow, ordinary]) {
+        expect(source).toContain(rule);
+        expect(output).toContain(rule);
+      }
+      expect(output).not.toContain('PHASES: for explicit plans, research -> spec -> plan -> contract');
+      expect(output).not.toContain('Enter plan mode for non-trivial tasks');
+      expect(output).not.toContain('Do not implement until the user explicitly asks to implement');
+      expect(output).not.toMatch(/capture-plan[^\n]*(?:--artifact-level|--promotion-reason|--source-ref|--status|--execute)/);
+    }
+  });
+
   test("should read agents partials in correct order", () => {
     const partials = getPartials("agents");
     expect(partials.length).toBeGreaterThanOrEqual(8);
@@ -54,8 +74,10 @@ describe("AGENTS Target Assembly", () => {
     expect(output).toContain("The main agent decides whether to spawn based on task breadth");
     expect(output).toContain("Do not ask the user for spawn confirmation");
     expect(output).toContain("repo-harness run check-task-sync");
-    expect(output).toContain("repo-harness run check-task-workflow --strict");
-    expect(output).toContain("repo-harness run verify-sprint --prepare-acceptance");
+    expect(output).not.toContain("repo-harness run check-task-workflow --strict");
+    expect(output).toContain("Write a plan before cross-module changes, architecture changes, and dependency upgrades. Small changes do not need a plan.");
+    expect(output).toContain("Run the declared Verification Plan checks once and record their actual results");
+    expect(output).not.toContain("verify-sprint --prepare-acceptance");
     expect(output).toContain("bounded follow-up edits");
     expect(output).not.toContain("before any done/completed response");
     expect(output).toContain("Which workflow artifacts were updated");

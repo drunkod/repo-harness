@@ -434,6 +434,9 @@ export function acquireExclusiveDirectoryLock(
       if (options.reclaimStaleOwner !== false
         && reclaimStaleLockDirectory(location, options.reclaimStaleEmptyDirectory === true, options.canReclaimStaleOwner)) {
         options.onStaleReclaim?.(location.lockPath);
+        // The reclaim proved the owner dead and freed the lock. A slow reclaim
+        // must not end in a timeout: retry the normal single-owner election.
+        continue;
       }
       if (Date.now() >= deadline) {
         throw new ExclusiveLockContentionError(
@@ -546,4 +549,24 @@ export function withExclusiveDirectoryLock<T>(
   } finally {
     handle.release();
   }
+}
+
+/** Use the same owner protocol while an effect awaits its child process. */
+export async function withExclusiveDirectoryLockAsync<T>(
+  canonicalRoot: string,
+  relativeLockPath: string,
+  run: () => Promise<T>,
+  options: ExclusiveDirectoryLockOptions = {},
+): Promise<T> {
+  const deadline = Date.now() + resolveWaitTimeoutMs(options.waitTimeoutMs);
+  let handle: ExclusiveDirectoryLockHandle;
+  for (;;) {
+    try { handle = acquireExclusiveDirectoryLock(canonicalRoot, relativeLockPath, { ...options, waitTimeoutMs: 1 }); break; }
+    catch (error) {
+      if (!(error instanceof ExclusiveLockContentionError) || error.kind !== 'timeout' || Date.now() >= deadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  try { handle.assertOwned(); return await run(); }
+  finally { handle.release(); }
 }

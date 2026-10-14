@@ -16,7 +16,6 @@ if [[ -f "$PI_LIB_DIR/project-init-lib.sh" ]]; then
   . "$PI_LIB_DIR/project-init-lib.sh"
 fi
 ASSETS_TEMPLATES_DIR="$SCRIPT_DIR/../assets/templates"
-ASSETS_HOOKS_DIR="$SCRIPT_DIR/../assets/hooks"
 ASSETS_REF_DIR="$SCRIPT_DIR/../assets/reference-configs"
 ASSETS_FACTOR_FACTORY_DIR="$ASSETS_TEMPLATES_DIR/factor-factory"
 ASSETS_WORKFLOW_CONTRACT="$SCRIPT_DIR/../assets/workflow-contract.v1.json"
@@ -39,10 +38,6 @@ install_workflow_helpers() {
   pi_install_helpers "$PWD" "$ASSETS_TEMPLATES_DIR/helpers" "apply" "$helper_names"
 }
 
-install_workflow_contract() {
-  pi_install_workflow_contract "$PWD" "$ASSETS_WORKFLOW_CONTRACT" "apply"
-}
-
 create_contract_directories() {
   while IFS= read -r rel_dir; do
     [[ -z "$rel_dir" ]] && continue
@@ -51,7 +46,7 @@ create_contract_directories() {
 }
 
 install_hook_assets() {
-  pi_install_hook_assets "$PWD" "$ASSETS_HOOKS_DIR" "apply"
+  pi_install_hook_assets "$PWD" "apply"
 }
 
 ensure_task_sync_package_script() {
@@ -168,7 +163,6 @@ RESEARCH_README_EOF
 
 write_templates
 install_workflow_helpers
-install_workflow_contract
 install_hook_assets
 if pi_should_enable_factor_factory "$(pi_plan_type)"; then
   pi_install_factor_factory "$PWD" "$ASSETS_FACTOR_FACTORY_DIR" "$SCRIPT_DIR" "apply"
@@ -188,9 +182,7 @@ DOCS_SPEC_EOF
 # - .ai/context/context-map.json
 # - .ai/harness/policy.json
 # - .ai/harness/brain-manifest.json
-# - .ai/harness/checks/latest.json
 # - .ai/harness/events.jsonl
-# - .ai/harness/architecture/events.jsonl
 # - .ai/harness/handoff/current.md
 # - .ai/harness/handoff/resume.md
 # - .ai/harness/failures/latest.jsonl

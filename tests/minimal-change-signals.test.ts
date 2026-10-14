@@ -124,6 +124,68 @@ describe('minimal-change objective signals', () => {
     }
   }, 30_000);
 
+  test('the file fingerprint covers the file length and its 512 KiB prefix only', () => {
+    const repo = tmpRepo('minimal-change-file-hash');
+    try {
+      const sampleBytes = 512 * 1024;
+      const path = join(repo, 'generated.bin');
+      const content = Buffer.alloc(sampleBytes + 4096, 0x61);
+      const fingerprintOf = (bytes: Buffer): string => {
+        writeFileSync(path, bytes);
+        return collectMinimalChangeSignals({ repoRoot: repo, path: 'generated.bin' }).fingerprint;
+      };
+
+      const base = fingerprintOf(content);
+      const tailEdit = Buffer.from(content);
+      tailEdit[sampleBytes + 100] = 0x62;
+      expect(fingerprintOf(tailEdit)).toBe(base);
+
+      const prefixEdit = Buffer.from(content);
+      prefixEdit[sampleBytes - 1] = 0x62;
+      expect(fingerprintOf(prefixEdit)).not.toBe(base);
+
+      expect(fingerprintOf(Buffer.concat([content, Buffer.from('a')]))).not.toBe(base);
+      expect(fingerprintOf(Buffer.alloc(0))).not.toBe(fingerprintOf(Buffer.from('a')));
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('a result-affecting policy change replaces the saved report that Stop reads', () => {
+    const repo = tmpRepo('minimal-change-policy-dedupe');
+    const setPolicy = (fields: Record<string, unknown>) => writeJson(join(repo, '.ai/harness/policy.json'), {
+      minimal_change: { mode: 'advice', post_edit_observer: true, stop_review: true, ...fields },
+    });
+    const collectAndReview = () => {
+      const returned = collectMinimalChangeSignals({ repoRoot: repo, path: 'package.json' });
+      const stop = runMinimalChangeCli(['review', '--phase', 'stop'], { cwd: repo });
+      const stopReport = JSON.parse(stop.stdout) as MinimalChangeReport;
+      expect(readReport(repo).findings).toEqual(returned.findings);
+      expect(stopReport.findings).toEqual(returned.findings);
+      return stopReport.findings.map((finding) => finding.evidence);
+    };
+    try {
+      writeJson(join(repo, 'package.json'), {
+        dependencies: { 'left-pad': '1.0.0', chalk: '^5.0.0', zod: '^3.0.0' },
+        devDependencies: { tsx: '4.0.0' },
+      });
+
+      setPolicy({ new_dependency: 'off', max_findings: 5 });
+      expect(collectAndReview()).toEqual([]);
+      setPolicy({ new_dependency: 'warn', max_findings: 5 });
+      expect(collectAndReview()).toEqual([
+        'dependency chalk was added to dependencies',
+        'dependency zod was added to dependencies',
+      ]);
+      setPolicy({ new_dependency: 'warn', max_findings: 1 });
+      expect(collectAndReview()).toEqual(['dependency chalk was added to dependencies']);
+      setPolicy({ new_dependency: 'off', max_findings: 1 });
+      expect(collectAndReview()).toEqual([]);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   test('hook-only CLI stays stdout-silent, respects off mode, and dedupes identical events', () => {
     const repo = tmpRepo('minimal-change-cli-signals');
     try {

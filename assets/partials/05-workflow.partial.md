@@ -8,7 +8,7 @@ PLAN_LOOP:
   RECOVERY: {{RECOVERY_PROFILE}}
   STATE: {{STATE_PROFILE}}
   CONTEXT: {{CONTEXT_PROFILE}}
-  PHASES: research -> spec -> plan -> contract -> implement -> verify -> check -> review -> handoff
+  PHASES: request -> branch -> bounded commits -> verify -> PR outcome
   RESEARCH_DIR: docs/researches/
   SPEC_FILE: docs/spec.md
   PLAN_DIR: plans/
@@ -21,13 +21,12 @@ PLAN_LOOP:
   REVIEW_DIR: tasks/reviews/
   NOTES_DIR: tasks/notes/
   POLICY_FILE: .ai/harness/policy.json
-  CHECKS_FILE: .ai/harness/checks/latest.json
   HANDOFF_FILE: .ai/harness/handoff/current.md
   EVENTS_FILE: .ai/harness/events.jsonl
   RUNS_DIR: .ai/harness/runs/
   LESSONS_FILE: tasks/lessons.md
   CONTEXT_MAP: .ai/context/context-map.json
-  ANNOTATION_GUARD: do not implement until plan Status is "Approved"
+  ANNOTATION_GUARD: when the task uses a plan, do not implement until plan Status is "Approved"
   CONTRACT_GUARD: do not mark done until contract exit criteria pass and review recommends pass
   EXECUTION_CONTEXT: contract-level work starts in a linked codex/<slug> worktree when policy enables it; primary worktree warning by default; enforce via .claude/.require-worktree
   CONTRACT_WORKTREE_FINISH: run Waza /check, fill the review artifact from that verdict, then repo-harness run contract-worktree finish
@@ -47,10 +46,13 @@ PLAN_LOOP:
 ### Task Management Protocol
 
 Core rules (canonical source: see Workflow Orchestration section below):
-- `docs/spec.md` is product truth; `plans/` is execution truth.
-- `tasks/contracts/`, `tasks/reviews/`, and `tasks/notes/` are done gates; hooks are accelerators only.
+- `docs/spec.md` is product truth; an explicit plan is execution truth for its task.
+- For an explicit contract, use its exit criteria and review as done gates. Write notes only for non-obvious decisions.
 - Treat `.ai/harness/active-plan` as authoritative only for its owning worktree; `.ai/harness/active-worktree` records that owner.
-- Require plan/contract workflow inventory before implementation: active plan, owning worktree, contract, review, notes, deferred ledger, checks, runs, scope owner, switching rule, and worktree path.
+- Default task worktrees use `/tmp/<repo>-wt-<slug>` on POSIX. Native Windows uses `os.tmpdir()` as the root. Stored downstream templates stay unchanged. Commit or push work before a reboot or age-based tmp cleanup, such as `systemd-tmpfiles`. These cleaners can remove checkouts. Missing entries are pruned. The sweep saves missing registration identities before global prune. Later batches finish deferred branch cleanup. Unmerged branches remain.
+- Closeout removes a merged, clean checkout and its branch. It releases only that checkout's own canonical marker after merge proof under the topology lock. The sweep keeps dirty, locked, marked or leased worktrees. It keeps branch reflogs without a commit-creation message and missing or unreadable reflogs. Fast-forward, target-only automatic merges, reset and rebase-finish messages do not count. Dispatch must establish an unmerged commit or keep the worktree dirty, marked or leased. A merged, clean, unowned branch with its own commits can be swept.
+- `start` recovers only a real target directory registered by this clone on the expected branch, under the topology lock, with no lock or other owner. Recovery requires a current-user-owned checkout directory without group or other write access, a regular owned Git pointer, its matching admin backpointer, and the original directory identity saved by start. Git metadata can be group-writable but must not be other-writable. Start still creates a checkout when uid is unavailable; recovery then refuses. Exact removal retires the identity after Git readback. Missing identity or a replacement directory blocks recovery. Files, symlinks, unregistered paths and other branches are refused. Cleanup refuses a registered worktree whose branch is missing. MCP cleanup also refuses active markers and retained native verification evidence. Sweep reports name processed paths. Deferred entries are reported as counts. `kept` excludes deferred entries. A command timeout sends SIGTERM to the direct child only. A grandchild can briefly extend the deadline. No detached cleanup process starts. Herdr notifications accept registered default task worktrees and paths inside them. Other temporary paths and `rh-herdr-` labels stay filtered.
+- Keep optional plans in their owning worktrees. For an explicit contract, check workflow inventory before implementation: owning worktree, contract, exit criteria and verification inputs.
 - Mark done only with verification evidence.
 - Durable progress lives in `tasks/workstreams/`; release history belongs in `docs/CHANGELOG.md`.
 

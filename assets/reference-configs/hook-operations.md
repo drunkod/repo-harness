@@ -20,13 +20,10 @@ The stable route tuple is the adapter contract. Handler identities are internal
 authority names and are not selected by installation location or host provider.
 Codex must trust `~/.codex/hooks.json` in Settings before it executes the
 adapter. Generated adapters use 30 seconds except `Stop.default`, whose outer
-deadline is 150 seconds. Stop shares a 20-second deferred-work budget between
-architecture projection and the post-edit journal; provider and cascade children
-run under process-group supervision with bounded TERM/KILL cleanup. A shorter
-host budget yields the projection job back to pending without consuming a
-business retry or acknowledging its drift range. Explicit
-`repo-harness architecture-projection drain --json` retains the policy's longer
-budget. Strict projection/readiness gates still apply; yielding is not success.
+deadline is 150 seconds. Stop runs the deferred post-edit journal under one
+bounded work budget. Stop does not scan for refactor recommendations. Child processes run
+under process-group supervision with bounded TERM/KILL cleanup. Stop does not
+run architecture projection and does not record architecture drift.
 
 Measure `Stop.default` and `SubagentStop.quality` separately using
 `.ai/harness/runs/hook-events.jsonl` `metrics.elapsed_ms`. The terminal's Working
@@ -46,11 +43,29 @@ time is the whole turn, not the duration of its currently displayed hook.
 | `SubagentStop.quality` | subagent stop (Codex) | `subagent` | Check the delegated report and request one bounded continuation when required. |
 | `Stop.default` | session stop | `stop` | Flush pending observations and finalize the handoff projection. |
 
-`assets/hooks/lib/workflow-state.sh` and its `.ai/hooks/lib/` projection are
-operator helpers for inspecting workflow state. They are not hook dispatchers,
-route authorities, or alternate execution paths. Product changes to handler
+`assets/hooks/lib/workflow-state.sh` is the package operator library.
+Consumer repositories do not receive a copy. The library has no hook dispatch
+or route authority. Product changes to handler
 behavior belong in `src/cli/hook/` and its tests; run `bun run check:hooks` after
 updating the generated asset projection.
+
+Use the package library in an operator shell:
+
+```bash
+workflow_state_lib="$(repo-harness hook-lib path)" || exit 1
+source "$workflow_state_lib"
+```
+
+Run packaged helpers with `repo-harness run <helper>`. The CLI supplies the
+package library. Direct package scripts resolve the asset beside `scripts/`.
+The path command fails if the package asset is missing or is not a regular file.
+It does not select a repo copy or `REPO_HARNESS_SOURCE_ROOT`.
+
+Init and upgrade preserve `.ai/hooks/lib/workflow-state.sh`, including edits.
+Old scripts that source this file still work. Doctor reports it as legacy.
+Change callers to the package path or `repo-harness run`. Test the callers.
+Back up the old file before manual removal. Review local changes first.
+This source repository keeps its own helper for self-hosting.
 
 The prompt handler consumes the typed prompt-intent and workflow-state decision
 table, then verifies the file-backed contract and the typed `AcceptanceReceipt`
@@ -66,8 +81,24 @@ explicit think/planning intent is matched first and routed to `/think`.
 
 The `SessionStart` builder assembles one bounded context from four sources
 before work begins: the prior handoff/resume packet, sprint status, advice-only
-minimal-change guidance, and a read-only fingerprint-gated security config scan.
+minimal-change guidance, and an explicitly authorized security config scan.
 They are emitted together as `additionalContext`.
+
+The security sentinel is off by default. A launcher may set
+`REPO_HARNESS_SESSION_SECURITY_SCAN=1` for a session only when its task permits
+reading the complete host and repository security config set. The session must
+also supply an absolute `HOME`. Missing, denied, or invalid inputs skip the
+sentinel before config fingerprints, scanning, or cache writes. Restricted
+worker launches must omit this opt-in or set it to `0`; do not place it in a
+shared shell profile. Task briefs and persona names are not parsed as permission.
+The same opt-in gates the startup tooling advisory and its sync/detached refresh:
+`setup check` also runs the doctor security scan and reads host configuration.
+A detached refresh checks the opt-in again before taking its lock or writing.
+
+Authorized startup scans remain fingerprint-gated. Their findings are facts,
+not permission to scan again or widen a task's read scope. Explicit
+`repo-harness security scan --json` remains available for an authorized task;
+it does not require this startup opt-in. Other guards remain active.
 
 Plan/spec/contract hints in `UserPromptSubmit` are advisory. Hard edit enforcement
 lives in `PreToolUse.edit` and the `mutation-guard` handler. The policy can select
@@ -77,7 +108,8 @@ deterministic and never spawn an LLM or a long-running worker.
 ## Host and Adoption Operations
 
 `repo-harness init` installs the user-level adapters, writes the workflow
-contract, and projects only the declared operator helpers into `.ai/hooks/lib/`.
+contract, and writes package helper guidance in `.ai/hooks/README.md`.
+It does not copy the operator library into consumer repositories.
 It removes retired generated hook entry scripts by exact manifest ownership and
 does not create a repo-local dispatcher. Project-level `.claude/settings.json`
 and `.codex/hooks.json` are user-owned legacy inputs and should be reviewed
@@ -113,12 +145,10 @@ verifying that no hook process is active, an operator may remove
 
 ## Architecture Drift and Parity
 
-Hook scope is detect, classify, record, and remind:
+Hooks do not record architecture drift. Architecture updates are explicit:
 
-- `repo-harness run architecture-queue` writes requests and events.
 - `repo-harness run workstream-sync` maintains durable capability workstreams.
-- `repo-harness run context-contract-sync` updates only controlled local agent
-  context blocks.
+- Agents read architecture documents on demand and update real boundaries explicitly.
 
 Agents author semantic snapshots and diagrams. Hooks do not spawn LLM agents or
 long-running commands. Deterministic execution belongs in explicit CLI commands
@@ -153,7 +183,7 @@ snapshot shares Stop's `run-` prefix, and a missing verification record makes
 `baseline_with_delta` criterion permanently because a rerun only mints a new
 execution id. Retention therefore never reasons about what to keep: it deletes
 only records with Stop's own run-summary shape -- a `run_id` plus
-`checks_file`, `handoff_file`, `policy_file`, and `context_map_file`, every one
+`handoff_file`, `policy_file`, and `context_map_file`, every one
 a pointer the next Stop recomputes -- and leaves every other shape to its owner.
 The shape, not `reason`: that field is free-form operator text.
 
@@ -182,6 +212,6 @@ After handler or workflow-contract changes, run:
 ```bash
 bun test
 repo-harness run check-task-sync
-repo-harness run check-task-workflow --strict
+repo-harness run check-task-workflow
 repo-harness init --repo . --dry-run
 ```

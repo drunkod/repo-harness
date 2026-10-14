@@ -59,6 +59,42 @@ function writeReadyOfficialCodexPluginCli(home: string): string {
 }
 
 describe('install command (Phase 1B)', () => {
+  test('dry-run reports owned dangling links without changing host files', () => {
+    withTempHome((home) => {
+      const ownedTarget = path.join(ROOT, 'assets/skill-commands/retired-symlink-test');
+      expect(fs.existsSync(ownedTarget)).toBe(false);
+      const foreignTarget = path.join(home, 'Waza', 'think');
+      fs.symlinkSync(path.join(home, 'missing-volume'), path.dirname(foreignTarget));
+      const roots = ['.codex', '.claude'].map((host) => path.join(home, host, 'skills'));
+      for (const root of roots) {
+        fs.mkdirSync(root, { recursive: true });
+        fs.symlinkSync(ownedTarget, path.join(root, 'repo-harness-plan.bak'));
+        fs.symlinkSync(foreignTarget, path.join(root, 'think'));
+      }
+      for (const json of [false, true]) {
+        const result = spawnSync(process.execPath, [CLI, 'install', '--dry-run', ...(json ? ['--json'] : [])], {
+          cwd: ROOT, encoding: 'utf-8',
+          env: { ...process.env, HOME: home, CODEX_SKILLS_ROOT: '', CLAUDE_SKILLS_ROOT: '' },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        for (const root of roots) {
+          const link = path.join(root, 'repo-harness-plan.bak');
+          if (json) expect(JSON.parse(result.stdout).removedDanglingSkillLinks).toContain(link);
+          else expect(result.stdout).toContain(`would remove dangling skill symlink: ${link}`);
+          const foreignLink = path.join(root, 'think');
+          if (json) expect(JSON.parse(result.stdout).removedDanglingSkillLinks).not.toContain(foreignLink);
+          else expect(result.stdout).not.toContain(foreignLink);
+          expect(fs.readdirSync(root).sort()).toEqual(['repo-harness-plan.bak', 'think']);
+          expect(fs.readlinkSync(link)).toBe(ownedTarget);
+          expect(fs.readlinkSync(path.join(root, 'think'))).toBe(foreignTarget);
+        }
+        expect(fs.existsSync(path.join(home, '.repo-harness'))).toBe(false);
+        expect(fs.readdirSync(path.join(home, '.codex'))).toEqual(['skills']);
+        expect(fs.readdirSync(path.join(home, '.claude'))).toEqual(['skills']);
+      }
+    });
+  }, 30_000);
+
   test('install profiles bound host route inventory', () => {
     withTempHome((home) => {
       runInstall({ target: 'codex', location: 'global', profile: 'minimal' });
@@ -336,6 +372,34 @@ describe('install command (Phase 1B)', () => {
       expect(afterUninstall.hooks.UserPromptSubmit).toEqual([
         { hooks: [{ type: 'command', command: 'rtk hook claude' }] },
       ]);
+    });
+  });
+
+  test('install and uninstall keep private host config modes under a 0022 umask', () => {
+    withTempHome((home) => {
+      const claudePath = path.join(home, '.claude/settings.json');
+      const codexPath = path.join(home, '.codex/hooks.json');
+      const sibling = { hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'rtk hook claude' }] }] } };
+      for (const filePath of [claudePath, codexPath]) {
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, `${JSON.stringify(sibling, null, 2)}\n`, { mode: 0o600 });
+        fs.chmodSync(filePath, 0o600);
+      }
+      const previousUmask = process.umask(0o022);
+      try {
+        expect(runInstall({ target: 'both', location: 'global' }).exitCode).toBe(0);
+        for (const filePath of [claudePath, codexPath]) {
+          expect(JSON.parse(fs.readFileSync(filePath, 'utf-8')).hooks.PreToolUse.length).toBeGreaterThan(1);
+          expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
+        }
+        expect(runUninstall({ target: 'both', location: 'global' }).exitCode).toBe(0);
+        for (const filePath of [claudePath, codexPath]) {
+          expect(JSON.parse(fs.readFileSync(filePath, 'utf-8')).hooks).toEqual(sibling.hooks);
+          expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
+        }
+      } finally {
+        process.umask(previousUmask);
+      }
     });
   });
 

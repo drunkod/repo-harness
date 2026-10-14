@@ -119,12 +119,12 @@ export type WorkflowContract = {
       actions: Array<{
         id: string;
         signal: string;
-        action: "preserve" | "archive" | "reconfigure" | "remove";
+        action: "preserve" | "archive" | "reconfigure" | "remove" | "refresh";
         risk: "low" | "medium" | "high";
         ownership: "known_generated" | "managed_config" | "user_authored" | "user_local";
         paths: string[];
         targetPaths?: string[];
-        cleanupMode?: "always" | "generated_helper";
+        cleanupMode?: "always" | "generated_helper" | "exact_fingerprint";
         summary: string;
       }>;
     };
@@ -284,15 +284,6 @@ export function loadWorkflowContract(
   }
 
   return validateWorkflowContract(parsed, contractPath);
-}
-
-export function resolveInstalledWorkflowContract(repoRoot: string): string {
-  return join(repoRoot, ".ai", "harness", "workflow-contract.json");
-}
-
-export function resolveWorkflowContractForRepo(repoRoot: string): string {
-  const installedPath = resolveInstalledWorkflowContract(repoRoot);
-  return existsSync(installedPath) ? installedPath : resolveUpstreamWorkflowContract(repoRoot);
 }
 
 export function getHelperScripts(contract: WorkflowContract): string[] {

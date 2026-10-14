@@ -17,7 +17,7 @@
  *    "0.0.0" catch.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawnSync } from 'child_process';
@@ -60,7 +60,13 @@ function populateFixture(): PopulateFixture {
   const cliStub = join(repoRoot, 'cli-stub.js');
   writeFileSync(cliStub, `process.stdout.write(${JSON.stringify(stubOutput)});\n`);
   const lockDir = '.ai/harness/tooling-lock.d';
-  mkdirSync(join(repoRoot, lockDir), { recursive: true });
+  // The populate owns the refresh lock itself. An abandoned ownerless lock dir,
+  // older than the reclaim age, must be reclaimed and then released by a populate
+  // that ran; a fresh one would make the populate exit as a contended refresh.
+  const absLockDir = join(repoRoot, lockDir);
+  mkdirSync(absLockDir, { recursive: true });
+  const abandonedAt = new Date(Date.now() - 60 * 60 * 1000);
+  utimesSync(absLockDir, abandonedAt, abandonedAt);
   return { repoRoot, reportFile: '.ai/harness/tooling-report.json', lockDir, cliStub, stubOutput };
 }
 
@@ -78,7 +84,7 @@ function runDetachedPopulate(entrypoint: string, fixture: PopulateFixture) {
     {
       cwd: fixture.repoRoot,
       encoding: 'utf-8',
-      env: { ...process.env, REPO_HARNESS_CLI: fixture.cliStub },
+      env: { ...process.env, REPO_HARNESS_SESSION_SECURITY_SCAN: '1', REPO_HARNESS_CLI: fixture.cliStub },
     },
   );
 }
@@ -86,8 +92,8 @@ function runDetachedPopulate(entrypoint: string, fixture: PopulateFixture) {
 function expectPopulateRan(result: ReturnType<typeof spawnSync>, fixture: PopulateFixture): void {
   expect(result.status, `stdout=${result.stdout}\nstderr=${result.stderr}`).toBe(0);
   expect(result.stderr ?? '').not.toContain('usage: repo-harness-hook');
-  // The populate's `finally` always releases the lock -- the observable effect
-  // that separates "ran" from "fell through to the usage error".
+  // The populate reclaims the abandoned lock and its `finally` releases it --
+  // the observable effect that separates "ran" from "fell through to the usage error".
   expect(existsSync(join(fixture.repoRoot, fixture.lockDir))).toBe(false);
   expect(readFileSync(join(fixture.repoRoot, fixture.reportFile), 'utf-8')).toBe(fixture.stubOutput);
 }
@@ -153,6 +159,22 @@ describe('hook-entry single-file bundle', () => {
   test('bundled hook entry dispatches the detached tooling populate', () => {
     const fixture = populateFixture();
     expectPopulateRan(runDetachedPopulate(buildBundle('0.0.0-test'), fixture), fixture);
+  }, 30_000);
+
+  test('source and bundle refuse unauthorized detached setup checks', () => {
+    for (const entry of [HOOK_ENTRY, buildBundle('0.0.0-test')]) {
+      const fixture = populateFixture();
+      const result = spawnSync(process.execPath, [
+        entry, DETACHED_TOOLING_POPULATE_FLAG, fixture.repoRoot, 'codex', fixture.reportFile, fixture.lockDir,
+      ], {
+        cwd: fixture.repoRoot, encoding: 'utf8',
+        env: { ...process.env, REPO_HARNESS_SESSION_SECURITY_SCAN: '0', REPO_HARNESS_CLI: fixture.cliStub },
+      });
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(existsSync(join(fixture.repoRoot, fixture.reportFile))).toBe(false);
+      // The existing aged lock is not claimed, retired, or removed.
+      expect(existsSync(join(fixture.repoRoot, fixture.lockDir))).toBe(true);
+    }
   }, 30_000);
 
   test('bundled hook entry supervises a successful child through bundled re-entry', () => {
@@ -252,9 +274,19 @@ describe('hook-entry single-file bundle', () => {
     expect(pkg.files).toContain('dist/hook-entry.js');
     // All redirects are load-bearing: `npm pack --json` parses prepack's stdout
     // as part of its own JSON, so any build's chatter would break release tooling.
-    expect(pkg.scripts.prepack).toBe('bun run build:hook-bundle 1>&2 && bun run build:oar-review-host 1>&2 && bun run build:operator-web 1>&2');
+    expect(pkg.scripts.prepack).toBe('bun run check:pi-package 1>&2 && bun run build:hook-bundle 1>&2 && bun run build:oar-hosts 1>&2 && bun run build:operator-web 1>&2');
+    expect(pkg.scripts['build:oar-hosts']).toBe('bun run build:oar-review-host && bun run build:oar-coding-host');
     expect(pkg.files).toContain('dist/oar-review-host.js');
     expect(pkg.scripts['build:hook-bundle']).toContain('--define REPO_HARNESS_BUNDLED_CLI_VERSION');
     expect(readFileSync(join(ROOT, '.gitignore'), 'utf-8')).toMatch(/^dist\/$/m);
   });
+});
+
+// The bundle must contain the observation owner rather than resolve an eager
+// dynamic package path at runtime. The execution cases above test this from
+// isolated folders with no source tree.
+test('bundle includes the observation owner without a dynamic source require', () => {
+  const bundle = readFileSync(buildBundle('0.0.0-test'), 'utf8');
+  expect(/(?:require|requireFromHelper)\([^;\n]*readonly-observation/.test(bundle)).toBe(false);
+  expect(bundle).toContain('AsyncLocalStorage');
 });

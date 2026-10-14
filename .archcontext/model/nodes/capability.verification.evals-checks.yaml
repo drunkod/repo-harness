@@ -6,6 +6,8 @@ status: active
 summary: Runs repository verification, contract gates, benchmarks, and evaluation suites.
 responsibilities:
   - Own machine-verifiable checks, bounded verifier execution, and evaluation evidence.
+  - Own the test suite, CI coverage selection and the CI report.
+  - Own the workflow gate scripts that check task sync, task workflow and agent tooling.
 source:
   include:
     - "tests/**"
@@ -21,6 +23,29 @@ source:
     - "scripts/check-agent-tooling.sh"
     - "scripts/check-brain-manifest.sh"
     - "scripts/sync-brain-docs.sh"
+    - "bunfig.toml"
+    - ".github/**"
+    - "scripts/test-file-durations.json"
+    - "scripts/verification-plan.ts"
+    - "scripts/migrate-verification-plan.ts"
+    - "scripts/check-ci.sh"
+    - "scripts/select-ci-coverage.ts"
+    - "scripts/replay-ci-coverage.ts"
+    - "scripts/report-ci.ts"
+    - "scripts/select-test-suite.ts"
+    - "scripts/ci-documentation-consumers.ts"
+    - "scripts/harness-trace-grade.sh"
+  exclude:
+    - "tests/cli/adoption-plan.test.ts"
+    - "tests/fixtures/adoption/**"
+    - "tests/architecture-projection-provider.test.ts"
+    - "tests/cli/global-runtime-init.test.ts"
+    - "tests/cli/global-runtime.test.ts"
+    - "tests/cli/mcp-codegraph-contract.test.ts"
+    - "tests/cli/mcp-policy.test.ts"
+    - "tests/cli/mcp-reader-tools.test.ts"
+    - "tests/cli/mcp-tools.test.ts"
+    - "tests/cli/codegraph-resolver.test.ts"
   entrypoints:
     - id: entrypoint.evals-checks.primary
       path: "src/effects/evidence/verification-execution.ts"
@@ -38,4 +63,4 @@ extensions:
   verification:
     - "bun test"
     - "bash scripts/check-task-sync.sh"
-    - "bash scripts/check-task-workflow.sh --strict"
+    - "bash scripts/check-task-workflow.sh"

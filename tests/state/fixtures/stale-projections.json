@@ -5,7 +5,7 @@
   "cli_stderr": "",
   "field": {
     "exit": 0,
-    "stdout": "standard\n",
+    "stdout": "routine\n",
     "stderr": ""
   },
   "state": {
@@ -16,10 +16,10 @@
     "state_version": 1,
     "state_revision": "sha256:<dynamic:state_revision>",
     "authority_revision": "sha256:<dynamic:authority_revision>",
-    "subject_revision": "sha256:e9b19249a8c9de031ffcc72295060534da416129448cbaf4ca92398794a83826",
-    "evidence_revision": "sha256:f54825ba4c8384fff311f342487d459008a7f560c28d6af6095f699da29ecbe3",
+    "subject_revision": "sha256:611ad84ed54754aa0afeb9d13ce4e9a0fdc5bc65321ee5707b54863c6d7dc890",
+    "evidence_revision": "sha256:<dynamic:evidence_revision>",
     "projection_revision": "sha256:<dynamic:projection_revision>",
-    "progress_token": "sha256:94f87bccf7a8d56d15a03e3a1140bd675eb2e87386a707dc4ec11341b083ff05",
+    "progress_token": "sha256:<dynamic:progress_token>",
     "authoritative_plan": {
       "path": "plans/plan-20260712-2327-effective-fixture.md",
       "status": "executing"
@@ -30,12 +30,12 @@
       "plan": "plans/plan-20260712-2327-effective-fixture.md"
     },
     "task_profile": "code-change",
-    "workflow_profile": "standard",
-    "requested_workflow_profile": "standard",
-    "risk_floor": "standard",
+    "workflow_profile": "routine",
+    "requested_workflow_profile": "routine",
+    "risk_floor": "routine",
     "profile_reasons": [
-      "risk-floor:standard:feature",
-      "explicit-override:equal:standard",
+      "risk-floor:routine:local-change",
+      "explicit-override:equal:routine",
       "capability:registry:absent"
     ],
     "profile_signals": {
@@ -51,13 +51,11 @@
       "tests/effective-state.test.ts"
     ],
     "next_action": "implement resolver",
-    "guidance": "at most one active plan artifact; no contract, notes, or todos scaffolding beyond it. This is a state snapshot, not a session-wide restriction; re-resolve for the proposed edit and current diff when scope changes. Current edit-time requirements supersede earlier snapshot guidance.",
+    "guidance": "Implement the authorized scope; verify typecheck and affected tests once; record goal/change/verification/risk/rollback in the PR. This is a state snapshot, not a session-wide restriction; re-resolve for the proposed edit and current diff when scope changes. Current edit-time requirements supersede earlier snapshot guidance.",
     "blockers": [],
     "stale_sources": [
       "active_sprint",
-      "checks",
       "current_snapshot",
-      "external_acceptance",
       "handoff",
       "review"
     ],
@@ -66,18 +64,18 @@
       ".ai/context/capabilities.json": "sha256:becde17b6600ee6ea2f65fe3320f11bc1efbb103d81bb7dda3788623ca293441",
       ".ai/harness/active-plan": "sha256:4c599629e7ec8436620001fc47b764de7b6c553404034c82ff7890ad6bd42af7",
       ".ai/harness/active-worktree": "sha256:<dynamic:.ai/harness/active-worktree>",
-      ".ai/harness/checks/latest.json": "sha256:47461207f39ae6d6fe413ed1e4baed64aa0df1550c36a3b0e124da90d063d855",
       ".ai/harness/handoff/current.md": "sha256:<dynamic:.ai/harness/handoff/current.md>",
       ".ai/harness/handoff/resume.md": "sha256:<dynamic:.ai/harness/handoff/resume.md>",
       ".ai/harness/policy.json": "sha256:001e056f4ac35ace2e89e20bef71f492ac9a0ac7373cacaeaf1e0fa36ea130b8",
       ".ai/harness/sprint/active-sprint": "sha256:008921c16af6193798bc0db57b5b72f6ff3c36bf3c125306fc19586a1d8d92f2",
       "plans/plan-20260712-2327-effective-fixture.md": "sha256:b2320675859fb4584b5602730cf3c21388f92b26d360c6fefff820b331395d50",
       "plans/sprints/missing.sprint.md": "sha256:001e7a60b45bf60478d88925f68251535a112062b1a2c5581498bd0759c02eae",
-      "tasks/contracts/20260712-2327-effective-fixture.contract.md": "sha256:39ee31d8d04c79cbfc24f87724175d754e2822a3666a9a7c4d055f5e04d87898",
+      "tasks/contracts/20260712-2327-effective-fixture.contract.md": "sha256:de393bedcbc7440719eacbf5a7c660f7e6eb49b59d6b76a1ac67d32d762f6215",
       "tasks/current.md": "sha256:e16cda27c0a53e5a4f839011c5e47480be01ab0bee30e75576a62bc2732e9d30",
       "tasks/reviews/20260712-2327-effective-fixture.review.md": "sha256:f41ca543703e6ccb56ee06570274a16eb33ae10d06ff0f52f5d05f492512ed7e",
       "review_subject": "sha256:8d1ea67b10188cb888564a019394712072bc46c65903acacf936b803358466c4",
-      "authority_revision": "sha256:<dynamic:authority_revision>"
+      "authority_revision": "sha256:<dynamic:authority_revision>",
+      "evidence_revision": "sha256:<dynamic:evidence_revision>"
     },
     "review": {
       "path": "tasks/reviews/20260712-2327-effective-fixture.review.md",
@@ -87,14 +85,16 @@
       "recorded_target_revision": null
     },
     "external_acceptance": {
-      "path": ".ai/harness/checks/latest.json",
-      "freshness": "stale",
+      "path": null,
+      "freshness": "missing",
       "status": null
     },
     "checks": {
-      "path": ".ai/harness/checks/latest.json",
-      "freshness": "stale",
-      "status": "pass"
+      "path": null,
+      "freshness": "missing",
+      "status": "missing",
+      "reason": "missing_plan",
+      "result_refs": []
     },
     "active_sprint": {
       "path": "plans/sprints/missing.sprint.md",
@@ -124,57 +124,32 @@
         "decision": "allow"
       },
       "allowedToStop": {
-        "decision": "block",
-        "reasons": [
-          "required_recovery_state_missing"
-        ]
+        "decision": "allow"
       },
       "readyToShip": {
         "decision": "block",
         "reasons": [
-          "required_work_package_missing",
           "required_evidence_missing"
         ]
       },
       "requirements": {
         "edit": [
           {
-            "key": "complete_approved_work_package",
+            "key": "safe_path",
             "status": "required",
-            "satisfied": true
-          },
-          {
-            "key": "separate_contract",
-            "status": "not_required",
             "satisfied": true
           }
         ],
-        "stop": [
-          {
-            "key": "durable_recovery_state",
-            "status": "required",
-            "satisfied": false
-          }
-        ],
+        "stop": [],
         "ship": [
-          {
-            "key": "complete_approved_work_package",
-            "status": "required",
-            "satisfied": false
-          },
           {
             "key": "subject_bound_targeted_evidence",
             "status": "required",
             "satisfied": false
           },
           {
-            "key": "separate_contract",
-            "status": "not_required",
-            "satisfied": true
-          },
-          {
-            "key": "external_acceptance",
-            "status": "not_required",
+            "key": "candidate_revision_precondition",
+            "status": "required",
             "satisfied": true
           }
         ]

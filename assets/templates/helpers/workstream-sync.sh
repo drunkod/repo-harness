@@ -102,29 +102,18 @@ helper_sibling() {
   return 1
 }
 
+# The packaged sibling comes first: it can reach the package-local archctx that
+# capability_source "archcontext" needs. A repo-local copy is a retired
+# generated helper and serves only repos without the package.
 capability_resolver() {
   local sibling=""
-  if command -v bun >/dev/null 2>&1 && [[ -f "scripts/capability-resolver.ts" ]]; then
-    bun scripts/capability-resolver.ts "$@"
-    return $?
-  fi
   sibling="$(helper_sibling capability-resolver.ts || true)"
   if command -v bun >/dev/null 2>&1 && [[ -n "$sibling" ]]; then
     bun "$sibling" "$@"
     return $?
   fi
-  return 127
-}
-
-context_contract_sync() {
-  local sibling=""
-  if [[ -x "scripts/context-contract-sync.sh" ]]; then
-    bash "scripts/context-contract-sync.sh" "$@"
-    return $?
-  fi
-  sibling="$(helper_sibling context-contract-sync.sh || true)"
-  if [[ -n "$sibling" ]]; then
-    bash "$sibling" "$@"
+  if command -v bun >/dev/null 2>&1 && [[ -f "scripts/capability-resolver.ts" ]]; then
+    bun scripts/capability-resolver.ts "$@"
     return $?
   fi
   return 127
@@ -301,9 +290,8 @@ Track durable multi-session progress for \`${capability_id}\` without inflating 
 EOF_WORKSTREAM
 fi
 
-event_json="{\"ts\":\"$(json_escape "$iso_timestamp")\",\"file_path\":\"$(json_escape "$workstream_file")\",\"severity\":\"medium\",\"functional_block\":\"$(json_escape "$functional_block")\",\"capability_id\":\"$(json_escape "$capability_id")\",\"matched_prefix\":\"$(json_escape "$matched_prefix")\",\"architecture_domain\":\"$(json_escape "$architecture_domain")\",\"architecture_capability\":\"$(json_escape "$architecture_capability")\",\"architecture_module\":\"$(json_escape "$architecture_module")\",\"workstream_dir\":\"$(json_escape "$workstream_dir")\",\"contract_agents\":\"$(json_escape "$contract_agents")\",\"contract_claude\":\"$(json_escape "$contract_claude")\",\"active_workstream\":\"$(json_escape "$workstream_file")\",\"change_type\":\"workstream-sync\",\"spawn_recommended\":false,\"contract_sync_required\":true,\"request_file\":\"$(json_escape "$request_file")\"}"
+event_json="{\"ts\":\"$(json_escape "$iso_timestamp")\",\"file_path\":\"$(json_escape "$workstream_file")\",\"severity\":\"medium\",\"functional_block\":\"$(json_escape "$functional_block")\",\"capability_id\":\"$(json_escape "$capability_id")\",\"matched_prefix\":\"$(json_escape "$matched_prefix")\",\"architecture_domain\":\"$(json_escape "$architecture_domain")\",\"architecture_capability\":\"$(json_escape "$architecture_capability")\",\"architecture_module\":\"$(json_escape "$architecture_module")\",\"workstream_dir\":\"$(json_escape "$workstream_dir")\",\"contract_agents\":\"$(json_escape "$contract_agents")\",\"contract_claude\":\"$(json_escape "$contract_claude")\",\"active_workstream\":\"$(json_escape "$workstream_file")\",\"change_type\":\"workstream-sync\",\"spawn_recommended\":false,\"contract_sync_required\":false,\"request_file\":\"$(json_escape "$request_file")\"}"
 printf '%s\n' "$event_json" >> "$event_file"
 
-context_contract_sync sync-event --json "$event_json" >/dev/null 2>&1 || true
 
 echo "[WorkstreamSync] Ensured $workstream_file for $capability_id."

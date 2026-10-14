@@ -1,12 +1,12 @@
 # workflow-engine/contract-assets 架构文档
-<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-contract-assets" sourceDigest="sha256:efb833f1b11f807945b2ce375c73b426d4da103891435aa8b3be169aed398036" rendererVersion="archcontext.docs-renderer/v4" outputDigest="sha256:e991463ef79b1c473835d9b4df4b6752feb15eb389e4a3e57639ac6abc65e34b" -->
+<!-- BEGIN ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-contract-assets" sourceDigest="sha256:1f16e0f6c0a8962d0cfed816f312acd1840d43896063bc144f160ffd9e945c08" rendererVersion="archcontext.docs-renderer/v5" outputDigest="sha256:5e7aa8d128dbe5fde507db80c10c46f7baf2adfd97d7292b32492271eec1757b" -->
 > **狀態**:`active`
 > **Capability ID**:`capability.workflow-engine.contract-assets`(kind `capability`)
-> **Matched Prefixes**:`assets/workflow-contract.v1.json`、`.ai/harness/workflow-contract.json`、`.ai/harness/policy.json`、`.ai/context/context-map.json`、`.archcontext/model/nodes/**`、`scripts/capability-resolver.ts`、`scripts/capability-config.ts`、`scripts/contract-run.ts`、`scripts/contract-worktree.sh`、`scripts/archive-workflow.sh`、`scripts/merge-gate.ts`、`scripts/ship-worktrees.sh`、`src/cli/commands/init.ts`、`src/cli/commands/capability-context.ts`、`src/effects/runtime/helper-runner.ts`、`assets/templates/**`、`assets/reference-configs/**`、`docs/reference-configs/**`
+> **Matched Prefixes**:`assets/workflow-contract.v1.json`、`.ai/harness/workflow-contract.json`、`.ai/harness/policy.json`、`.ai/context/**`、`.archcontext/model/nodes/**`、`scripts/capability-resolver.ts`、`scripts/capability-config.ts`、`scripts/contract-run.ts`、`scripts/contract-worktree.sh`、`scripts/archive-workflow.sh`、`scripts/merge-gate.ts`、`scripts/ship-worktrees.sh`、`src/cli/commands/init.ts`、`src/cli/commands/capability-context.ts`、`src/effects/runtime/helper-runner.ts`、`assets/templates/**`、`assets/reference-configs/**`、`docs/reference-configs/**`、`assets/AGENTS.md`、`assets/CLAUDE.md`、`.ai/harness/brain-manifest.json`、`.archcontext/**`、`src/core/capabilities/**`、`src/core/source-projection.ts`、`src/cli/commands/run.ts`、`src/cli/commands/brain.ts`、`src/cli/commands/brain-root.ts`、`assets/partials/**`、`assets/partials-agents/**`、`assets/project-structures/**`、`assets/plan-map.json`、`assets/versions.json`、`assets/initializer-question-pack.v4.json`、`assets/initializer-question-pack.v4.schema.json`、`.claude/templates/**`、`scripts/workflow-contract.ts`、`scripts/check-context-map.ts`、`scripts/check-context-files.sh`、`scripts/select-agent-context-blocks.sh`、`scripts/workstream-sync.sh`、`scripts/sync-helper-sources.ts`、`scripts/sync-reference-configs.ts`、`scripts/assemble-template.ts`、`scripts/initializer-question-pack.ts`、`scripts/contract-worktree-runtime.ts`、`scripts/worktree-merge-lib.sh`、`scripts/cutover-closure.ts`、`scripts/new-spec.sh`、`scripts/new-sprint.sh`、`scripts/new-plan.sh`、`scripts/capture-plan.sh`、`scripts/plan-to-todo.sh`、`scripts/switch-plan.sh`、`scripts/classify-historical-plans.ts`、`scripts/ensure-task-workflow.sh`、`scripts/refresh-current-status.sh`、`scripts/summarize-failures.sh`、`scripts/maintenance-triage.sh`、`scripts/heartbeat-triage.sh`、`scripts/check-deploy-sql-order.sh`、`scripts/factor-lab-new.sh`、`scripts/factor-lab-promote.sh`、`scripts/factor-lab-reject.sh`、`scripts/factor-lab-check.sh`
 > **Local Contracts**:`assets/AGENTS.md`、`assets/CLAUDE.md`
 > **事實優先級**:倉庫當前狀態 > 本文檔機器區 > 本文檔人工區。機器區(引言、§1、§2)由 ArchContext 從架構模型與源碼度量投影生成,手改會在下次投影被覆蓋。本文檔不記錄出處;本次投影所驗證的 commit 見 `docs/architecture/.projection-manifest.json`。
 
-Maintains canonical workflow contracts, templates, capability nodes, and helper projections.
+Owns the package workflow contract, repo opt-in marker, templates, capability nodes, and helper projections.
 
 ## 1. P1:能力架構地圖
 
@@ -15,59 +15,155 @@ Maintains canonical workflow contracts, templates, capability nodes, and helper 
 ```mermaid
 flowchart LR
   p1_capability_workflow_engine_contract_assets_c7ab122d["Contract Assets"]:::component
-  p1_component_contract_assets_primary_21097608["Workflow Contract Asset"]:::component
+  p1_capability_workflow_engine_execution_primitives_b3033934["Execution Primitives"]:::component
+  p1_component_contract_assets_capability_registry_87c3dd18["Capability Registry"]:::component
+  p1_component_contract_assets_contract_worktree_lifecycle_5cb413df["Contract Worktree Lifecycle"]:::component
+  p1_component_contract_assets_planning_helpers_7600c3e5["Planning Helpers"]:::component
+  p1_component_contract_assets_primary_21097608["Workflow Contract And Policy"]:::component
+  p1_component_contract_assets_template_projection_e6aa176d["Template Projection"]:::component
+  p1_component_contract_assets_contract_worktree_lifecycle_5cb413df -->|"Resolve the configured Git binary for worktree lifecycle commands"| p1_capability_workflow_engine_execution_primitives_b3033934
+  p1_capability_workflow_engine_contract_assets_c7ab122d -->|"Run a contract-listed helper through repo-harness run"| p1_component_contract_assets_planning_helpers_7600c3e5
+  p1_component_contract_assets_planning_helpers_7600c3e5 -->|"Run each helper as a bounded child process"| p1_capability_workflow_engine_execution_primitives_b3033934
   p1_capability_workflow_engine_contract_assets_c7ab122d -->|"Project the workflow contract"| p1_component_contract_assets_primary_21097608
+  p1_component_contract_assets_primary_21097608 -->|"Check context map entries against the capability registry"| p1_component_contract_assets_capability_registry_87c3dd18
+  p1_capability_workflow_engine_contract_assets_c7ab122d -->|"Run the helper and reference config projection sync"| p1_component_contract_assets_template_projection_e6aa176d
+  p1_component_contract_assets_template_projection_e6aa176d -->|"Run init steps as bounded child processes"| p1_capability_workflow_engine_execution_primitives_b3033934
+  p1_component_contract_assets_template_projection_e6aa176d -->|"Initialize the brain export root during repository init"| p1_component_contract_assets_planning_helpers_7600c3e5
+  p1_component_contract_assets_template_projection_e6aa176d -->|"Read the helper inventory from the package workflow contract"| p1_component_contract_assets_primary_21097608
   classDef actor fill:#111827,color:#ffffff,stroke:#f9fafb,stroke-width:2px
   classDef component fill:#075985,color:#ffffff,stroke:#bae6fd,stroke-width:2px
   classDef datastore fill:#3f6212,color:#ffffff,stroke:#d9f99d,stroke-width:2px
   classDef external fill:#7c2d12,color:#ffffff,stroke:#fed7aa,stroke-width:2px
 ```
 
-- Proof: `proven` (`sha256:2b7599e2986a8c54415c65b66011e538f8f58b594a7b656b88404271a91e10c8`).
-- Semantic nodes: `2`; declared relations: `1`.
+- Proof: `proven` (`sha256:7c211e7ff27434a90a36d13d6fcb18a4751a586593ae120477185ed29bf643e4`).
+- Semantic nodes: `7`; declared relations: `9`.
 
 ### 1.2 模組職責表
 
 | 宣告入口 | 錨點 | 職責 |
 | --- | --- | --- |
-| `entrypoint.contract-assets.primary` | `src/core/adoption/workflow-contract-asset.ts#loadWorkflowContractAsset` | `sink.contract-assets.primary` → `src/core/adoption/workflow-contract-asset.ts#readWorkflowContractAsset` |
+| `entrypoint.contract-assets.primary` | `scripts/sync-helper-sources.ts#main` | `sink.contract-assets.primary` → `scripts/workflow-contract.ts#loadWorkflowContract`、`sink.contract-assets.helper-inventory` → `scripts/workflow-contract.ts#getHelperScripts`、`sink.contract-assets.projection-write` → `src/core/source-projection.ts#writeProjectionFileAtomic`、`sink.contract-assets.projection-compare` → `src/core/source-projection.ts#sameProjectionBytes` |
+| `entrypoint.contract-assets.run-command` | `src/cli/commands/run.ts#buildRunCommand` | `sink.contract-assets.helper-runner` → `src/effects/runtime/helper-runner.ts#runHelper` |
+| `entrypoint.contract-assets.helper-runner` | `src/effects/runtime/helper-runner.ts#runHelper` | `sink.contract-assets.bounded-process` → `src/effects/process-runner.ts#runProcess` |
+
+組件入口:
+
+- 組件均未宣告 `source.entrypoints`。
 
 ### 1.3 規模信號
 
-- 規模量級:`200–500` 個文件 / `50k–100k` 行
-- 匹配前綴:`assets/workflow-contract.v1.json`、`.ai/harness/workflow-contract.json`、`.ai/harness/policy.json`、`.ai/context/context-map.json`、`.archcontext/model/nodes/**`、`scripts/capability-resolver.ts`、`scripts/capability-config.ts`、`scripts/contract-run.ts`、`scripts/contract-worktree.sh`、`scripts/archive-workflow.sh`、`scripts/merge-gate.ts`、`scripts/ship-worktrees.sh`、`src/cli/commands/init.ts`、`src/cli/commands/capability-context.ts`、`src/effects/runtime/helper-runner.ts`、`assets/templates/**`、`assets/reference-configs/**`、`docs/reference-configs/**`
+- 規模量級:`500–1000` 個文件 / `50k–100k` 行
+- 匹配前綴:`assets/workflow-contract.v1.json`、`.ai/harness/workflow-contract.json`、`.ai/harness/policy.json`、`.ai/context/**`、`.archcontext/model/nodes/**`、`scripts/capability-resolver.ts`、`scripts/capability-config.ts`、`scripts/contract-run.ts`、`scripts/contract-worktree.sh`、`scripts/archive-workflow.sh`、`scripts/merge-gate.ts`、`scripts/ship-worktrees.sh`、`src/cli/commands/init.ts`、`src/cli/commands/capability-context.ts`、`src/effects/runtime/helper-runner.ts`、`assets/templates/**`、`assets/reference-configs/**`、`docs/reference-configs/**`、`assets/AGENTS.md`、`assets/CLAUDE.md`、`.ai/harness/brain-manifest.json`、`.archcontext/**`、`src/core/capabilities/**`、`src/core/source-projection.ts`、`src/cli/commands/run.ts`、`src/cli/commands/brain.ts`、`src/cli/commands/brain-root.ts`、`assets/partials/**`、`assets/partials-agents/**`、`assets/project-structures/**`、`assets/plan-map.json`、`assets/versions.json`、`assets/initializer-question-pack.v4.json`、`assets/initializer-question-pack.v4.schema.json`、`.claude/templates/**`、`scripts/workflow-contract.ts`、`scripts/check-context-map.ts`、`scripts/check-context-files.sh`、`scripts/select-agent-context-blocks.sh`、`scripts/workstream-sync.sh`、`scripts/sync-helper-sources.ts`、`scripts/sync-reference-configs.ts`、`scripts/assemble-template.ts`、`scripts/initializer-question-pack.ts`、`scripts/contract-worktree-runtime.ts`、`scripts/worktree-merge-lib.sh`、`scripts/cutover-closure.ts`、`scripts/new-spec.sh`、`scripts/new-sprint.sh`、`scripts/new-plan.sh`、`scripts/capture-plan.sh`、`scripts/plan-to-todo.sh`、`scripts/switch-plan.sh`、`scripts/classify-historical-plans.ts`、`scripts/ensure-task-workflow.sh`、`scripts/refresh-current-status.sh`、`scripts/summarize-failures.sh`、`scripts/maintenance-triage.sh`、`scripts/heartbeat-triage.sh`、`scripts/check-deploy-sql-order.sh`、`scripts/factor-lab-new.sh`、`scripts/factor-lab-promote.sh`、`scripts/factor-lab-reject.sh`、`scripts/factor-lab-check.sh`
+- 排除前綴:`assets/reference-configs/external-tooling.md`、`docs/reference-configs/external-tooling.md`、`docs/reference-configs/install-profiles.md`、`docs/reference-configs/chatgpt-coding-mcp.md`
 - 推導:掃描 `source.include` 減 `source.exclude`,跳過 `.git/` 與 `node_modules/`,再按 1–2–5 階梯分桶。精確計數不入本文檔:量級足以回答「這個能力有多大」,而逐行計數會讓覆蓋範圍內任何一次源碼改動都改寫本文檔。
 
 ### 1.4 依賴邊界
 
 出向關係:
 
+- `calls` → `component.contract-assets.planning-helpers` — Run a contract-listed helper through repo-harness run
 - `calls` → `component.contract-assets.primary` — Project the workflow contract
+- `calls` → `component.contract-assets.template-projection` — Run the helper and reference config projection sync
 
 入向關係:
 
-- 無。
+- `calls` ← `component.evals-checks.primary` — Consume trusted PR checks for a base ref through the merge gate without rerunning commands
+- `calls` ← `component.global-runtime-reconciliation.cli-root` — Register the init and capability-context commands
+- `calls` ← `component.global-runtime-reconciliation.primary` — Sync the cross-review skills through the init command
+- `calls` ← `component.hook-adapters.host-installer` — Locate the packaged workflow-state helper for hook-lib path
+- `reads` ← `component.inspection-migration.primary` — Read directory and legacy path inventory from the package workflow contract
+- `calls` ← `capability.organization.publication` — Recompute the candidate diff with the packaged merge gate and worktree merge helper
+- `calls` ← `capability.organization.task-fleet` — Run packaged contract worktree helpers to provision and bind an acquired task
+- `calls` ← `component.workflow-state.primary` — Match changed paths to capability ids through the pure capability registry
+
+組件出向關係:
+
+- `component.contract-assets.capability-registry`:
+  - 無。
+- `component.contract-assets.contract-worktree-lifecycle`:
+  - `calls` → `capability.verification.acceptance-review` — Locate the acceptance receipt and the protected Git runtime
+  - `calls` → `capability.workflow-engine.execution-primitives` — Resolve the configured Git binary for worktree lifecycle commands
+  - `calls` → `capability.runtime-harness.task-agent-host` — Register and clean up task worktrees and read session artifacts
+  - `calls` → `capability.workflow-engine.workflow-state` — Create and remove task worktrees under the worktree topology lock
+- `component.contract-assets.planning-helpers`:
+  - `calls` → `capability.verification.acceptance-review` — Read the acceptance policy for planning helpers
+  - `calls` → `capability.workflow-engine.execution-primitives` — Run each helper as a bounded child process
+- `component.contract-assets.primary`:
+  - `reads` → `component.contract-assets.capability-registry` — Check context map entries against the capability registry
+- `component.contract-assets.template-projection`:
+  - `calls` → `capability.public-surface.adoption` — Plan and apply the transactional adoption for repository init
+  - `calls` → `capability.verification.codegraph-readiness` — Ensure CodeGraph readiness during init
+  - `calls` → `capability.workflow-engine.execution-primitives` — Run init steps as bounded child processes
+  - `calls` → `capability.runtime-harness.global-runtime-reconciliation` — Initialize the architecture projection provider preference
+  - `calls` → `capability.runtime-harness.hook-adapters` — Read the install profile and project skills during init
+  - `calls` → `component.contract-assets.planning-helpers` — Initialize the brain export root during repository init
+  - `reads` → `component.contract-assets.primary` — Read the helper inventory from the package workflow contract
+  - `calls` → `component.action-commands.skill-surface-catalog` — Read host skill placements and install groups during init
+  - `calls` → `capability.runtime-harness.task-agent-host` — Install the required Herdr skill during init
+  - `calls` → `capability.workflow-engine.workflow-state` — Check cutover quiescence and record the coordination cutover during init
+
+### 1.5 組件結構
+
+| 組件 | 名稱 | 規模量級 | 宣告入口 |
+| --- | --- | --- | --- |
+| `component.contract-assets.capability-registry` | Capability Registry | `200–500` 個文件 / `10k–20k` 行 | 未宣告 |
+| `component.contract-assets.contract-worktree-lifecycle` | Contract Worktree Lifecycle | `5–10` 個文件 / `5000–10000` 行 | 未宣告 |
+| `component.contract-assets.planning-helpers` | Planning Helpers | `20–50` 個文件 / `2000–5000` 行 | 未宣告 |
+| `component.contract-assets.primary` | Workflow Contract And Policy | `10–20` 個文件 / `2000–5000` 行 | 未宣告 |
+| `component.contract-assets.template-projection` | Template Projection | `100–200` 個文件 / `20k–50k` 行 | 未宣告 |
 
 ## 2. P2:端到端數據流
 
-> **Proof**: `proven` (`sha256:2b7599e2986a8c54415c65b66011e538f8f58b594a7b656b88404271a91e10c8`); selectors `1/1`.
+> **Proof**: `proven` (`sha256:7c211e7ff27434a90a36d13d6fcb18a4751a586593ae120477185ed29bf643e4`); selectors `6/6`.
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
 sequenceDiagram
   autonumber
   participant p2_capability_4262990f as Contract Assets
-  participant p2_component_7b8d80ff as Workflow Contract Asset
-  p2_capability_4262990f->>p2_component_7b8d80ff: Dispatch Workflow Contract Asset
-  alt Project the workflow contract completes
-  p2_capability_4262990f->>p2_component_7b8d80ff: Invoke Workflow Contract Asset
-    Note over p2_capability_4262990f: Return success receipt
-  else Project the workflow contract is rejected or fails
-  p2_capability_4262990f->>p2_component_7b8d80ff: Propagate Workflow Contract Asset failure
-    Note over p2_capability_4262990f: Return typed failure
+  participant p2_projection_7d224da1 as Template Projection
+  participant p2_contract_304aeb6a as Workflow Contract And Policy
+  p2_projection_7d224da1->>p2_contract_304aeb6a: Load the package workflow contract
+  p2_projection_7d224da1->>p2_contract_304aeb6a: Read helpers.scripts as the only helper id list
+  alt Every helper copy matches its source
+  p2_capability_4262990f->>p2_projection_7d224da1: Write byte and mode identical helper copies atomically
+    Note over p2_projection_7d224da1: Helper copies equal the contract inventory
+  else A helper copy drifts or the inventory is unsafe
+  p2_capability_4262990f->>p2_projection_7d224da1: Compare projected bytes and report drift in check mode
+    Note over p2_capability_4262990f: Exit non-zero without a partial projection
+  end
+```
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"background":"#0d1117","actorBkg":"#312e81","actorBorder":"#c4b5fd","actorTextColor":"#ffffff","signalColor":"#e5e7eb","signalTextColor":"#e5e7eb","labelBoxBkgColor":"#4c1d95","labelBoxBorderColor":"#c4b5fd","labelTextColor":"#ffffff","noteBkgColor":"#78350f","noteBorderColor":"#fcd34d","noteTextColor":"#ffffff","sequenceNumberColor":"#ffffff"}}}%%
+sequenceDiagram
+  autonumber
+  participant p2_capability_4262990f as Contract Assets
+  participant p2_helpers_21137951 as Planning Helpers
+  participant p2_primitives_8dae000d as Execution Primitives
+  p2_capability_4262990f->>p2_helpers_21137951: Resolve a helper id that the workflow contract lists
+  alt The helper exits zero inside its timeout class
+  p2_helpers_21137951->>p2_primitives_8dae000d: Run the helper as a bounded child with a protected environment
+    Note over p2_capability_4262990f: Return the helper exit status
+  else The helper is not listed or fails or times out
+  p2_helpers_21137951->>p2_primitives_8dae000d: Propagate the bounded child failure
+    Note over p2_capability_4262990f: Exit non-zero with the redacted child error
   end
 ```
 <!-- END ARCHCONTEXT:generated target="projection_target.entity.capability-workflow-engine-contract-assets" -->
+
+## 2026-10-05 Workflow Contract Marker
+
+`assets/workflow-contract.v1.json` is the package contract body.
+`.ai/harness/workflow-contract.json` is the opt-in marker.
+It holds only `kind: repo-harness.workflow-contract-marker` and `protocol: 1`.
+Hooks continue to check file existence.
+Adoption replaces old content with the marker and keeps a transaction backup.
+Inspect reads only the package body.
+Shell scaffold scripts do not write the marker.
+Run `repo-harness init --repo <target-repo>` after the shell scaffold.
+Earlier byte-parity statements in dated closeouts describe the old design.
 
 ## Architecture automation defaults
 
@@ -75,73 +171,104 @@ Architecture projection execution preferences belong to the user-level
 `~/.repo-harness/config.json#architecture`. Repository policy owns model and
 capability authority, documentation paths, and freshness gates; it does not
 author provider selection or apply mode. Global install/update and successful
-repository init use the same configuration writers to initialize automatic
-projection and `refactor_recommendations.enabled=true` when unset, preserving
-explicit disabled choices. Init dry-run does not write these preferences.
+repository init use the same configuration writer to initialize the projection
+provider when unset, preserving an explicit disabled choice. Init dry-run does
+not write the preference.
 
-The Stop hook consumes architecture changes and delivers measured refactor
-opportunities for a user decision. Default enablement does not synthesize a
-missing architecture model, missing code facts, or permission to execute a
-refactor. `docs/spec.md` owns the product contract; the initialization and Stop
+No hook delivers architecture or refactor work. repo-harness supplies tools and
+evidence; the Bot decides what to schedule. Default enablement does not
+synthesize a missing architecture model, missing code facts, or permission to
+execute a refactor. `docs/spec.md` owns the product contract; the initialization and Stop
 regressions verify these separate boundaries.
 ## 3. P3：设计决策与不变量
 
-### 3.1 为什么契约资产与 runtime 状态分离
+生成仓库必须能在没有任何服务的情况下自证。tracked 契约文件是持久真相。`.ai/harness/checks/*`、handoff packet、failure log、worktrees 与 run snapshots 都是 ignored runtime 状态。删掉或损坏 ignored 缓存不能让版本回退：`state_version` 是 Git common dir 下的单调计数器（见 workflow-state），`state_revision` 是确定性内容哈希。
 
-生成仓库必须能在**没有任何服务**的情况下自证。因此 tracked 契约文件是持久真相，而 `.ai/harness/checks/*`、handoff packet、failure log、architecture events、worktrees、run snapshots 全是 ignored runtime 状态。删掉或损坏 ignored 缓存不能让版本回退：`state_version` 是 Git worktree metadata 下的单调计数器，`state_revision` 是确定性内容哈希。
-
-### 3.2 必须守住的不变量
+### 3.1 必须保持的不变量
 
 | # | 不变量 | 执行者 |
 | --- | --- | --- |
-| I1 | asset 契约与自宿主 runtime 副本 byte-identical | `tests/workflow-contract.test.ts:40-45`；写入端只搬字节 |
-| I2 | `helpers.scripts` 与 `helpers.descriptions` 1:1，且描述非空 | `helper-runner.ts:254-268` + `tests/workflow-contract.test.ts:199-213` |
-| I3 | `helpers.scripts` 是「有哪些 helper」的唯一 id 列表；descriptions 只挂显示数据 | 契约结构 + 上述双向校验 |
-| I4 | `.ai/context/capabilities.json` 是 capability 的唯一 runtime 权威 | `capability-resolver.ts` fail-closed；`capability-config add` 是唯一创建路径 |
-| I5 | capability context 块、ArchContext node/v2 导出都是单向投影，不是第二作者面 | `capability-context.ts`；`export` 仅接受 `archcontext-nodes-v2`，并由 canonical reader round-trip 验证 |
-| I6 | 受保护 helper 的 source/helper/HOME/PATH/解释器解析不受调用者影响 | `protectedChildEnv()`、`resolveHelperRuntime(env, false)` |
-| I7 | merge gate 启用位来自**目标 base commit**，candidate 不能自我豁免 | `ship-worktrees.sh:907-911`；`contract-worktree.sh` gate base ref |
-| I8 | 51/52 helper 与 `scripts/` byte-identical；唯一例外携带 `@generated-from` 哈希头 | `scripts/sync-helper-sources.ts` `--check` |
-| I9 | adoption 事务永不无声覆盖用户内容 | `expectedContentHash` / `expectedAbsent` / move-collision 抛错 |
-| I10 | install profile 单一 authored 权威是 `profile`，`components` 是漂移检查过的投影 | `global-runtime.ts:651` + `PROFILE_COMPONENTS` |
-| I11 | 本地 contract publication 每个 work-package 只向 target 增加一个 commit，且 publication tree 必须与 seal 验证后的 lifecycle HEAD byte-identical | `contract-worktree.sh` 的 frozen-base、`commit-tree` parent/tree 断言、`publication_prepared` journal phase |
-| I12 | finish abort 只有在 runner 证明 target publication 未落地后才能把同一 fenced lease 从 `completing` 恢复为 `bound`；canonical 已完成行绝不重开 | `contract-worktree.sh` 的 landed-effect probe + `sprint abort-completion` 的 task-lock/canonical-row gate |
+| I1 | `assets/workflow-contract.v1.json` 是唯一契约主体；`.ai/harness/workflow-contract.json` 只是 opt-in marker（`kind` 与 `protocol` 两个字段） | `tests/workflow-contract.test.ts` “self-hosted opt-in marker matches the renderer and the protocol” |
+| I2 | `helpers.scripts` 与 `helpers.descriptions` 一一对应，描述非空 | `src/effects/runtime/helper-runner.ts:246-268` + `tests/workflow-contract.test.ts` |
+| I3 | `helpers.scripts` 是“有哪些 helper”的唯一 id 列表；descriptions 只挂显示数据 | 契约结构 + 上述双向校验 |
+| I4 | `context.capability_source` 选择唯一 capability 权威。本仓库是 `archcontext`，读 `.archcontext/model/nodes/*.yaml`；不双读，不回退 | `.ai/harness/policy.json:101-102`；`src/core/capabilities/registry.ts:514` |
+| I5 | archcontext 模式下，路径归属只由 `archctx resolve` 决定。注册表不检查 include 形状，也接受 `source.exclude`。歧义归属与 archctx 失败都 fail closed。registry 模式仍按最长前缀匹配，同长度歧义 fail closed | `registry.ts` 的 `capabilityPathResolutionFromArchcontextOwners`、`src/effects/capabilities/archcontext-owners.ts`、`registry.ts` 的 `matchCapabilityPath` |
+| I6 | 受保护 helper 的 source、helper、HOME、PATH 与解释器解析不受调用者影响 | `protectedChildEnv()`（`helper-runner.ts:73`）、`resolveHelperRuntime(env, !protectedHelper)`（`:367`） |
+| I7 | merge gate 的启用位来自目标 base commit，候选不能自我豁免 | `scripts/ship-worktrees.sh:868-871`（`merge-gate.ts fingerprint --base`） |
+| I8 | 55 个 helper 中 52 个与 `scripts/` 逐字节一致；3 个例外由投影脚本声明：`capability-resolver.ts` 与 `recovery-view-cli.ts` 带 `@generated-from` 头，`acceptance-receipt.ts` 只改写一条 import 路径 | `bun run check:helpers`；`scripts/sync-helper-sources.ts:48`、`:88`、`:108-113` |
+| I9 | 本地 contract publication 每个 work package 只向 target 增加一个 commit，publication tree 必须与 seal 验证后的 lifecycle HEAD 一致 | `scripts/contract-worktree.sh` 的 `publication_prepared` journal phase |
+| I10 | finish abort 只在 runner 证明 target publication 未落地后，才把同一 fenced lease 从 `completing` 恢复为 `bound` | `contract-worktree.sh` 的 `closeout_finish_effect_landed`（`:1213-1233`）+ `sprint abort-completion` |
 
-### 3.3 已接受的约束与取舍
+本 capability 还依赖两条外部不变量。它们不归这里执行：adoption 事务不会静默覆盖用户内容（public-surface.adoption）；install profile 的唯一 authored 权威是 `profile`（hook-adapters 与 global-runtime-reconciliation）。
 
-- **契约是 JSON 而非可执行配置**。代价是表达力弱，收益是 byte-parity 可判定、diff 可读、任何语言都能校验。这是 I1 能成立的前提。
-- **超时按类别硬编码而非策略可配**。放弃了「快机器跑快点」的灵活性，换来的是策略文件不能变成拒绝服务或无限挂起的攻击面。
-- **闸门在 commit 之后跑**。pre-commit 的 HEAD 无法标识 merge candidate，所以只能先落 commit 再封印；FAIL/BLOCKED 靠恢复 pre-finish commit 与实时工作流工件来回滚。
-- **`functional_block_selector` 保留在 context-map 里但自述为 compatibility selector**（`.ai/context/context-map.json`，`rule` 字段原文：`compatibility selector; capability registry is the source of truth`）。这是**已实现、保留字段**：结构在，权威已经移交给注册表。它是有边界的遗留物，不是双权威。
-- **`merge-gate` 无 provider 调用**。它是确定性封印，不是语义评审；语义验收由独立的 AcceptanceReceipt 承担。这条边界让闸门可离线、可重放。
-- **证据边界不再等于 public commit 边界**。source branch 保留 checkpoint 与 lifecycle commits 供恢复和审计；local merge 用 frozen target base + verified lifecycle tree 合成一个 publication commit。代价是 source commit topology 不进入 target ancestry，收益是 main history 与 work-package/rollback 边界一致；journal 记录 publication SHA，并以 target ref 是否包含它判断外部效果是否已经落地。
-- **lease 与 closeout journal 没有跨存储原子事务**。abort 先幂等恢复 lease，再把 journal 标为 `aborted`；若两步之间崩溃，显式 `recover abort` 重放同一个 fenced transition。反向排序会留下已宣称 aborted、却仍不可接力的 `completing` lease，因此不采用。
+### 3.2 关键权衡
+
+- **契约是 JSON 而非可执行配置。** 代价是表达力弱。收益是 byte parity 可判定、diff 可读、任何语言都能校验。
+- **超时按类别硬编码而非策略可配。** 普通 helper 120 s，closeout helper 900 s，verifier helper 3,660 s（`helper-runner.ts:20-23`）。策略文件因此不能变成无限挂起的入口。
+- **闸门在 commit 之后跑。** pre-commit 的 HEAD 无法标识 merge candidate，所以先落 commit 再封印。FAIL 或 BLOCKED 靠恢复 pre-finish commit 与实时工作流工件回滚。
+- **`merge-gate` 不调用 provider。** 它是确定性封印，不是语义评审。语义验收由独立的 AcceptanceReceipt 承担。闸门因此可离线、可重放。
+- **证据边界不等于 public commit 边界。** source branch 保留 checkpoint 与 lifecycle commits。local merge 用 frozen target base 加 verified lifecycle tree 合成一个 publication commit。代价是 source topology 不进入 target ancestry。
+- **lease 与 closeout journal 没有跨存储原子事务。** abort 先幂等恢复 lease，再把 journal 标为 `aborted`。两步之间崩溃时，`recover abort` 重放同一个 fenced transition。
+- **组件按职责拆，不按目录拆（2026-10-11）。** 五个组件各自对应一个入口面。代价是 `scripts/` 下的文件只能逐个列出，因为同一目录还有其他 capability 的脚本。
+
+### 3.3 组件
+
+组件 footprint 是组件节点上的 `source.include`。数字来自 `archctx refactor scan`（2026-10-11）。capability 本身还保留 4 个多重归属文件（reference configs），等待 arch-context#296。
+
+| 组件 | 文件 / 行 | 职责 | 主要出向关系 |
+| --- | ---: | --- | --- |
+| `component.contract-assets.primary`（Workflow Contract And Policy） | 12 / 4,410 | 契约主体、opt-in marker、harness policy、context map、契约加载器与 context 门禁 | capability-registry（`check-context-map.ts` 读注册表） |
+| `component.contract-assets.capability-registry` | 148 / 6,981 | `.archcontext/**` 模型文件、纯注册表、resolver 与 config CLI、capability context 命令 | 无组件外调用；workflow-state 的 resolver 调用它 |
+| `component.contract-assets.template-projection`（可扩展） | 180 / 35,687 | helper 与 reference config 投影、模板装配、`repo-harness init` | primary、planning-helpers、workflow-state、execution-primitives、adoption、hook-adapters、global-runtime-reconciliation、codegraph-readiness |
+| `component.contract-assets.contract-worktree-lifecycle` | 8 / 6,505 | worktree 生命周期、publication、merge gate、contract brief runner、归档 | workflow-state（worktree 拓扑锁）、execution-primitives（Git binary） |
+| `component.contract-assets.planning-helpers` | 21 / 4,034 | 计划、spec、sprint、triage 与 factor-lab helper，`run` 与 `brain` 命令，受保护 helper runner | execution-primitives（有界子进程） |
+
+template-projection 标记为可扩展。`assets/templates/helpers/**` 有 20,832 行，都是 `scripts/` 的投影副本。`src/cli/commands/init.ts` 是一个组合根。按本次提案的归属，它导入 8 个其他 capability 的代码。现在不拆。
 
 ### 3.4 10x 规模下先垮的点
 
-按「先垮」排序：
+按“先垮”排序：
 
-1. **helper 数量增长（当前 52）**。每加一个 helper 要同时改 4 处：`helpers.scripts`、`helpers.descriptions`、`scripts/<name>`、`assets/templates/helpers/<name>`。fail-closed 校验保证漏改会红，但这是**线性增长的手工同步成本**——它已经在真实 ship 中触发过（见第 4 节 2026-07-14 段落记录的 rebase 事件）。第一个撑不住的不是正确性，是改动摩擦。
-2. **policy 顶层域数量（当前 29）**。`deepMergeDefaults` 是无 schema 的结构性合并。域数继续涨，「默认值改了但已装仓库不会自动拿到」这类静默偏差会越来越难发现，因为没有 policy schema 版本化与迁移断言。
-3. **capability 数量（当前 11）与最长前缀匹配**。`DUPLICATE_PREFIX` 与 `AMBIGUOUS_MATCH` 已经在守，但注册表本身是单文件、人工排序；到几十个 capability 时，「哪个 prefix 该归谁」的判断会先于工具失效。
-4. **`assets/templates/` 27k 行**。它是投影，正确性由 `--check` 保证，但每次 helper 改动都在 diff 里翻倍出现，review 信噪比下降。
+1. **helper 数量增长（当前 55）。** 每加一个 helper 要改 4 处：`helpers.scripts`、`helpers.descriptions`、`scripts/<name>`、`assets/templates/helpers/<name>`。fail-closed 校验保证漏改会红，但同步成本线性增长。
+2. **policy 顶层域数量（当前 32）。** `deepMergeDefaults`（`src/core/adoption/standard-plan.ts:236`）是无 schema 的结构合并。域数继续涨时，“默认值改了但已装仓库拿不到”这类偏差更难发现。
+3. **capability 数量（当前 29 个节点）与最长前缀匹配。** 注册表不支持 exclude，`scripts/` 这类共享目录只能逐个列文件。新脚本默认没有 owner。
+4. **`assets/templates/` 21,876 行。** 它是投影，正确性由 `--check` 保证。但每次 helper 改动都在 diff 里出现两次，review 信噪比下降。
 
-最小连贯的护栏仍是现有那套：parity 测试 + `sync-helper-sources.ts --check` + `capability-resolver validate` + 自迁移 dry-run。要更进一步，第一刀应是给 `.ai/harness/policy.json` 引入 schema 版本与迁移断言，而不是加抽象。
+最小连贯的护栏仍是现有那套：parity 测试、`sync-helper-sources.ts --check`、`capability-resolver validate` 与自迁移 dry-run。下一步应给 `.ai/harness/policy.json` 引入 schema 版本与迁移断言，而不是加抽象。
 
 ### 3.5 与历史记录的已知冲突
 
-第 4 节逐字保留，其中三处与 HEAD 源码不符，以本节为准：
+第 4 节逐字保留。以下各处与 HEAD 源码不符，以本节为准：
 
 | 历史段落 | 历史说法 | HEAD 实际 | 位置 |
 | --- | --- | --- | --- |
-| 2026-07-16 Closeout Runner Guardrails | `verify-contract`/`verify-sprint` 720 秒 | **3,660 秒**（`VERIFIER_HELPER_TIMEOUT_MS = 3_660_000`） | `src/cli/runtime/helper-runner.ts:15` |
-| 2026-07-16 Closeout Runner Guardrails | 900 秒档只含 `contract-worktree`/`ship-worktrees` | 还包含 **`merge-gate`**；`PROTECTED_HELPERS` 另含 `acceptance-receipt` | `helper-runner.ts:12`、`:134-137` |
-| 2026-07-14 Helper Descriptions | 46 → 48 条描述 | **52 条**（scripts 与 descriptions 均为 52） | `assets/workflow-contract.v1.json#helpers` |
+| 2026-07-16 Closeout Runner Guardrails | `verify-contract`/`verify-sprint` 720 秒 | 3,660 秒（`VERIFIER_HELPER_TIMEOUT_MS = 3_660_000`） | `src/effects/runtime/helper-runner.ts:21` |
+| 2026-07-16 Closeout Runner Guardrails | 900 秒档只含 `contract-worktree`/`ship-worktrees` | 还包含 `merge-gate`；`PROTECTED_HELPERS` 另含 `acceptance-receipt` | `helper-runner.ts:20`、`:22` |
+| 2026-07-14 Helper Descriptions | 46 → 48 条描述 | 55 条（scripts 与 descriptions 均为 55） | `assets/workflow-contract.v1.json#helpers` |
+| 旧 §3.2 I1 | asset 契约与自宿主 runtime 副本 byte-identical | 自宿主文件是 opt-in marker（2026-10-05） | `.ai/harness/workflow-contract.json` |
+| 旧 §3.2 I4 | `.ai/context/capabilities.json` 是唯一 runtime 权威 | 该文件不存在；权威是 `.archcontext/model/nodes` | `.ai/harness/policy.json:101-102` |
+| 旧 §3.2 I8 | 51/52 helper 一致，唯一例外带 `@generated-from` 头 | 52/55 一致，3 个声明的例外 | `scripts/sync-helper-sources.ts` |
+| 旧 §3.4 | capability 11 个，policy 29 个顶层域，templates 27k 行 | 29 个节点，32 个顶层域，21,876 行 | 本节 §3.4 |
+| 2026-08-21 Windows Protected Helper Platform Contract | `src/cli/runtime/protected-helper-platform.ts` 拥有平台解析 | 文件在 `src/effects/runtime/protected-helper-platform.ts` | `helper-runner.ts` 导入路径 |
+| 旧 entrypoint 与 flow | 入口是 adoption 的 `src/core/adoption/workflow-contract-asset.ts` | 该文件归 public-surface.adoption；flow 改为 `scripts/sync-helper-sources.ts#main` | 2026-10-11 历史条目 |
 
 另有两处已由后续 slice 取代，历史段落本身未改写：
 
-- 旧文档头部与 P1 曾把 `assets/skills/merge-gate/` 列为 matched prefix 与权威文件。该目录在 HEAD **不存在**（`assets/skills/` 下只有 `claude-plan`、`repo-harness-chatgpt`、`repo-harness-cross-review`、`repo-harness-plan`、`repo-harness-product`、`repo-harness-setup`），`.ai/context/capabilities.json` 的 prefix 列表也已移除它。这与 2026-07-21 段落「former host-only merge-gate skill/agent ... are removed」一致。
-- 旧 P2 只描述了 shell 路线（`pi_install_workflow_contract` → `pi_write_harness_policy` → …）。这些函数在 `scripts/lib/project-init-lib.sh:917,1675` 仍然存在，但调用者只有 `scripts/create-project-dirs.sh:43` 与 `scripts/init-project.sh:69`，且这两个脚本**不在** `helpers.scripts` 契约清单里。`repo-harness init` 的实际 runtime path 是 §2.1 的 TS 事务模型。
+- 旧文档头部与 P1 曾把已退役的 merge-gate Skill 目录列为 matched prefix。该目录在 HEAD 不存在（Skill 来源由 `assets/skill-commands/manifest.json` 控制）。这与 2026-07-21 段落一致。
+- 旧 P2 只描述 shell 路线（`pi_install_workflow_contract` → `pi_write_harness_policy` → …）。这些函数仍在 `scripts/lib/project-init-lib.sh`，调用者是 `scripts/create-project-dirs.sh` 与 `scripts/init-project.sh`，两者都归 inspection-migration。`repo-harness init` 的实际路径是 TS 事务模型。
+
+---
+
+## 4. 历史决策记录（append-only）
+
+> 本节逐字保留既有文档中所有带日期的段落，英文不翻译，顺序与原文件一致。仅将标题层级由 `##` 降为 `###` 以嵌入本节；正文一字未改。历史数值与 HEAD 的差异见 §3.5。
+
+### 2026-10-11 Component decomposition and helper ownership
+
+- 本 capability 拆成五个组件：primary（契约与 policy）、capability-registry、template-projection、contract-worktree-lifecycle、planning-helpers。见 §3.3。
+- 之前没有 owner 的 29 个 `scripts/` 契约与 helper 脚本进入 include，另外加入 `src/core/capabilities/**`、`src/core/source-projection.ts`、`run`/`brain`/`brain-root` 命令、`.archcontext/**`、`.ai/context/**`、`assets/{AGENTS,CLAUDE}.md`、partials、project structures 与 `.claude/templates/**`。没有删除任何既有 include。
+- 入口从 adoption 拥有的 `src/core/adoption/workflow-contract-asset.ts` 移到本 capability 的 `scripts/sync-helper-sources.ts#main`。新增第二条 flow：`repo-harness run` 解析 helper 并交给 execution-primitives 运行。
+- 以下三段原在 §3 末尾，现逐字移入本节：
 
 ### 2026-08-11 Codex Native Agent Policy Cutover
 
@@ -185,7 +312,7 @@ regressions verify these separate boundaries.
 
 ### 2026-08-21 Windows Protected Helper Platform Contract
 
-- P1: `src/cli/runtime/helper-runner.ts` remains the sole protected-helper
+- P1: `src/effects/runtime/helper-runner.ts` remains the sole protected-helper
   dispatcher; `src/cli/runtime/protected-helper-platform.ts` owns platform
   resolution and the protocol-1 Windows schema; install/update owns discovery
   and persistence; Git for Windows supplies the Bash/POSIX runtime; and the
@@ -215,12 +342,6 @@ regressions verify these separate boundaries.
   first operational failure remains a moved Git-for-Windows installation, and
   that failure is deliberately closed rather than repaired heuristically.
 
----
-
-## 4. 历史决策记录（append-only）
-
-> 本节逐字保留既有文档中所有带日期的段落，英文不翻译，顺序与原文件一致。仅将标题层级由 `##` 降为 `###` 以嵌入本节；正文一字未改。历史数值与 HEAD 的差异见 §3.5。
-
 ### 2026-07-14 Local Merge Gate Enforcement
 
 - P1: installed `contract-worktree` remains the commit/merge authority and
@@ -228,7 +349,7 @@ regressions verify these separate boundaries.
   policy owns enablement, the OS account home
   `~/.repo-harness/config.json#merge_gate` owns local
   runner identity, the host-only `merge-gatekeeper` agent owns only tool-free model isolation,
-  `assets/skills/merge-gate` owns review semantics, and `scripts/merge-gate.ts`
+  the former merge-gate skill owned review semantics, and `scripts/merge-gate.ts`
   is the only receipt writer/verifier.
 - P2: finish snapshots live workflow state, verifies and archives it, commits
   the exact candidate, and invokes Claude with no tools from an empty temporary
@@ -388,9 +509,9 @@ regressions verify these separate boundaries.
 - Native Explore remains host-owned informal capability. Formal explorer work
   resolves to the complete repo-owned persona; no alias, wrapper, inherited
   prompt, incremental merge, or second authored authority participates.
-- BDD2 remains an independent sealed evaluation authority. The harness
-  evaluator must fail closed on `evals/bdd2/**` or
-  `scripts/run-bdd2-evals.ts`, and this work-package does not modify either.
+- BDD2 and BDD3 evaluation data and the BDD2 runner are retired. The harness
+  evaluator must fail closed on requests for `evals/bdd2/**` or
+  `scripts/run-bdd2-evals.ts`. It uses only the skills and adoption profiles.
 - The first 10x failure would be adding persona names without updating package,
   policy seeds, projections, readiness, and HOME installation together. Exact
   six-role lists, all-source preflight, tarball assertions, and temporary-HOME
@@ -399,14 +520,14 @@ regressions verify these separate boundaries.
 ### 2026-07-14 Helper Descriptions Contract Surface Closeout
 
 - `assets/workflow-contract.v1.json#helpers.descriptions` is the sole authority for the one-line description of every bundled helper (helper id, filename minus extension, mapped to description text). `helpers.scripts` keeps sole authority over which helpers exist; descriptions attach display data to those ids without introducing a second id list.
-- The contract parser fails closed in `src/cli/runtime/helper-runner.ts` (`readContractHelperDescriptions`): a missing `descriptions` object, a scripts entry without a description, an empty or non-string value, or a description key with no matching script is a contract error, so the description map cannot drift from the script list.
+- The contract parser fails closed in `src/effects/runtime/helper-runner.ts` (`readContractHelperDescriptions`): a missing `descriptions` object, a scripts entry without a description, an empty or non-string value, or a description key with no matching script is a contract error, so the description map cannot drift from the script list.
 - `repo-harness run --help` now renders the full helper enumeration lazily through `listHelpers()` (`src/cli/commands/run.ts`), closing the discovery gap where the 46-helper surface was previously printed only on an unknown-helper failure. `.ai/harness/workflow-contract.json` remains the byte-identical installed mirror of the assets contract; no module boundary, dependency direction, or verification command changed.
 - Regression coverage: `tests/workflow-contract.test.ts` (descriptions cover `helpers.scripts` 1:1 with non-empty text) and `tests/cli/run.test.ts` (fail-closed validation plus `run --help` enumeration output).
 - The invariant was exercised live at ship time: rebasing onto origin/main added two upstream helpers (`run-bounded-verifier-command.ts`, `validate-harness-profile-benchmark.ts`) and the fail-closed check blocked shipping until their descriptions landed, bringing the map to 48 entries.
 
 ### 2026-07-16 Closeout Runner Guardrails
 
-- P1: `src/cli/runtime/helper-runner.ts` remains the canonical helper dispatch
+- P1: `src/effects/runtime/helper-runner.ts` remains the canonical helper dispatch
   policy. Ordinary helpers receive a fixed 120-second envelope,
   `verify-contract`/`verify-sprint` receive 720 seconds, and
   `contract-worktree`/`ship-worktrees` receive 900 seconds. Repository policy
@@ -432,7 +553,7 @@ regressions verify these separate boundaries.
   UserWaiverGrant records that owner decision against stable contract/goal
   authority. The host-owned AcceptanceReceipt is the exact closeout authority;
   its closed dispositions are `external_pass`, `user_waiver`, and `reject`.
-- `verify-sprint --prepare-acceptance` freezes canonical verification evidence.
+- `verification-plan execute` records declared checks in an explicitly selected native report.
   Receipt verification binds that evidence, normalized implementation content,
   goal, contract, benchmark evidence, reviewed paths, and target revision.
   Semantic changes invalidate the receipt and require fresh evidence, while an
@@ -455,7 +576,7 @@ regressions verify these separate boundaries.
   `runtime-evidence-receipt.ts` into the npm package with the other canonical
   helpers.
 - The contract declaration is only oracle intent. Final-subject selection is
-  recomputed at prepare-acceptance from policy `review_base`, and the result is
+  recomputed by the acceptance owner from policy `review_base`, and the result is
   bound through verification evidence while protocol-2 AcceptanceReceipt stays
   the single merge authority.
 
@@ -463,22 +584,32 @@ regressions verify these separate boundaries.
 
 ## Workstream Ledger
 
-- `tasks/workstreams/workflow-engine/contract-assets/cleanup-script-policy.md`
-- `tasks/workstreams/workflow-engine/contract-assets/20260712-contract-assets.md`
-- `tasks/workstreams/workflow-engine/contract-assets/agent-fleet-specialists.md`
-- `tasks/workstreams/workflow-engine/contract-assets/20260714-merge-gate-enforcement.md`
-- `tasks/workstreams/workflow-engine/contract-assets/github-issues-158-159.md`
+- `tasks/archive/gate-audit-20261003/workstreams/workflow-engine/contract-assets/cleanup-script-policy.md`
+- `tasks/archive/gate-audit-20261003/workstreams/workflow-engine/contract-assets/20260712-contract-assets.md`
+- `tasks/archive/gate-audit-20261003/workstreams/workflow-engine/contract-assets/agent-fleet-specialists.md`
+- `tasks/archive/gate-audit-20261003/workstreams/workflow-engine/contract-assets/20260714-merge-gate-enforcement.md`
+- `tasks/archive/gate-audit-20261003/workstreams/workflow-engine/contract-assets/github-issues-158-159.md`
 
 ## Optimization Backlog
 
-- Promote `bun scripts/capability-resolver.ts validate --format text` into the strict workflow gate after one more real architecture slice.
+- **template-projection 是可扩展组件。** 先把 `src/cli/commands/init.ts` 拆成独立的 init 组件，再看 `assets/templates/helpers/**` 是否需要单独的投影组件。
+- **`init.ts` 组合根。** 它导入 adoption、hook-adapters、global-runtime-reconciliation、codegraph-readiness、workflow-state 与 execution-primitives，还导入当前无 owner 的 `src/cli/commands/{architecture-configuration,install,herdr-skill}.ts`、`src/core/skill-surface/catalog.ts` 与 `src/effects/skill-tree-integrity.ts`。
+- **投影脚本知道源码布局。** `scripts/sync-helper-sources.ts:48-120` 用字符串改写 registry、checkpoint snapshot、readonly-observation 与 worktree-location 的 import 行。被投影文件移动时，这里要同步修改。
+- **contract-worktree-lifecycle 的外部依赖。** `scripts/contract-worktree-runtime.ts` 动态导入 `src/effects/terminal/task-session.ts` 与 `herdr.ts`；`scripts/merge-gate.ts` 导入 `scripts/acceptance-receipt.ts` 与 `src/effects/publication/merge-readiness.ts`。集成步骤声明了 contract-worktree-lifecycle → task-agent-host 与 → acceptance-review。到 publication 的关系没有声明：`relation.publication.contract-assets` 已经声明反向。本方向有 3 条边，反向有 2 条。是否翻转方向是开放问题。
+- **planning-helpers 的平台依赖。** `src/effects/runtime/helper-runner.ts` 导入 `node-candidates.ts` 与 `protected-helper-platform.ts`。它们现在归 global-runtime-reconciliation。集成步骤没有声明 planning-helpers → global-runtime-reconciliation：global-runtime-reconciliation 的 cli-root 与 primary 已经声明到本 capability 的关系，新增一条会加深双向依赖。
+- **reference configs 由专门的 capability 持有。** `external-tooling.md` 的镜像对与 `install-profiles.md` 归 global-runtime-reconciliation，`chatgpt-coding-mcp.md` 归 mcp-sidecar。本 capability 与 template-projection 用 `source.exclude` 排除这 4 个文件，所以它们只有一个 owner。
+- **组件 footprint 用文件名 glob。** `planning-helpers` 用 `scripts/new-*.sh` 与 `scripts/factor-*.sh`，`template-projection` 用 `assets/initializer-*`。新增同名模式的文件自动进入组件。capability 的 include 不用文件名 glob：它的字面 anchor 会扩大到整个目录，例如 `scripts`。
+- **到 skill-surface-catalog 的回边。** template-projection → skill-surface-catalog 已声明（`init.ts` 读 host skill placements）。`scripts/check-skill-version.ts:15` 反向导入 `scripts/workflow-contract.ts`。按边数（5 对 3）只声明前者。
+
+- Run `bun scripts/capability-resolver.ts validate --format text` when capability data changes. The workflow helper remains a read-only diagnostic.
 - Keep durable knowledge in repo-authored research and lessons. Optional external brain exports require an operator-invoked manifest sync and never participate in workflow correctness.
 
 ## 验证命令
 
-来自 `.ai/context/capabilities.json#verification_hints`：
+来自 capability 节点 `extensions.verification`：
 
 ```bash
 bun test tests/workflow-contract.test.ts tests/scaffold-parity.test.ts
 bun scripts/capability-resolver.ts validate --format text
+bun run check:helpers
 ```

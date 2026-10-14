@@ -60,6 +60,39 @@ const DEFAULT_FILE_ACCESS: ProtectedHelperFileAccess = {
   readFile: (path) => readFileSync(path, 'utf-8'),
 };
 
+/** Optional gh is operator-owned. Only fixed host install paths are candidates. */
+export function resolveTrustedGhExecutable(
+  access: Pick<ProtectedHelperFileAccess, 'exists' | 'lstat' | 'realpath'> = DEFAULT_FILE_ACCESS,
+  options: { platform?: NodeJS.Platform; nativeSystemToolsDirectory?: string } = {},
+): string | undefined {
+  if ((options.platform ?? process.platform) === 'win32') {
+    // Use the existing OS-native source, never caller ProgramFiles/SystemRoot/PATH.
+    // Only the standard installation on the native system volume is supported.
+    const systemDirectory = requireWindowsAbsolute(
+      options.nativeSystemToolsDirectory ?? nativeWindowsSystemToolsDirectory(), 'native system directory',
+    );
+    const volume = win32.parse(systemDirectory).root;
+    if (!/^[a-z]:\\$/i.test(volume)) throw new Error('trusted gh requires a local native Windows system volume');
+    const candidate = win32.join(volume, 'Program Files', 'GitHub CLI', 'gh.exe');
+    if (!access.exists(candidate)) return undefined;
+    const actual = requireRegularFile(candidate, 'gh.exe', access);
+    if (!sameWindowsPath(actual, candidate)) throw new Error('trusted gh must stay at the fixed host install path');
+    return actual;
+  }
+  for (const candidate of [
+    '/opt/homebrew/bin/gh',
+    '/usr/local/bin/gh',
+    '/usr/bin/gh',
+    '/home/linuxbrew/.linuxbrew/bin/gh',
+  ]) {
+    if (!access.exists(candidate)) continue;
+    const actual = access.realpath(candidate);
+    const stat = access.lstat(actual);
+    if (stat.isFile() && (stat.mode & 0o111) !== 0) return actual;
+  }
+  return undefined;
+}
+
 type ResolveOptions = {
   platform?: NodeJS.Platform;
   accountHome?: string;
@@ -99,7 +132,7 @@ function requireWindowsAbsolute(value: unknown, label: string): string {
   return win32.normalize(value);
 }
 
-function requireRegularFile(path: string, label: string, access: ProtectedHelperFileAccess): string {
+function requireRegularFile(path: string, label: string, access: Pick<ProtectedHelperFileAccess, 'exists' | 'lstat' | 'realpath'>): string {
   if (!access.exists(path)) throw new Error(`Windows protected-helper ${label} is missing: ${path}`);
   const source = access.lstat(path);
   if (source.isSymbolicLink() || !source.isFile()) {
@@ -371,12 +404,27 @@ function executableFromPath(name: string, env: NodeJS.ProcessEnv, access: Protec
 export function discoverWindowsProtectedHelperContract(options: DiscoverOptions = {}): WindowsProtectedHelperContract {
   const env = options.env ?? process.env;
   const access = options.fileAccess ?? DEFAULT_FILE_ACCESS;
-  const gitBin = executableFromPath('git', env, access);
+  const discoveredGit = executableFromPath('git', env, access);
+  let gitBin = requireRegularFile(discoveredGit, 'discovered git.exe', access);
   const gitParent = win32.basename(win32.dirname(gitBin)).toLowerCase();
   if (gitParent !== 'cmd' && gitParent !== 'bin') {
     throw new Error(`Windows protected-helper install requires Git for Windows cmd\\git.exe or bin\\git.exe (found ${gitBin})`);
   }
-  const gitRoot = win32.dirname(win32.dirname(gitBin));
+  let gitRoot = win32.dirname(win32.dirname(gitBin));
+  // A public installation can itself be named mingw64 (or another architecture).
+  // Keep its root when either public layout marker exists. Validation below
+  // must reject incomplete or symlinked public layouts, not select a parent.
+  const hasPublicLayout = access.exists(win32.join(gitRoot, 'bin', 'bash.exe'))
+    || access.exists(win32.join(gitRoot, 'usr', 'bin'));
+  // Git Bash puts an internal binary first on PATH. Pin its stable cmd wrapper
+  // without allowing internal binaries in the persisted runtime contract.
+  if (!hasPublicLayout && gitParent === 'bin'
+    && ['mingw32', 'mingw64', 'ucrt64', 'clangarm64'].includes(win32.basename(gitRoot).toLowerCase())) {
+    requireDirectory(gitRoot, 'Git internal directory', access);
+    requireDirectory(win32.dirname(gitBin), 'Git internal bin directory', access);
+    gitRoot = win32.dirname(gitRoot);
+    gitBin = win32.join(gitRoot, 'cmd', 'git.exe');
+  }
   const nativeSystemTools = options.nativeSystemToolsDirectory ?? nativeWindowsSystemToolsDirectory();
   const requestedTemp = options.nativeTempDirectory ?? env.TEMP?.trim();
   if (!requestedTemp) {

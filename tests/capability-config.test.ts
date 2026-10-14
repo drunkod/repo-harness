@@ -9,7 +9,7 @@ const ROOT = join(import.meta.dir, "..");
 function tmpWorkspace(prefix: string): string {
   const cwd = mkdtempSync(join(tmpdir(), `${prefix}-`));
   mkdirSync(join(cwd, "scripts"), { recursive: true });
-  for (const helper of ["capability-config.ts", "capability-resolver.ts", "architecture-event.ts", "context-contract-sync.sh", "workstream-sync.sh"]) {
+  for (const helper of ["capability-config.ts", "capability-resolver.ts", "workstream-sync.sh"]) {
     const source = helper === "capability-resolver.ts"
       ? join(ROOT, "assets/templates/helpers", helper)
       : join(ROOT, "scripts", helper);
@@ -26,7 +26,7 @@ function runCapabilityConfig(cwd: string, args: string[]) {
 }
 
 describe("capability-config helper", () => {
-  test("adds one explicit capability and syncs local agent contracts without full init", () => {
+  test("adds one explicit capability without automatically authoring local agent contracts", () => {
     const cwd = tmpWorkspace("capability-config-add");
     try {
       mkdirSync(join(cwd, "apps/agent"), { recursive: true });
@@ -60,16 +60,9 @@ describe("capability-config helper", () => {
         verification_hints: ["bun test apps/agent"],
       });
 
-      const agents = readFileSync(join(cwd, "apps/agent/AGENTS.md"), "utf-8");
-      const claude = readFileSync(join(cwd, "apps/agent/CLAUDE.md"), "utf-8");
-      expect(agents).toContain("Capability ID: `apps-agent`");
-      expect(agents).toBe(claude);
-
-      const contextMap = JSON.parse(readFileSync(join(cwd, ".ai/context/context-map.json"), "utf-8"));
-      expect(contextMap.discoverable_contexts.map((entry: { path: string }) => entry.path)).toEqual([
-        "apps/agent/CLAUDE.md",
-        "apps/agent/AGENTS.md",
-      ]);
+      expect(existsSync(join(cwd, "apps/agent/AGENTS.md"))).toBe(false);
+      expect(existsSync(join(cwd, "apps/agent/CLAUDE.md"))).toBe(false);
+      expect(existsSync(join(cwd, ".ai/context/context-map.json"))).toBe(false);
 
       const match = spawnSync(
         "bun",
@@ -122,8 +115,8 @@ describe("capability-config helper", () => {
       expect(registry.capabilities).toHaveLength(1);
       expect(registry.capabilities[0].domain).toBe("runtime");
 
-      const agents = readFileSync(join(cwd, "apps/agent/AGENTS.md"), "utf-8");
-      expect(agents).toContain("Architecture domain: `runtime`");
+      expect(existsSync(join(cwd, "apps/agent/AGENTS.md"))).toBe(false);
+      expect(existsSync(join(cwd, "apps/agent/CLAUDE.md"))).toBe(false);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

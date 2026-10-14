@@ -70,55 +70,33 @@ if ! PROFILE_PROJECTION="$(bun "$SOURCE_ROOT/scripts/skill-surface-select.ts" pr
   exit 1
 fi
 SELECTED_FACADES=""
-HOST_PLACEMENTS=""
+PROVIDER_PLACEMENTS=""
+INTEGRATION_NAMES=""
 while IFS=$'\t' read -r projection_kind projection_value; do
   case "$projection_kind" in
     facade) SELECTED_FACADES+="${SELECTED_FACADES:+$'\n'}$projection_value" ;;
-    host) HOST_PLACEMENTS+="${HOST_PLACEMENTS:+$'\n'}$projection_value" ;;
+    provider) PROVIDER_PLACEMENTS+="${PROVIDER_PLACEMENTS:+$'\n'}$projection_value" ;;
+    integration) INTEGRATION_NAMES+="${INTEGRATION_NAMES:+$'\n'}$projection_value" ;;
   esac
 done <<< "$PROFILE_PROJECTION"
 
 # Manifest-derived name -> source path for every facade-kind package,
 # regardless of profile. A facade's source directory is no longer guaranteed
 # to live under one fixed assets/skill-commands/<name> parent (e.g.
-# repo-harness-plan now sources from assets/skills/repo-harness-plan), so
+# repo-harness-product sources from assets/skills/repo-harness-product), so
 # every consumer below resolves the real source through this list instead of
 # assuming a fixed parent directory.
 if ! FACADE_SOURCES="$(bun "$SOURCE_ROOT/scripts/skill-surface-select.ts" facade-sources)"; then
   echo "[sync-installed] skill-surface-select facade-sources failed" >&2
   exit 1
 fi
-common_excludes=(
-  --exclude='.git/'
-  --exclude='_ops/'
-  --exclude='node_modules/'
-  --exclude='.DS_Store'
-  --exclude='.codegraph/'
-  --exclude='evals/benchmark.md'
-  --exclude='.codex/'
-  --exclude='.claude/settings.local.json'
-  --exclude='.claude/.atomic_pending'
-  --exclude='.claude/.session-id'
-  --exclude='.claude/.trace.jsonl'
-  --exclude='.claude/.session-handoff.md'
-  --exclude='.claude/.task-state.json'
-  --exclude='.claude/.task-handoff.md'
-  --exclude='.claude/*.tmp'
-  --exclude='.claude/*.bak'
-  --exclude='.claude/*.bak.*'
-  --exclude='.claude/*.backup-*'
-  --exclude='.ai/harness/checks/latest.json'
-  --exclude='.ai/harness/checks/*.latest.json'
-  --exclude='.ai/harness/checks/*.latest.md'
-  --exclude='.ai/harness/events.jsonl'
-  --exclude='.ai/harness/archive/'
-  --exclude='.ai/harness/failures/latest.jsonl'
-  --exclude='.ai/harness/handoff/current.md'
-  --exclude='.ai/harness/handoff/resume.md'
-  --exclude='.ai/harness/architecture/events.jsonl'
-  --exclude='.ai/harness/worktrees/'
-  --exclude='.ai/harness/runs/'
-)
+# Resolve copy authority beside the writer, not from an injected source tree.
+RUNTIME_ROOT="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
+if ! bun -e 'const { installedCopyTreeOptions } = await import(process.argv[1]); installedCopyTreeOptions("canonical-skill", await Bun.file(process.argv[2]).json());' \
+  "$RUNTIME_ROOT/src/cli/installer/install-profile.ts" "$RUNTIME_ROOT/assets/workflow-contract.v1.json"; then
+  echo "[sync-installed] installed copy projection is invalid." >&2
+  exit 1
+fi
 
 require_rsync_for_copy_mode() {
   if command -v rsync >/dev/null 2>&1; then
@@ -213,7 +191,7 @@ assert_managed_dest() {
       || { refuse_unowned_dest "$dest" "ownership marker has no content hash"; return 1; }
     actual_hash="$(managed_tree_hash "$dest")"
     [[ "$actual_hash" == "$expected_hash" ]] \
-      || { refuse_unowned_dest "$dest" "managed copy content has drifted"; return 1; }
+      || { refuse_unowned_dest "$dest" "managed copy content has drifted"; return 2; }
     return 0
   fi
 
@@ -237,16 +215,31 @@ remove_managed_dest() {
   fi
 }
 
-sync_copy() {
+sync_copy() (
   local dest="$1"
   local source="${2:-$SOURCE_ROOT}"
   local surface="${3:-canonical-skill}"
+  local copy_list
   require_rsync_for_copy_mode
+  copy_list="$(mktemp /tmp/repo-harness-copy-files.XXXXXX)"
+  trap 'rm -f "$copy_list"' EXIT
+  # Resolve and validate the file list before replacing an owned destination.
+  bun "$RUNTIME_ROOT/scripts/skill-surface-select.ts" installed-copy-files "$source" "$surface" \
+    "$RUNTIME_ROOT/assets/workflow-contract.v1.json" > "$copy_list"
   remove_managed_dest "$dest" "$source" "$surface"
   mkdir -p "$dest"
-  rsync -a --delete "${common_excludes[@]}" "$source/" "$dest/"
+  rsync -a --from0 --files-from="$copy_list" "$source/" "$dest/"
   write_owner_marker "$dest" "$surface"
-}
+)
+
+# Internal upgrade staging uses the same projection and marker writer. It
+# accepts only a new destination. The upgrade transaction owns replacement.
+if [[ "${1:-}" == "--stage-owned-copy" ]]; then
+  [[ "$#" -eq 4 && -d "$2" && ! -e "$3" && ! -L "$3" ]] || exit 2
+  case "$4" in canonical-skill|command-facade) ;; *) exit 2 ;; esac
+  sync_copy "$3" "$2" "$4"
+  exit 0
+fi
 
 sync_claude_alias_links() {
   if [[ -z "$CLAUDE_SKILLS_ROOT" ]]; then
@@ -283,16 +276,12 @@ facade_source_for() {
   printf ''
 }
 
-profile_facades() {
-  [[ -n "$SELECTED_FACADES" ]] && printf '%s\n' "$SELECTED_FACADES"
-}
-
 facade_selected() {
   local wanted="$1"
-  profile_facades | grep -Fxq "$wanted"
+  grep -Fxq "$wanted" <<< "$SELECTED_FACADES"
 }
 
-provider_skill_selected_for_root() {
+provider_skill_for_root() {
   local root="$1"
   local wanted="$2"
   local host=""
@@ -301,7 +290,13 @@ provider_skill_selected_for_root() {
   elif [[ -n "$CLAUDE_SKILLS_ROOT" && "$root" == "$CLAUDE_SKILLS_ROOT" ]]; then
     host="claude"
   fi
-  [[ -n "$host" ]] && grep -Fxq "$host $wanted" <<< "$HOST_PLACEMENTS"
+  [[ -n "$host" ]] && grep -Fxq "$host $wanted" <<< "$PROVIDER_PLACEMENTS"
+}
+
+# An integration (for example repo-harness-chatgpt) is linked by its own
+# explicit setup command. Facade preflight and retirement never own it.
+integration_skill() {
+  [[ -n "$INTEGRATION_NAMES" ]] && grep -Fxq "$1" <<< "$INTEGRATION_NAMES"
 }
 
 preflight_skill_root() {
@@ -317,8 +312,9 @@ preflight_skill_root() {
     # Provider Skills (for example repo-harness-cross-review) are installed by
     # their own profile component after this facade sync. They are not command
     # facades, so this loop must neither require a command-facade owner marker
-    # nor retire them while their host placement is selected.
-    provider_skill_selected_for_root "$root" "$name" && continue
+    # nor retire them. Profile cleanup owns provider retirement.
+    provider_skill_for_root "$root" "$name" && continue
+    integration_skill "$name" && continue
     source_rel="$(facade_source_for "$name")"
     source=""
     [[ -n "$source_rel" ]] && source="$SOURCE_ROOT/$source_rel"
@@ -329,7 +325,17 @@ preflight_skill_root() {
     # proves that from the marker + content hash alone and does not require
     # $source to exist for that branch; unmarked or drifted content still
     # fails closed here exactly as before.
-    assert_managed_dest "$dest" "$source" command-facade || exit 1
+    if assert_managed_dest "$dest" "$source" command-facade; then
+      continue
+    else
+      local ownership_status=$?
+      # Active surfaces still fail closed. Only a verified retired marker
+      # with changed content may proceed to the report-only retirement pass.
+      if [[ "$ownership_status" -eq 2 ]] && ! facade_selected "$name"; then
+        continue
+      fi
+      exit 1
+    fi
   done
 }
 
@@ -340,7 +346,8 @@ remove_retired_owned_facades() {
   for dest in "$root"/repo-harness-*; do
     [[ -e "$dest" || -L "$dest" ]] || continue
     name="$(basename "$dest")"
-    provider_skill_selected_for_root "$root" "$name" && continue
+    provider_skill_for_root "$root" "$name" && continue
+    integration_skill "$name" && continue
     facade_selected "$name" && continue
     source_rel="$(facade_source_for "$name")"
     source=""
@@ -348,12 +355,15 @@ remove_retired_owned_facades() {
     if [[ -z "$source" || ! -d "$source" ]]; then
       echo "[sync-installed] retiring $dest: canonical facade source no longer exists in the package"
     fi
-    # remove_managed_dest asserts ownership first (fail-closed on an unowned
-    # or modified copy) and only removes a proven, unmodified managed copy;
-    # this now covers "not selected by this profile", "retired from the
-    # package", and "fully retired name absent from the catalog" the same
-    # safe way.
-    remove_managed_dest "$dest" "$source" command-facade
+    # Retired copies must not block refresh of the selected runtime. Keep
+    # unknown or modified content and report it for explicit upgrade cleanup.
+    if assert_managed_dest "$dest" "$source" command-facade; then
+      remove_managed_dest "$dest" "$source" command-facade
+    else
+      local ownership_status=$?
+      [[ "$ownership_status" -eq 2 ]] || exit 1
+      echo "[sync-installed] preserving retired facade $dest. Run: repo-harness upgrade" >&2
+    fi
   done
 }
 
@@ -380,19 +390,18 @@ sync_command_facades() {
     facade_src="$SOURCE_ROOT/$source"
     [[ -d "$facade_src" && -f "$facade_src/SKILL.md" ]] || continue
     dest="$root/$name"
-    remove_managed_dest "$dest" "$facade_src" command-facade
     if [[ "$mode" == "link" ]]; then
+      remove_managed_dest "$dest" "$facade_src" command-facade
       create_symlink_or_explain "$facade_src" "$dest"
     else
-      require_rsync_for_copy_mode
-      mkdir -p "$dest"
-      rsync -a --delete "${common_excludes[@]}" "$facade_src/" "$dest/"
-      write_owner_marker "$dest" command-facade
+      sync_copy "$dest" "$facade_src" command-facade
     fi
     synced=$((synced + 1))
   done <<< "$FACADE_SOURCES"
   echo "[sync-installed] command facades ($mode): $synced into $root"
 }
+
+bun "$SOURCE_ROOT/scripts/skill-surface-select.ts" remove-dangling-links "$CODEX_SKILLS_ROOT" "$CLAUDE_SKILLS_ROOT"
 
 preflight_skill_root "$CODEX_SKILLS_ROOT"
 preflight_skill_root "$CLAUDE_SKILLS_ROOT"

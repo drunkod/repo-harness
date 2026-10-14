@@ -203,7 +203,7 @@ export class OperatorCollaborationPayloadError extends Error {
 }
 
 export type OperatorSnapshotViewState =
-  | { readonly kind: 'loading'; readonly previous: OperatorFleetSnapshotV1 | null }
+  | { readonly kind: 'loading'; readonly previous: OperatorFleetSnapshotV1 | null; readonly staleError?: OperatorApiErrorV1 }
   | { readonly kind: 'stable'; readonly snapshot: OperatorFleetSnapshotV1 }
   | { readonly kind: 'empty'; readonly snapshot: OperatorFleetSnapshotV1 }
   | { readonly kind: 'repo-degraded'; readonly snapshot: OperatorFleetSnapshotV1 }
@@ -304,7 +304,6 @@ const MERGE_BLOCKERS = [
   'base_moved_since_verification',
   'review_subject_mismatch',
   'verification_evidence_stale',
-  'rollback_tags_pending',
   'checks_failed',
   'checks_pending',
   'acceptance_missing',

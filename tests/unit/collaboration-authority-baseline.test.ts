@@ -163,12 +163,29 @@ const AUTHORITY_INVENTORY: readonly AuthorityEntry[] = [
     plane: 'publication',
     authority: 'publication-receipt',
     protocol: publicationReceipt.PUBLICATION_RECEIPT_PROTOCOL,
-    kinds: [
-      publicationReceipt.PUBLICATION_RECEIPT_KIND,
-      publicationReceipt.PUBLICATION_CREATE_INTENT_KIND,
-      publicationReceipt.PUBLICATION_PREPARE_KIND,
-    ],
+    kinds: [publicationReceipt.PUBLICATION_RECEIPT_KIND],
     storeRoot: PUBLICATION_RECEIPTS_RELATIVE_PATH,
+  },
+  {
+    plane: 'publication',
+    authority: 'publication-identity',
+    protocol: publicationReceipt.PUBLICATION_IDENTITY_PROTOCOL,
+    kinds: [],
+    storeRoot: null,
+  },
+  {
+    plane: 'publication',
+    authority: 'publication-create-intent',
+    protocol: publicationReceipt.PUBLICATION_CREATE_INTENT_PROTOCOL,
+    kinds: [publicationReceipt.PUBLICATION_CREATE_INTENT_KIND],
+    storeRoot: null,
+  },
+  {
+    plane: 'publication',
+    authority: 'publication-prepare',
+    protocol: publicationReceipt.PUBLICATION_PREPARE_PROTOCOL,
+    kinds: [publicationReceipt.PUBLICATION_PREPARE_KIND],
+    storeRoot: null,
   },
   {
     plane: 'publication',
@@ -245,7 +262,7 @@ interface AuthoritySource {
  * `*_PROTOCOL` and is *not* listed here are frozen in
  * `docs/researches/20260829-c0-collaboration-two-plane-authority-freeze.md`,
  * section 「納入判據與排除清單」. Adding or removing a module here without
- * moving that section is a silent re-baseline.
+ * moving that section is a silent re-baseline. Retired modules leave this inventory.
  *
  * The closed scan C0 deferred lives below in `C1 closed inclusion scan`: it
  * sweeps `src/core/**` for `*_PROTOCOL` exports and asserts the result equals
@@ -296,7 +313,7 @@ const AUTHORITY_SOURCE_MODULES: readonly AuthoritySource[] = [
   {
     module: 'src/core/publication/publication-receipt.ts',
     exports: publicationReceipt,
-    authorities: ['publication-receipt'],
+    authorities: ['publication-receipt', 'publication-identity', 'publication-create-intent', 'publication-prepare'],
   },
   {
     module: 'src/core/publication/publication-lifecycle.ts',
@@ -339,51 +356,12 @@ interface ExcludedModule {
  * `*_PROTOCOL` and is not an authority source appears here with the clause it
  * fails, so "not inventoried" is always an adjudication rather than an omission.
  *
- * The first ten rows are the hand adjudication C0 froze in
+ * The original rows are the hand adjudication C0 froze in
  * `docs/researches/20260829-c0-collaboration-two-plane-authority-freeze.md`,
  * section 「納入判據與排除清單」. Moving a row here without moving that section
- * is a silent re-baseline.
+ * is a silent re-baseline. Retired modules leave this inventory.
  */
 const DELIBERATELY_EXCLUDED: readonly ExcludedModule[] = [
-  {
-    module: 'src/core/automation/connector-challenge.ts',
-    fails: ['C-1'],
-    evidence: 'exact-content readback evidence for campaign intake; owns no Task/Claim, Lease, Publication, Acceptance, or Delegation wire identity',
-  },
-  {
-    module: 'src/core/automation/issue-batch-adoption.ts',
-    fails: ['C-1'],
-    evidence: 'campaign intake projection, like WorkDemand; downstream scheduling consumes canonical Sprint and WorkGraph authorities, never the adoption receipt as Task/Claim or delivery publication authority',
-  },
-  {
-    module: 'src/core/automation/controller.ts',
-    fails: ['C-1', 'C-2'],
-    evidence: 'automation orchestration evidence plane (issue #279): journals bounded observations and calls existing acquire/dispatch authorities, but grants no claim, moves no lease generation, and publishes or accepts nothing',
-  },
-  {
-    /**
-     * The automation cost plane (issue #282). It fails C-1 because a budget is
-     * none of the five planes C0 froze: it owns spend, not Task/Claim, Lease,
-     * Publication, Acceptance, or Delegation identity. It fails C-2 because its
-     * bytes decide only whether the next operation may be paid for -- they
-     * grant no claim, move no lease generation, and publish or accept nothing,
-     * and exhaustion explicitly leaves every in-flight authority to its own
-     * owner's normal recovery.
-     */
-    module: 'src/core/automation/budget.ts',
-    fails: ['C-1', 'C-2'],
-    evidence: 'automation cost plane (issue #282): reserves and charges spend against one host-owned ProgramAuthorization grant, writes only its own ledger under the Git common directory, and never creates, releases, or steals a Task, Claim, Lease, Publication, or Acceptance fact',
-  },
-  {
-    module: 'src/core/automation/campaign-planning.ts',
-    fails: ['C-1'],
-    evidence: 'local planning evidence plane: binds the authorized host handoff and declared repair scope; existing TaskOffer, external-source binding, Claim and Lease own all execution readiness and acquisition authority',
-  },
-  {
-    module: 'src/core/automation/campaign-authoring-budget.ts',
-    fails: ['C-1'],
-    evidence: 'automation cost evidence plane: seals campaign authoring reservations and usage in the existing budget ledger for BRC6 consumption; it owns no Task/Claim, Lease, Publication, Acceptance, or Delegation wire identity',
-  },
   {
     module: 'src/core/state/lease-liveness.ts',
     fails: ['C-1', 'C-2'],
@@ -440,6 +418,11 @@ const DELIBERATELY_EXCLUDED: readonly ExcludedModule[] = [
     evidence: 'messaging reply provenance plane: pure intent/commit validators relate existing message, ACK, mapping and actor snapshots; Task Inbox and restricted Engineer MCP consume them only for message disposition, and structural completeness grants no Task/Claim, Lease, Publication, Acceptance or Delegation authority',
   },
   {
+    module: 'src/core/messages/document-handoff.ts',
+    fails: ['C-1', 'C-2'],
+    evidence: 'untrusted document content protocol: pure validation, canonical rendering, and caller-supplied reference comparison; no production consumer, store, authenticated sender, or admission decision, and no Task/Claim, Lease, Publication, Acceptance or Delegation authority',
+  },
+  {
     module: 'src/core/publication/feedback.ts',
     fails: ['C-1'],
     evidence: 'review/repair loop despite the publication/ directory (D12); merge-readiness imports only publication-receipt and no publication or merge decision reads a feedback event',
@@ -458,21 +441,6 @@ const DELIBERATELY_EXCLUDED: readonly ExcludedModule[] = [
     module: 'src/core/review/change-assessment.ts',
     fails: ['C-1'],
     evidence: 'review plane (D12); one consumer, src/effects/review/change-assessment.ts',
-  },
-  {
-    module: 'src/core/refactor/program.ts',
-    fails: ['C-1'],
-    evidence: 'refactor orchestration plane: maps provider recommendation identity to a Work Package before materialization, but no TaskOffer, Claim, Lease, Publication, Acceptance, or Delegation decision reads RefactorProgram bytes as its authority',
-  },
-  {
-    module: 'src/core/refactor/board.ts',
-    fails: ['C-1', 'C-2'],
-    evidence: 'refactor read-model plane: projects Program, provider lifecycle, execution, and resolution authorities for display, but no TaskOffer, Claim, Lease, Publication, Acceptance, or Delegation decision reads Refactor Board bytes',
-  },
-  {
-    module: 'src/core/refactor/activation.ts',
-    fails: ['C-1', 'C-2'],
-    evidence: 'refactor rollout-control plane: gates Refactor Mode activation from canary evidence but grants no Task/Claim, moves no Lease generation, and publishes or accepts no delivery-plane fact',
   },
   {
     module: 'src/core/state/project-board-slice.ts',
@@ -498,6 +466,11 @@ const DELIBERATELY_EXCLUDED: readonly ExcludedModule[] = [
     evidence: 'operator transport view of the collaboration plane (D1): a redacting projection with no store, no agent reader, and no field it decides rather than copies',
   },
   {
+    module: 'src/core/operator/runtime-capture.ts',
+    fails: ['C-1'],
+    evidence: 'native runtime observation plane: capture writes a derived session or terminal status cache, and the native reader projects it into the read-only runtime HTTP route. The protocol owns no Task/Claim, Lease, Publication, Acceptance or Delegation wire identity',
+  },
+  {
     /**
      * The schema 1 -> 2 backlog migration receipt. It fails C-1 because a
      * migration receipt is not a wire identity on Task/Claim, Lease,
@@ -517,12 +490,15 @@ const DELIBERATELY_EXCLUDED: readonly ExcludedModule[] = [
  * Frozen at `main@a490a5ef76b439228a4b3282934c29ba15090cdf`, then deliberately
  * advanced by the approved R1 provider-neutral Agent Runtime work package when
  * FleetBoardSnapshot moved to protocol 3, then by the approved Operator delivery
- * evidence package for protocol 4. A change here is an authority change:
+ * evidence package for protocol 4 and AKN-04a for protocol 5. PR #523 split
+ * publication receipt 2 from identity/create-intent/prepare 1. Audit F05-01
+ * moves the receipt to 3 when it drops the merge-seal binding.
+ * A change here is an authority change:
  * it must be justified by the work package that caused it, not silently
  * re-baselined.
  */
 const FROZEN_INVENTORY_SHA256 =
-  'sha256:1b8694114cc2a95e7730522623f6f6e1ffb84b237e6de5ad7857637bd5974162';
+  'sha256:d4a165e3c89e6327c06d57f0f6197ecd13d9af0b63dcb9835808e0961af47c5b';
 
 function inventoryDigest(): string {
   return `sha256:${createHash('sha256').update(JSON.stringify(AUTHORITY_INVENTORY), 'utf8').digest('hex')}`;
@@ -694,6 +670,13 @@ describe('C1 closed inclusion scan', () => {
     expect(AUTHORITY_INVENTORY.some((entry) => entry.authority.includes('collaboration'))).toBe(false);
   });
 
+  test('the document handoff content protocol is adjudicated outside delivery authority', () => {
+    const module = 'src/core/messages/document-handoff.ts';
+    expect(DELIBERATELY_EXCLUDED.find((entry) => entry.module === module)?.fails).toEqual(['C-1', 'C-2']);
+    expect(AUTHORITY_SOURCE_MODULES.some((entry) => entry.module === module)).toBe(false);
+    expect(freezeRecordSource()).toContain(`| \`${module}\` | C-1, C-2 |`);
+  });
+
   /**
    * D1 in one direction, with one exact exception.
    *
@@ -760,7 +743,10 @@ describe('C0 delivery-plane authority baseline', () => {
       'fleet-offers': 1,
       'fleet-board': 5,
       'task-freeze-receipt': 1,
-      'publication-receipt': 1,
+      'publication-receipt': 3,
+      'publication-identity': 1,
+      'publication-create-intent': 1,
+      'publication-prepare': 1,
       'publication-lineage': 1,
       'publication-integration-observation': 1,
       'merge-readiness': 1,

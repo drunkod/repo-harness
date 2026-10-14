@@ -60,6 +60,13 @@ function loadCatalog(): SkillSurfaceCatalog {
 
 async function main(argv: readonly string[]): Promise<void> {
   const [subcommand, ...rest] = argv;
+  if (subcommand === "remove-dangling-links") {
+    const { removeOwnedDanglingSkillLinks } = await import("../src/effects/skill-tree-integrity");
+    for (const link of removeOwnedDanglingSkillLinks(join(SCRIPT_DIR, ".."), rest)) {
+      console.log(`[sync-installed] removed dangling skill symlink: ${link}`);
+    }
+    return;
+  }
   if (subcommand === "managed-tree-hash") {
     // Single authority for installed-copy ownership hashes: the shell sync
     // script's owner markers and the TS installer must hash identically.
@@ -69,9 +76,31 @@ async function main(argv: readonly string[]): Promise<void> {
     console.log(hashManagedTree(root));
     return;
   }
+  if (subcommand === "installed-copy-files") {
+    const [root, surface, contractPath] = rest;
+    if (!root || !contractPath || rest.length !== 3 || (surface !== 'canonical-skill' && surface !== 'command-facade')) {
+      fail("installed-copy-files requires <root> <canonical-skill|command-facade> <contract>");
+    }
+    const { installedCopyTreeOptions, managedTreeEntries } = await import("../src/cli/installer/install-profile");
+    const contract = JSON.parse(readFileSync(contractPath, 'utf8'));
+    for (const entry of managedTreeEntries(root, installedCopyTreeOptions(surface, contract))) {
+      process.stdout.write(`${entry.path}\0`);
+    }
+    return;
+  }
   const profileFlag = parseProfileFlag(rest);
   const catalog = loadCatalog();
 
+  if (subcommand === "audience-sources") {
+    const [audience] = rest;
+    if (rest.length !== 1 || (audience !== "bot" && audience !== "worker")) {
+      fail("audience-sources requires exactly one <bot|worker> argument");
+    }
+    for (const pkg of catalog.packages) {
+      if (pkg.audience === audience && pkg.source !== null) console.log(`${pkg.name}\t${pkg.source}`);
+    }
+    return;
+  }
   if (subcommand === "facades") {
     if (!isProfile(profileFlag)) fail(`facades requires --profile <${SKILL_SURFACE_PROFILES.join("|")}>`);
     for (const name of facadesForProfile(catalog, profileFlag)) console.log(name);
@@ -82,9 +111,11 @@ async function main(argv: readonly string[]): Promise<void> {
       fail(`profile-projection requires --profile <${SKILL_SURFACE_PROFILES.join("|")}>`);
     }
     for (const name of facadesForProfile(catalog, profileFlag)) console.log(`facade\t${name}`);
-    const placements = hostSkillPlacements(catalog, profileFlag);
-    for (const name of placements.claude) console.log(`host\tclaude ${name}`);
-    for (const name of placements.codex) console.log(`host\tcodex ${name}`);
+    const providers = hostSkillPlacements(catalog);
+    for (const name of providers.claude) console.log(`provider\tclaude ${name}`);
+    for (const name of providers.codex) console.log(`provider\tcodex ${name}`);
+    // Integrations have their own explicit setup command and lifecycle.
+    for (const pkg of catalog.packages) if (pkg.kind === "integration") console.log(`integration\t${pkg.name}`);
     return;
   }
   if (subcommand === "facade-sources") {
@@ -93,7 +124,7 @@ async function main(argv: readonly string[]): Promise<void> {
     // manifest-derived authority the shell sync script uses both to resolve
     // each selected facade's real source directory (which no longer lives
     // under one fixed assets/skill-commands/<name> parent -- e.g.
-    // repo-harness-plan now sources from assets/skills/repo-harness-plan) and
+    // repo-harness-product sources from assets/skills/repo-harness-product) and
     // to preflight/retire whatever repo-harness-* names it finds already
     // installed on a host, selected or not.
     for (const pkg of catalog.packages) {
@@ -118,7 +149,7 @@ async function main(argv: readonly string[]): Promise<void> {
     for (const name of placements.codex) console.log(`codex ${name}`);
     return;
   }
-  fail(`unknown or missing subcommand "${subcommand ?? ""}"; expected facades|profile-projection|facade-sources|external-skills|host-placements|managed-tree-hash`);
+  fail(`unknown or missing subcommand "${subcommand ?? ""}"; expected audience-sources|facades|profile-projection|facade-sources|external-skills|host-placements|managed-tree-hash|remove-dangling-links`);
 }
 
 await main(process.argv.slice(2));

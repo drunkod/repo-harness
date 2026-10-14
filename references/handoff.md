@@ -1,6 +1,7 @@
 # Root Reference: Handoff
 
-Source facade: `assets/skill-commands/repo-harness-handoff`.
+Runtime helpers: `scripts/prepare-codex-handoff.sh` and
+`scripts/codex-handoff-resume.sh`.
 
 Use when the user wants to save, refresh, or resume the repo-local handoff
 surface without running a full check or repair pass.
@@ -23,6 +24,6 @@ surface without running a full check or repair pass.
 ## Boundaries
 
 - Does not run `/check`.
-- Does not run `repo-harness run check-task-workflow --strict` unless the user asks for readiness verification.
+- Does not run `repo-harness run check-task-workflow` unless the user asks for readiness verification.
 - Does not mutate plans, tasks, source code, or architecture docs except the handoff packet files.
 - Does not replace task sync, review, or release-readiness checks.
