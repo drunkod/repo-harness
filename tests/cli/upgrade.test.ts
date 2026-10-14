@@ -215,10 +215,11 @@ describe('upgrade with real release bytes', () => {
   }));
 
   test('global cleanup removes four early installer shim hooks and keeps user mentions', () => sandbox((opts) => {
-    const release = spawnSync('git', ['show', 'v0.1.2:scripts/repo-harness.sh'], { cwd: ROOT, encoding: 'utf8' });
-    expect(release.status, release.stderr).toBe(0);
+    // CI checks out only the fork's tags; the historic upstream v0.1.2 tag is not published to the fork.
+    // Keep the exact historical release installer as a deterministic, reviewable fixture.
+    const releaseBytes = readFileSync(join(ROOT, 'tests/fixtures/legacy/repo-harness-v0.1.2-installer.sh'), 'utf8');
     const installer = join(opts.home, 'release-source/scripts/repo-harness.sh');
-    put(installer, release.stdout);
+    put(installer, releaseBytes);
     const generated = spawnSync('bash', ['-c', 'source "$1" help >/dev/null; build_hooks_json', 'early-release-installer', installer], {
       env: { ...process.env, HOME: opts.home }, encoding: 'utf8',
     });

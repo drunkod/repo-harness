@@ -22,3 +22,11 @@
 ## Nix host rollout
 
 After publishing the validated fork revision, update `~/nix-config/modules/programs/repo-harness/runtime-source.json` to that immutable fork SHA. Repo Harness is not a flake input. Build/evaluate before activation, run `repo-harness-bootstrap`, sync Nix-owned Codex and Waza projections, verify check modes, rebuild, and run the protected runtime smoke. Never run the upstream host installer over Nix-owned configuration.
+
+## PR CI follow-up repairs
+
+- Preserve the fork's GitHub-app-backed Browser Create router and publish its guide and opt-in live test command alongside upstream 0.22.1.
+- Keep `.ai/harness/checks/.gitkeep` committed by excluding dynamic check outputs rather than the entire directory.
+- Match the read-only `check-task-workflow` diagnostics contract retired from strict mode in 0.22.
+- Snapshot the exact historical v0.1.2 upstream installer into a fixture, because fork-only GitHub checkout does not fetch that unrelated upstream tag.
+- Isolated focused tests for adoption persistence, ChatGPT Create/router, and upgrade history passed after the repairs.

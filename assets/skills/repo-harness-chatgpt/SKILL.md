@@ -1,7 +1,7 @@
 ---
 name: repo-harness-chatgpt
-description: Canonical rule owner for repo-harness ChatGPT integration -- Oracle-first browser/GPT Pro consult and continuation, advisory orchestration, MCP Connector setup, MCP bridge planning handoff, and Connector invocation read-back evidence.
-when_to_use: "repo-harness-chatgpt, ChatGPT Web consult, GPT Pro consult, GPT Pro orchestrate, gptpro, browser GPT, ChatGPT MCP Connector, ChatGPT bridge, MCP read-back, GPT Pro delegate, delegate to ChatGPT, 外包给 GPT"
+description: Canonical ChatGPT integration router for Oracle consult, GitHub-app-backed Browser Create, advisory GPT Pro, MCP Connector and read-back.
+when_to_use: "repo-harness-chatgpt, ChatGPT Web, browser-create, GitHub app Create, GPT Pro consult, GPT Pro orchestrate, gptpro, ChatGPT MCP Connector, ChatGPT bridge, MCP read-back, GPT Pro delegate, 外包给 GPT"
 ---
 
 # repo-harness-chatgpt
@@ -16,6 +16,7 @@ ChatGPT is never implied by either install profile.
 - Explicit GPT Pro orchestration -> read the setup lane in
   `references/setup.md`, then `references/orchestrate.md`.
 - Start a new local -> ChatGPT Web browser consult -> `references/consult.md`.
+- GitHub-app-backed Browser Create via `repo-harness chatgpt browser-create` -> `references/create.md`.
 - Continue, read, or clean up a saved browser session -> `references/continue.md`.
 - Verify or accept a ChatGPT MCP tool call as real evidence -> `references/read-back.md`.
 - Operate the MCP Connector bridge (planner/executor/orchestrator/coding) -> `references/bridge.md`.
@@ -26,7 +27,7 @@ ChatGPT is never implied by either install profile.
 - Product planning never implies this package; ChatGPT discovery requires explicit setup.
 - Never request or handle ChatGPT passwords, 2FA codes, cookies, browser storage, or session tokens; login/captcha/SSO stop and hand back to the user.
 - Setup, consult, and bridge modes share these safety rules by reference; none shares secrets, auth state, or tokens with another mode.
-- Consult stays planning/review/critique only, never the code-edit executor; delegate is the sole approved path for code deliverables, and GPT Pro still never executes edits.
+- Consult stays planning/review only. Create is the sole ChatGPT Web mode allowed to perform GitHub writes via `browser-create` on a dedicated branch under an explicit contract. Delegate is no-write patch text.
 - Orchestrate is explicit opt-in advisory planning/review; GPT Pro never owns
   task, lease, writes, shell, or acceptance authority.
 - A missing or unreadable canonical reference fails the calling command closed; it never synthesizes replacement prose.
