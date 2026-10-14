@@ -8,6 +8,8 @@ export interface OracleSessionEvidence {
     source: 'oracle-session-metadata';
     sessionId: string;
     parentSessionId: string | null;
+    conversationUrl?: string;
+    promptSubmitted?: boolean;
     modelSelection?: unknown;
     appSelection?: unknown;
     thinkingSelection?: unknown;
@@ -21,7 +23,7 @@ export interface OracleSessionEvidence {
 
 function readJson(path: string): Record<string, unknown> {
   const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) throw new Error('invalid evidence file');
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024 || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) throw new Error('invalid evidence file');
   const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid evidence object');
   return value as Record<string, unknown>;
@@ -53,6 +55,22 @@ export function readOracleSessionEvidence(path: string, oracleHome: string, pare
   } catch (error) {
     return { evidenceError: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/** Validate the invocation-owned upstream slug against Oracle's private metadata. */
+export function readOracleProviderSessionMetadata(slug: string, oracleHome: string, parentSessionId?: string, allowRunning = false): OracleSessionEvidence {
+  try {
+    if (!/^[a-z0-9-]{3,80}$/.test(slug)) throw new Error('invalid provider session slug');
+    const metadata = readJson(join(oracleHome, 'sessions', slug, 'meta.json'));
+    if (metadata.id !== slug || (metadata.status !== 'completed' && !(allowRunning && metadata.status === 'running'))) throw new Error('invalid provider session metadata');
+    const browser = metadata.browser && typeof metadata.browser === 'object' ? metadata.browser as Record<string, unknown> : {};
+    const options = metadata.options && typeof metadata.options === 'object' ? metadata.options as Record<string, unknown> : {};
+    const parent = options.followupSessionId ?? null;
+    if (parent !== (parentSessionId ?? null)) throw new Error('provider session lineage mismatch');
+    const runtime = browser.runtime && typeof browser.runtime === 'object' ? browser.runtime as Record<string, unknown> : undefined;
+    if (!runtime || typeof runtime.conversationId !== 'string' || runtime.promptSubmitted !== true) throw new Error('invalid browser runtime metadata');
+    return { promptSubmitted: true, providerSessionId: slug, observation: { source: 'oracle-session-metadata', sessionId: slug, parentSessionId: parent as string | null, conversationUrl: typeof runtime.tabUrl === 'string' ? runtime.tabUrl : undefined, promptSubmitted: true, modelSelection: runtime.modelSelection, appSelection: runtime.appSelection, thinkingSelection: runtime.thinkingSelection } };
+  } catch (error) { return { evidenceError: error instanceof Error ? error.message : String(error) }; }
 }
 
 export interface OracleNetworkCapture {
@@ -109,6 +127,29 @@ export interface OracleConversationCapture {
   readonly conversationId: string | null;
   readonly sha256: string | null;
   readonly history: unknown;
+}
+
+export function readOracleProviderNativeCapture(slug: string, oracleHome: string): OracleConversationCapture {
+  const invalid = (status: 'missing' | 'invalid'): OracleConversationCapture => ({ status, sessionId: null, conversationId: null, sha256: null, history: null });
+  try {
+    const meta = readJson(join(oracleHome, 'sessions', slug, 'meta.json'));
+    const runtime = (meta.browser as Record<string, unknown>)?.runtime as Record<string, unknown> | undefined;
+    const conversationId = typeof runtime?.conversationId === 'string' ? runtime.conversationId : undefined;
+    if (meta.id !== slug || meta.status !== 'completed' || runtime?.promptSubmitted !== true || !conversationId) return invalid('invalid');
+    const root = join(oracleHome, 'sessions', slug, 'artifacts');
+    const rawPath = join(root, `conversation-${conversationId}-raw.json`);
+    const evidencePath = join(root, `conversation-${conversationId}-evidence.json`);
+    const raw = readPrivateEvidenceBytes(rawPath, 12 * 1024 * 1024, true);
+    const evidence = readPrivateEvidenceBytes(evidencePath, 12 * 1024 * 1024, true);
+    const value = JSON.parse(evidence.toString('utf8')) as Record<string, unknown>;
+    if (value.schema !== 'oracle.provider-native-capture-evidence/v1' || value.conversationId !== conversationId) return invalid('invalid');
+    const rawHash = createHash('sha256').update(raw).digest('hex');
+    const document = value.materializedDocument;
+    if (value.rawSha256 !== rawHash || value.rawBytes !== raw.length || !document || typeof document !== 'object') return invalid('invalid');
+    const materialized = document as Record<string, unknown>;
+    if (materialized.path !== `conversation-${conversationId}-raw.json` || materialized.sha256 !== rawHash || materialized.bytes !== raw.length) return invalid('invalid');
+    return { status: 'captured', sessionId: slug, conversationId, sha256: createHash('sha256').update(evidence).digest('hex'), history: { raw: raw.toString('utf8'), evidence: value } };
+  } catch (error) { return invalid((error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'invalid'); }
 }
 
 /** Only the invocation-owned path and completed session metadata can supply history. */

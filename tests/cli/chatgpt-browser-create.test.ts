@@ -56,7 +56,8 @@ function writeFakeOracle(dir: string, opts: { appPreselect: boolean; output?: st
     '--browser-model-strategy',
     '--copy-profile',
     '--browser-chrome-profile',
-    '--browser-thinking-time',
+    '--slug',
+    '--browser-capture-provider-native',
     '--chatgpt-url',
     '--heartbeat',
     ...(opts.appPreselect ? ['--browser-app'] : []),
@@ -66,15 +67,16 @@ function writeFakeOracle(dir: string, opts: { appPreselect: boolean; output?: st
     `const HELP = ${JSON.stringify(flags)};`,
     `const OUTPUT = ${JSON.stringify(opts.output ?? '')};`,
     `const ARGS_PATH = ${JSON.stringify(opts.argsPath ?? '')};`,
-    "if (process.argv.includes('--version')) { console.log('0.20.0'); process.exit(0); }",
+    "if (process.argv.includes('--version')) { console.log('0.21.3'); process.exit(0); }",
     "if (process.argv.includes('--help') || process.argv.includes('--debug-help')) { console.log(HELP); process.exit(0); }",
     "if (process.argv.includes('--dry-run')) process.exit(0);",
     "const arg = (flag) => { const i = process.argv.indexOf(flag); return i < 0 ? undefined : process.argv[i + 1]; };",
-    "const id = 'create-' + crypto.randomUUID();",
+    "const id = arg('--slug');",
     "const parentSessionId = arg('--followup') ?? null;",
-    "const metadata = { id, browser: { modelSelection: { strategy: arg('--browser-model-strategy'), verified: false } } };",
-    "await Bun.write(process.env.ORACLE_HOME_DIR + '/sessions/' + id + '/meta.json', JSON.stringify(metadata));",
-    "await Bun.write(arg('--write-session'), JSON.stringify({ protocol: 1, kind: 'oracle-session', sessionId: id, parentSessionId }));",
+    "const metadata = { id, status: 'completed', options: { followupSessionId: parentSessionId }, browser: { runtime: { promptSubmitted: true, conversationId: 'fake-conversation-' + id } } };",
+    "const fs = await import('node:fs');",
+    "const dir = process.env.ORACLE_HOME_DIR + '/sessions/' + id; fs.mkdirSync(dir, { recursive: true });",
+    "const metaPath = dir + '/meta.json'; await Bun.write(metaPath, JSON.stringify(metadata)); fs.chmodSync(metaPath, 0o600);",
     "if (ARGS_PATH) await Bun.write(ARGS_PATH, process.argv.slice(2).join('\\n') + '\\n');",
     "const index = process.argv.indexOf('--write-output');",
     'if (index >= 0) await Bun.write(process.argv[index + 1], OUTPUT);',
@@ -181,19 +183,19 @@ describe('chatgpt browser-create', () => {
         repoRoot, prompt: 'Create the bounded change.', chatgptApp: 'GitHub',
         repository: REPOSITORY, defaultBranch: DEFAULT_BRANCH, baseCommit: BASE_COMMIT,
         targetBranch: 'agent/create-x', planPath: 'plans/plan-x.md', contractPath: 'tasks/contracts/x.contract.md',
-        model: 'gpt-5.5-pro', thinking: 'pro', oracleBin, gitleaksBin,
+        model: 'gpt-5.5-pro', oracleBin, gitleaksBin,
       });
       expect(blocked.status).toBe('surface_blocked');
       expect(blocked.meta.create?.outcome).toBe('surface_blocked');
-      expect(blocked.meta.providerSessionId).toMatch(/^create-/);
+      expect(blocked.meta.providerSessionId).toMatch(/^[a-z0-9-]+$/);
       expect(blocked.meta.oracle?.evidenceError).toBeUndefined();
       expect(blocked.meta.browser.transport).toBe('oracle_session');
       expect(blocked.meta.browser.chatgptApp).toBeUndefined();
       expect(blocked.meta.security?.promptSecretScan.status).toBe('passed');
       const createArgs = readFileSync(argsPath, 'utf-8').split('\n');
-      expect(createArgs).toContain('--write-session');
-      expect(createArgs).toContain('--browser-thinking-time');
-      expect(createArgs).toContain('pro');
+      expect(createArgs).toContain('--slug');
+      expect(createArgs).toContain('--browser-capture-provider-native');
+      expect(createArgs).not.toContain('--browser-thinking-time');
       expect(createArgs).not.toContain('--browser-app');
       expect(createArgs).not.toContain('--browser-cookie-path');
       const stagedFiles = createArgs.flatMap((arg, index) => arg === '--file' ? [createArgs[index + 1]!] : []);
@@ -235,7 +237,7 @@ describe('chatgpt browser-create', () => {
 
       writeFakeOracle(repoRoot, { appPreselect: false, output: readBackEnvelope({ pullRequest: null }), argsPath });
       const readBack = await runBrowserCreateReadBack({
-        repoRoot, sessionId: recovered.sessionId, thinking: 'pro', oracleBin, gitleaksBin,
+        repoRoot, sessionId: recovered.sessionId, oracleBin, gitleaksBin,
       });
       expect(readBack.status).toBe('completed');
       expect(readBack.createSessionId).toBe(recovered.sessionId);
@@ -250,7 +252,7 @@ describe('chatgpt browser-create', () => {
       const readBackArgs = readFileSync(argsPath, 'utf-8').split('\n');
       expect(readBackArgs).not.toContain('--followup');
       expect(readBackArgs).not.toContain('--browser-app');
-      expect(readBackArgs).toContain('pro');
+      expect(readBackArgs).not.toContain('--browser-thinking-time');
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
     }
@@ -313,12 +315,11 @@ describe('chatgpt browser-create', () => {
           ...baseArgs(repoRoot),
           '--dry-run',
           '--gitleaks-bin', gitleaks,
-          '--thinking', 'pro',
         ]);
         expect(result.status).toBe(0);
         const payload = JSON.parse(result.stdout);
         expect(payload.status).toBe('dry_run');
-        expect(payload.dryRun.command).toContain('pro');
+        expect(payload.dryRun.command).not.toContain('--browser-thinking-time');
         expect(payload.mode).toBe('create');
         expect(payload.create).toMatchObject({
           repository: REPOSITORY,
@@ -564,7 +565,6 @@ describe('chatgpt browser-create', () => {
           '--session', createPayload.sessionId,
           '--gitleaks-bin', gitleaks,
           '--oracle-bin', oracle,
-          '--thinking', 'pro',
         ]);
         expect(readBack.status).toBe(0);
         const payload = JSON.parse(readBack.stdout);
@@ -585,8 +585,8 @@ describe('chatgpt browser-create', () => {
         const oracleArgs = oracleInvocation.split(/\r?\n/);
         expect(oracleArgs).not.toContain('--browser-app');
         expect(oracleArgs).not.toContain('--followup');
-        expect(oracleArgs).toContain('--browser-thinking-time');
-        expect(oracleArgs).toContain('pro');
+        expect(oracleArgs).not.toContain('--browser-thinking-time');
+        expect(oracleArgs).toContain('--browser-capture-provider-native');
         expect(oracleArgs).toContain('--prompt');
         expect(oracleInvocation).toContain('Do not use any GitHub write action');
 

@@ -114,7 +114,7 @@ function writeFakeGitleaks(dir: string, version = '8.30.0'): string {
 // Oracle browser transport fixtures. The bound-profile path probes the resolved
 // binary for --copy-profile/--browser-chrome-profile before it runs, so any fake
 // oracle used with a profile binding must answer --help/--debug-help.
-const FAKE_ORACLE_HELP = 'Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-follow-up <t> --followup <id> --browser-model-strategy current --browser-cookie-path <path> --copy-profile <dir> --browser-chrome-profile <name> --chatgpt-url <url> --heartbeat <seconds>';
+const FAKE_ORACLE_HELP = 'Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-follow-up <t> --followup <id> --browser-model-strategy current --copy-profile <dir> --browser-chrome-profile <name> --chatgpt-url <url> --heartbeat <seconds> --slug <slug> --browser-capture-provider-native --browser-thinking-time <level>';
 
 function sessionDescriptorFixture(id: string, parent: string | null = null, runtime?: Record<string, unknown>): string[] {
   const descriptor = JSON.stringify({ protocol: 1, kind: 'oracle-session', sessionId: id, parentSessionId: parent });
@@ -130,6 +130,19 @@ function sessionDescriptorFixture(id: string, parent: string | null = null, runt
   ];
 }
 
+// Oracle 0.21.3 writes invocation-slug-owned metadata, not a --write-session descriptor.
+function upstreamSessionMetadataFixture(runtime: { promptSubmitted: boolean; conversationId?: string }, parent: string | null = null, status: 'running' | 'completed' = 'completed'): string[] {
+  return [
+    'SLUG=""; PREV=""',
+    'for a in "$@"; do if [ "$PREV" = "--slug" ]; then SLUG="$a"; fi; PREV="$a"; done',
+    'umask 077',
+    'mkdir -p "$ORACLE_HOME_DIR/sessions/$SLUG"',
+    'cat > "$ORACLE_HOME_DIR/sessions/$SLUG/meta.json" <<EOF',
+    `{"id":"$SLUG","status":"${status}","browser":{"runtime":${JSON.stringify(runtime)}},"options":{"followupSessionId":${JSON.stringify(parent)}}}`,
+    'EOF',
+  ];
+}
+
 // The real consult path probes runtime-flag acceptance with a `--dry-run json`
 // preview before it spawns anything, so a fake oracle must answer that probe:
 // accepting it (exit 0) or rejecting the fork-only `--write-session` flag the way
@@ -139,7 +152,7 @@ function writeFakeOracle(path: string, opts: { help?: string; sessionLine?: stri
     '#!/bin/sh',
     ...(opts.callLog ? [`printf '%s\\n' "$1" >> '${opts.callLog}'`] : []),
     'case "$1" in',
-    '  --version) printf "%s\\n" "0.20.0"; exit 0;;',
+    '  --version) printf "%s\\n" "0.21.3"; exit 0;;',
     `  --help|--debug-help) printf "%s\\n" "${opts.help ?? FAKE_ORACLE_HELP}"; exit 0;;`,
     'esac',
     ...(opts.rejectWriteSession
@@ -529,19 +542,24 @@ describe('chatgpt browser command', () => {
         writeFileSync(oraclePath, [
           '#!/bin/sh',
           'case "$1" in',
-          '  --version) printf "%s\\n" "0.20.0"; exit 0;;',
+          '  --version) printf "%s\\n" "0.21.3"; exit 0;;',
+          `  --help|--debug-help) printf "%s\\n" "${FAKE_ORACLE_HELP}"; exit 0;;`,
           'esac',
           'for a in "$@"; do',
           '  if [ "$a" = "--dry-run" ]; then exit 0; fi',
           'done',
           'OUT=""',
           'FILE=""',
+          'SLUG=""',
           'PREV=""',
           'for a in "$@"; do',
           '  if [ "$PREV" = "--write-output" ]; then OUT="$a"; fi',
           '  if [ "$PREV" = "--file" ]; then FILE="$a"; fi',
+          '  if [ "$PREV" = "--slug" ]; then SLUG="$a"; fi',
           '  PREV="$a"',
           'done',
+          'mkdir -p "$ORACLE_HOME_DIR/sessions/$SLUG"',
+          'printf "%s\\n" "{\\"id\\":\\"$SLUG\\",\\"status\\":\\"completed\\",\\"browser\\":{\\"runtime\\":{\\"promptSubmitted\\":true,\\"conversationId\\":\\"fixture-conversation\\"}},\\"options\\":{\\"followupSessionId\\":null}}" > "$ORACLE_HOME_DIR/sessions/$SLUG/meta.json"',
           'printf "%s\\n" "FILE_PATH=$FILE" > "$OUT"',
           '/bin/cat "$FILE" >> "$OUT"',
         ].join('\n') + '\n');
@@ -1318,7 +1336,7 @@ describe('chatgpt browser command', () => {
           '#!/bin/sh',
           'case "$1" in',
           `  --version) printf "%s\\n" "${version}"; exit 0;;`,
-          '  --help|--debug-help) printf "%s\\n" "Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-follow-up <t> --followup <id> --browser-model-strategy current --browser-cookie-path <path> --copy-profile <dir> --browser-chrome-profile <name> --chatgpt-url <url> --heartbeat <seconds>"; exit 0;;',
+          `  --help|--debug-help) printf "%s\\n" "${FAKE_ORACLE_HELP}"; exit 0;;`,
           'esac',
           'if [ -n "$FAKE_ORACLE_EXECUTED" ]; then printf "%s\\n" "ran" > "$FAKE_ORACLE_EXECUTED"; fi',
         ].join('\n'));
@@ -1329,18 +1347,18 @@ describe('chatgpt browser command', () => {
         const envExact = join(binDir, 'oracle-env');
         const pathExact = join(binDir, 'oracle');
         writeOracle(explicitOld, '0.19.0');
-        writeOracle(envExact, '0.20.0');
-        writeOracle(pathExact, '0.20.0');
+        writeOracle(envExact, '0.21.3');
+        writeOracle(pathExact, '0.21.3');
 
         const explicitDoctor = await runChatgpt(['browser-doctor', '--repo', repoRoot, '--provider', 'oracle', '--oracle-bin', explicitOld, '--json'], ROOT, withoutConfiguredOracle);
         const explicitReadiness = JSON.parse(explicitDoctor.stdout);
         expect(explicitReadiness).toMatchObject({
           status: 'action_required',
           code: 'ORACLE_VERSION_UNSUPPORTED',
-          oracle: { resolvedFrom: '--oracle-bin', version: '0.19.0', requiredVersion: '0.20.0', versionCompatible: false },
+          oracle: { resolvedFrom: '--oracle-bin', version: '0.19.0', requiredVersion: '0.21.3', versionCompatible: false },
         });
         expect(explicitReadiness.oracle.error.message).toContain('detected 0.19.0');
-        expect(explicitReadiness.oracle.error.message).toContain('exactly 0.20.0');
+        expect(explicitReadiness.oracle.error.message).toContain('exactly 0.21.3');
 
         const executed = join(binDir, 'unexpected-execution');
         const rejectedRun = await runChatgpt([
@@ -1363,7 +1381,7 @@ describe('chatgpt browser command', () => {
         });
         expect(JSON.parse(envDoctor.stdout)).toMatchObject({
           status: 'ready',
-          oracle: { resolvedFrom: 'REPO_HARNESS_ORACLE_BIN', version: '0.20.0', requiredVersion: '0.20.0', versionCompatible: true },
+          oracle: { resolvedFrom: 'REPO_HARNESS_ORACLE_BIN', version: '0.21.3', requiredVersion: '0.21.3', versionCompatible: true },
         });
 
         const repoLocalDir = join(repoRoot, 'node_modules/.bin');
@@ -1373,7 +1391,7 @@ describe('chatgpt browser command', () => {
         expect(JSON.parse(repoLocalDoctor.stdout)).toMatchObject({
           status: 'action_required',
           code: 'ORACLE_VERSION_UNSUPPORTED',
-          oracle: { resolvedFrom: 'node_modules/.bin', version: '0.20.1', requiredVersion: '0.20.0', versionCompatible: false },
+          oracle: { resolvedFrom: 'node_modules/.bin', version: '0.20.1', requiredVersion: '0.21.3', versionCompatible: false },
         });
 
         rmSync(repoLocalDir, { recursive: true, force: true });
@@ -1383,7 +1401,7 @@ describe('chatgpt browser command', () => {
         });
         expect(JSON.parse(pathDoctor.stdout)).toMatchObject({
           status: 'ready',
-          oracle: { resolvedFrom: 'PATH', version: '0.20.0', requiredVersion: '0.20.0', versionCompatible: true },
+          oracle: { resolvedFrom: 'PATH', version: '0.21.3', requiredVersion: '0.21.3', versionCompatible: true },
         });
       } finally {
         rmSync(binDir, { recursive: true, force: true });
@@ -1403,7 +1421,7 @@ describe('chatgpt browser command', () => {
         writeFileSync(oraclePath, [
           '#!/bin/sh',
           'case "$1" in',
-          '  --version) printf "%s\\n" "0.20.0"; exit 0;;',
+          '  --version) printf "%s\\n" "0.21.3"; exit 0;;',
           `  --help|--debug-help) printf "%s\\n" "${FAKE_ORACLE_HELP}"; exit 0;;`,
           'esac',
           'for a in "$@"; do',
@@ -1472,7 +1490,7 @@ describe('chatgpt browser command', () => {
       try {
         const submittedPath = writeFakeOracle(join(binDir, 'oracle-submitted'), {
           body: [
-            ...sessionDescriptorFixture('oracle_timeout_123', null, { promptSubmitted: true, conversationId: 'conv-timeout-123' }),
+            ...upstreamSessionMetadataFixture({ promptSubmitted: true, conversationId: 'conv-timeout-123' }, null, 'running'),
             'while :; do sleep 1; done',
           ],
         });
@@ -1494,11 +1512,12 @@ describe('chatgpt browser command', () => {
         expect(payload.error.message).toContain('timed out after 2000ms');
         const meta = JSON.parse(readFileSync(join(repoRoot, '.ai/harness/chatgpt/sessions', payload.sessionId, 'meta.json'), 'utf-8'));
         expect(meta.status).toBe('recoverable');
-        expect(meta.providerSessionId).toBe('oracle_timeout_123');
+        expect(meta.providerSessionId).toMatch(/^[a-z0-9-]+$/);
+        const submittedProviderId = meta.providerSessionId as string;
 
         const followupPath = writeFakeOracle(join(binDir, 'oracle-followup'), {
           body: [
-            ...sessionDescriptorFixture('oracle_followup_789', 'oracle_timeout_123'),
+            ...upstreamSessionMetadataFixture({ promptSubmitted: true, conversationId: 'conv-followup-789' }, submittedProviderId),
             'ARGS="$*"',
             'OUT=""',
             'PREV=""',
@@ -1523,7 +1542,7 @@ describe('chatgpt browser command', () => {
         expect(followup.status).toBe(0);
         const followupPayload = JSON.parse(followup.stdout);
         expect(followupPayload.status).toBe('completed');
-        expect(readFileSync(followupPayload.paths.output, 'utf-8')).toContain('--followup oracle_timeout_123');
+        expect(readFileSync(followupPayload.paths.output, 'utf-8')).toContain(`--followup ${submittedProviderId}`);
       } finally {
         rmSync(binDir, { recursive: true, force: true });
       }
@@ -1537,7 +1556,7 @@ describe('chatgpt browser command', () => {
       try {
         const oraclePath = writeFakeOracle(join(binDir, 'oracle'), {
           body: [
-            ...sessionDescriptorFixture('oracle_timeout_456', null, { promptSubmitted: false }),
+            ...upstreamSessionMetadataFixture({ promptSubmitted: false }, null, 'running'),
             'while :; do sleep 1; done',
           ],
         });
@@ -1612,7 +1631,8 @@ describe('chatgpt browser command', () => {
           [
             '#!/bin/sh',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0"; exit 0;;',
+            '  --version) printf "%s\\n" "0.21.3"; exit 0;;',
+            `  --help|--debug-help) printf "%s\\n" "${FAKE_ORACLE_HELP}"; exit 0;;`,
             'esac',
             'ARGS="$*"',
             'OUT=""',
@@ -1732,19 +1752,19 @@ describe('chatgpt browser command', () => {
   const missingTransportFlagCases = [
     {
       label: 'neither transport flag',
-      help: 'Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-cookie-path <path> --heartbeat <seconds>',
+      help: 'Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-cookie-path <path> --heartbeat <seconds> --slug <slug> --browser-capture-provider-native',
       named: ['--copy-profile', '--browser-chrome-profile'],
       absent: [] as string[],
     },
     {
       label: 'only --copy-profile',
-      help: 'Usage: oracle --engine browser --browser-archive never --write-output <p> --copy-profile <dir> --heartbeat <seconds>',
+      help: 'Usage: oracle --engine browser --browser-archive never --write-output <p> --copy-profile <dir> --heartbeat <seconds> --slug <slug> --browser-capture-provider-native',
       named: ['--browser-chrome-profile'],
       absent: ['--copy-profile'],
     },
     {
       label: 'only --browser-chrome-profile',
-      help: 'Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-chrome-profile <name> --heartbeat <seconds>',
+      help: 'Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-chrome-profile <name> --heartbeat <seconds> --slug <slug> --browser-capture-provider-native',
       named: ['--copy-profile'],
       absent: ['--browser-chrome-profile'],
     },
@@ -1982,7 +2002,8 @@ describe('chatgpt browser command', () => {
           [
             '#!/bin/sh',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0"; exit 0;;',
+            '  --version) printf "%s\\n" "0.21.3"; exit 0;;',
+            `  --help|--debug-help) printf "%s\\n" "${FAKE_ORACLE_HELP}"; exit 0;;`,
             'esac',
             'OUT=""',
             'PREV=""',
@@ -2056,7 +2077,8 @@ describe('chatgpt browser command', () => {
           [
             '#!/bin/sh',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0"; exit 0;;',
+            '  --version) printf "%s\\n" "0.21.3"; exit 0;;',
+            `  --help|--debug-help) printf "%s\\n" "${FAKE_ORACLE_HELP}"; exit 0;;`,
             'esac',
             'printf "%s\\n" "Session ID: oracle_recover_789"',
             'exit 0',
@@ -2095,7 +2117,8 @@ describe('chatgpt browser command', () => {
           [
             '#!/bin/sh',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0"; exit 0;;',
+            '  --version) printf "%s\\n" "0.21.3"; exit 0;;',
+            `  --help|--debug-help) printf "%s\\n" "${FAKE_ORACLE_HELP}"; exit 0;;`,
             'esac',
             'ARGS="$*"',
             'OUT=""',
@@ -2123,10 +2146,8 @@ describe('chatgpt browser command', () => {
         ]);
         expect(result.status).toBe(0);
         const payload = JSON.parse(result.stdout);
-        expect(payload.status).toBe('completed');
-        const output = readFileSync(payload.paths.output, 'utf-8');
-        expect(output).toContain('--model gpt-5.5-pro --browser-model-strategy select');
-        expect(output).toContain('--browser-thinking-time pro');
+        expect(payload.status).toBe('failed');
+        expect(payload.error.code).toBe('ORACLE_UNSUPPORTED_CONTROL');
         const meta = JSON.parse(readFileSync(join(repoRoot, '.ai/harness/chatgpt/sessions', payload.sessionId, 'meta.json'), 'utf-8'));
         expect(meta.model.thinking).toBe('pro');
       } finally {
@@ -2145,7 +2166,7 @@ describe('chatgpt browser command', () => {
           [
             '#!/bin/sh',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0"; exit 0;;',
+            '  --version) printf "%s\\n" "0.21.3"; exit 0;;',
             'esac',
             'PREV=""',
             'for a in "$@"; do',
@@ -2171,7 +2192,7 @@ describe('chatgpt browser command', () => {
         ]);
         const payload = JSON.parse(result.stdout);
         expect(payload.status).toBe('failed');
-        expect(payload.error.code).toBe('ORACLE_EXIT_NONZERO');
+        expect(payload.error.code).toBe('ORACLE_UNSUPPORTED_CONTROL');
         const meta = JSON.parse(readFileSync(join(repoRoot, '.ai/harness/chatgpt/sessions', payload.sessionId, 'meta.json'), 'utf-8'));
         expect(meta.status).toBe('failed');
       } finally {
@@ -2190,8 +2211,8 @@ describe('chatgpt browser command', () => {
           [
             '#!/bin/sh',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0"; exit 0;;',
-            '  --help|--debug-help) printf "%s\\n" "Usage: oracle --engine browser --write-output <p> --browser-thinking-time <level>"; exit 0;;',
+            '  --version) printf "%s\\n" "0.21.3"; exit 0;;',
+            '  --help|--debug-help) printf "%s\\n" "Usage: oracle --engine browser --write-output <p> --browser-thinking-time <level> --slug <slug> --browser-capture-provider-native"; exit 0;;',
             'esac',
             'for a in "$@"; do',
             '  if [ "$a" = "--dry-run" ]; then exit 0; fi',
@@ -2235,8 +2256,8 @@ describe('chatgpt browser command', () => {
           [
             '#!/bin/sh',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0"; exit 0;;',
-            '  --help|--debug-help) printf "%s\\n" "Usage: oracle --engine browser --write-output <p> --browser-app <name> --browser-thinking-time <level>"; exit 0;;',
+            '  --version) printf "%s\\n" "0.21.3"; exit 0;;',
+            '  --help|--debug-help) printf "%s\\n" "Usage: oracle --engine browser --write-output <p> --browser-app <name> --browser-thinking-time <level> --slug <slug> --browser-capture-provider-native"; exit 0;;',
             'esac',
             'ARGS="$*"',
             'OUT=""',
@@ -2273,10 +2294,11 @@ describe('chatgpt browser command', () => {
     });
   }, 30_000);
 
-  // Regression guard: the pinned oracle surface is 0.20.0 and no longer carries a
+  // Regression guard: the pinned oracle surface is 0.21.3 and no longer carries a
   // cookie-path capability, so doctor must report ready on that exact surface.
-  test('oracle doctor reports ready on the pinned 0.20.0 surface without a cookie-path flag', async () => {
+  test('oracle doctor reports ready on the pinned 0.21.3 surface without a cookie-path flag', async () => {
     await withRepo(async (repoRoot) => {
+
       const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-fake-oracle-pinned-'));
       try {
         const oraclePath = join(binDir, 'oracle');
@@ -2285,8 +2307,8 @@ describe('chatgpt browser command', () => {
           [
             '#!/bin/sh',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0";;',
-            '  *) printf "%s\\n" "Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-follow-up <t> --followup <id> --browser-model-strategy current --copy-profile <dir> --browser-chrome-profile <name> --chatgpt-url <url> --heartbeat <seconds>";;',
+            '  --version) printf "%s\\n" "0.21.3";;',
+            `  *) printf "%s\\n" "${FAKE_ORACLE_HELP}";;`,
             'esac',
           ].join('\n'),
         );
@@ -2295,8 +2317,8 @@ describe('chatgpt browser command', () => {
         expect(doctor.status).toBe(0);
         const readiness = JSON.parse(doctor.stdout);
         expect(readiness.status).toBe('ready');
-        expect(readiness.oracle.version).toBe('0.20.0');
-        expect(readiness.oracle.requiredVersion).toBe('0.20.0');
+        expect(readiness.oracle.version).toBe('0.21.3');
+        expect(readiness.oracle.requiredVersion).toBe('0.21.3');
         expect(readiness.oracle.versionCompatible).toBe(true);
         expect(readiness.oracle.missingCapabilities).toEqual([]);
         expect(readiness.oracle.capabilities).not.toHaveProperty('browserCookiePath');
@@ -2317,8 +2339,8 @@ describe('chatgpt browser command', () => {
           [
             '#!/bin/sh',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0";;',
-            '  *) printf "%s\\n" "Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-follow-up <t> --followup <id> --browser-model-strategy current --browser-cookie-path <path> --copy-profile <dir> --browser-chrome-profile <name> --chatgpt-url <url> --heartbeat <seconds>";;',
+            '  --version) printf "%s\\n" "0.21.3";;',
+            '  *) printf "%s\\n" "Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-follow-up <t> --followup <id> --browser-model-strategy current --copy-profile <dir> --browser-chrome-profile <name> --chatgpt-url <url> --heartbeat <seconds> --slug <slug> --browser-capture-provider-native";;',
             'esac',
           ].join('\n'),
         );
@@ -2330,7 +2352,7 @@ describe('chatgpt browser command', () => {
         expect(readiness.agent_actions).toEqual([]);
         expect(readiness.oracle.installed).toBe(true);
         expect(readiness.oracle.binary).toBe(oraclePath);
-        expect(readiness.oracle.version).toBe('0.20.0');
+        expect(readiness.oracle.version).toBe('0.21.3');
         expect(readiness.oracle.capabilities).toEqual({
           browserEngine: true,
           writeOutput: true,
@@ -2340,10 +2362,12 @@ describe('chatgpt browser command', () => {
           browserModelStrategy: true,
           copyProfile: true,
           browserChromeProfile: true,
-          writeSession: true,
-          networkEvidence: true,
+          writeSession: false,
+          networkEvidence: false,
           conversationEvidence: true,
-          browserThinkingTime: true,
+          providerNativeCapture: true,
+          slug: true,
+          browserThinkingTime: false,
           chatgptUrl: true,
           heartbeat: true,
         });
@@ -2393,7 +2417,7 @@ describe('chatgpt browser command', () => {
             '  if [ "$a" = "--browser-thinking-time" ]; then printf "%s\\n" "error: unknown option --browser-thinking-time" >&2; exit 1; fi',
             'done',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0";;',
+            '  --version) printf "%s\\n" "0.21.3";;',
             '  *) printf "%s\\n" "Usage: oracle --engine browser --write-output <p>";;',
             'esac',
           ].join('\n'),
@@ -2417,10 +2441,12 @@ describe('chatgpt browser command', () => {
           writeSession: false,
           networkEvidence: false,
           conversationEvidence: false,
+          providerNativeCapture: false,
+          slug: false,
           chatgptUrl: false,
           heartbeat: false,
         });
-        expect(readiness.oracle.missingCapabilities).toEqual(['browserFollowup', 'sessionFollowup', 'browserArchive', 'browserModelStrategy', 'copyProfile', 'browserChromeProfile', 'browserThinkingTime', 'writeSession', 'networkEvidence', 'conversationEvidence', 'chatgptUrl', 'heartbeat']);
+        expect(readiness.oracle.missingCapabilities).toEqual(['browserFollowup', 'sessionFollowup', 'browserArchive', 'browserModelStrategy', 'copyProfile', 'browserChromeProfile', 'chatgptUrl', 'heartbeat', 'slug', 'providerNativeCapture']);
         expect(readiness.oracle.error.message).toContain('browserFollowup');
         expect(readiness.agent_actions).toHaveLength(1);
         expect(readiness.agent_actions[0]).toMatchObject({
@@ -2450,10 +2476,12 @@ describe('chatgpt browser command', () => {
         expect(readiness.status).toBe('ready');
         expect(readiness.oracle.missingCapabilities).toEqual([]);
         expect(readiness.oracle.capabilities).toMatchObject({
-          writeSession: true,
-          networkEvidence: true,
+          writeSession: false,
+          networkEvidence: false,
           conversationEvidence: true,
-          browserThinkingTime: true,
+          providerNativeCapture: true,
+          slug: true,
+          browserThinkingTime: false,
         });
         expect(readiness.agent_actions).toEqual([]);
       } finally {
@@ -2462,49 +2490,32 @@ describe('chatgpt browser command', () => {
     });
   }, 30_000);
 
-  test('oracle doctor fails closed when the binary rejects the fork session flags', async () => {
+  test('oracle doctor remains ready when upstream rejects obsolete fork session flags', async () => {
     await withRepo(async (repoRoot) => {
+
       const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-fake-oracle-upstream-flags-'));
       try {
         const oraclePath = writeFakeOracle(join(binDir, 'oracle'), { rejectWriteSession: true });
         const doctor = await runChatgpt(['browser-doctor', '--repo', repoRoot, '--provider', 'oracle', '--oracle-bin', oraclePath, '--json']);
         expect(doctor.status).toBe(0);
         const readiness = JSON.parse(doctor.stdout);
-        expect(readiness.status).toBe('action_required');
-        expect(readiness.code).toBe('ORACLE_INCOMPATIBLE');
-        expect(readiness.oracle.capabilities).toMatchObject({
-          writeSession: false,
-          networkEvidence: false,
-          conversationEvidence: false,
-          browserThinkingTime: false,
-        });
-        expect(readiness.oracle.missingCapabilities).toEqual(['browserThinkingTime', 'writeSession', 'networkEvidence', 'conversationEvidence']);
-        expect(readiness.oracle.error.recovery).toContain('repo-harness fork flags');
-        expect(readiness.oracle.error.recovery).toContain('REPO_HARNESS_ORACLE_BIN');
-        expect(readiness.oracle.error.recovery).toContain('--oracle-bin');
-        expect(readiness.agent_actions).toHaveLength(1);
-        expect(readiness.agent_actions[0]).toMatchObject({ id: 'chatgpt-oracle-select-fork-build', requires_agent: true, automatic: false });
-        expect(readiness.agent_actions[0].reason).toContain('--write-session');
-        expect(readiness.agent_actions[0].command).toContain('REPO_HARNESS_ORACLE_BIN=<path-to-fork-oracle>');
-        expect(readiness.agent_actions[0].command).not.toContain('bun add -g @steipete/oracle');
-        expect(readiness.agent_actions[0].alternatives.join('\n')).toContain('--oracle-bin <path-to-fork-oracle>');
-        const forkNext = readiness.next.join('\n');
-        expect(forkNext).toContain('the fork build is required');
-        expect(forkNext).toContain('REPO_HARNESS_ORACLE_BIN=<path-to-fork-oracle>');
-        expect(forkNext).toContain('--oracle-bin <path-to-fork-oracle>');
-        expect(forkNext).not.toContain('upgrade oracle or check `oracle --help`');
+        expect(readiness.status).toBe('ready');
+        expect(readiness.oracle.missingCapabilities).toEqual([]);
+        expect(readiness.oracle.capabilities.writeSession).toBe(false);
+        expect(readiness.oracle.capabilities.providerNativeCapture).toBe(true);
       } finally {
         rmSync(binDir, { recursive: true, force: true });
       }
     });
   }, 30_000);
 
-  test('oracle consult refuses before spawning when the binary rejects the fork session flags', async () => {
+  test('oracle consult refuses before spawning when a required upstream flag is missing', async () => {
     await withRepo(async (repoRoot) => {
+
       const binDir = mkdtempSync(join(tmpdir(), 'repo-harness-fake-oracle-upstream-consult-'));
       try {
         const oraclePath = writeFakeOracle(join(binDir, 'oracle'), {
-          rejectWriteSession: true,
+          help: FAKE_ORACLE_HELP.replace(' --slug <slug>', ''),
           body: ['printf "%s\\n" "unexpected oracle execution" >&2', 'exit 99'],
         });
         const result = await runChatgpt(['browser-consult', '--repo', repoRoot, '--prompt', 'Review this.', '--oracle-bin', oraclePath]);
@@ -2512,10 +2523,9 @@ describe('chatgpt browser command', () => {
         const payload = JSON.parse(result.stdout);
         expect(payload.status).toBe('failed');
         expect(payload.error.code).toBe('ORACLE_RUNTIME_FLAGS_UNSUPPORTED');
-        expect(payload.error.message).toContain('--write-session');
-        expect(payload.error.recovery).toContain('repo-harness fork flags');
+        expect(payload.error.message).toContain('--slug');
         const output = readFileSync(payload.paths.output, 'utf-8');
-        expect(output).toContain('The resolved oracle lacks the repo-harness fork flags.');
+        expect(output).toContain('The resolved Oracle is missing an upstream-required browser capability.');
         expect(output).not.toContain('unknown option');
         expect(output).not.toContain('unexpected oracle execution');
       } finally {
@@ -2527,10 +2537,10 @@ describe('chatgpt browser command', () => {
   test('runtime flag probe fails closed when buildOracleCommand stops emitting a mapped flag', async () => {
     const probeDir = mkdtempSync(join(tmpdir(), 'repo-harness-oracle-probe-sync-'));
     try {
-      expect(buildRuntimeAcceptanceProbeArgs(probeDir)).toContain('--write-session');
+      expect(buildRuntimeAcceptanceProbeArgs(probeDir)).toContain('--slug');
       expect(() => buildRuntimeAcceptanceProbeArgs(probeDir, [
-        { flag: '--write-session', capability: 'writeSession' },
-        { flag: '--retired-evidence-flag', capability: 'networkEvidence' },
+        { flag: '--slug', capability: 'slug' },
+        { flag: '--retired-evidence-flag', capability: 'providerNativeCapture' },
       ])).toThrow('oracle runtime probe is out of sync with buildOracleCommand: --retired-evidence-flag is no longer emitted');
     } finally {
       rmSync(probeDir, { recursive: true, force: true });
@@ -2547,8 +2557,8 @@ describe('chatgpt browser command', () => {
           [
             '#!/bin/sh',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0";;',
-            '  *) printf "%s\\n" "Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-follow-up <t> --followup <id> --browser-model-strategy current --browser-cookie-path <path> --chatgpt-url <url> --heartbeat <seconds>";;',
+            '  --version) printf "%s\\n" "0.21.3";;',
+            '  *) printf "%s\\n" "Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-follow-up <t> --followup <id> --browser-model-strategy current --browser-cookie-path <path> --chatgpt-url <url> --heartbeat <seconds> --slug <slug> --browser-capture-provider-native";;',
             'esac',
           ].join('\n'),
         );
@@ -2579,7 +2589,7 @@ describe('chatgpt browser command', () => {
         [
           '#!/bin/sh',
           'case "$1" in',
-          '  --version) printf "%s\\n" "0.20.0";;',
+          '  --version) printf "%s\\n" "0.21.3";;',
           '  *) printf "%s\\n" "Usage: oracle --engine browser --write-output <p>";;',
           'esac',
         ].join('\n'),
@@ -2593,7 +2603,7 @@ describe('chatgpt browser command', () => {
       expect(repoLocalReadiness.oracle.resolvedFrom).toBe('node_modules/.bin');
       expect(repoLocalReadiness.agent_actions[0]).toMatchObject({
         id: 'chatgpt-oracle-upgrade-pinned',
-        command: 'bun add -D @steipete/oracle@0.20.0',
+        command: 'bun add -D @steipete/oracle@0.21.3',
       });
 
       const envSelected = await runChatgpt(['browser-doctor', '--repo', repoRoot, '--provider', 'oracle', '--json'], ROOT, {
@@ -2652,9 +2662,12 @@ describe('chatgpt browser command', () => {
           [
             '#!/bin/sh',
             'case "$1" in',
-            '  --version) printf "%s\\n" "0.20.0"; exit 0;;',
+            '  --version) printf "%s\\n" "0.21.3"; exit 0;;',
             'esac',
-            ...sessionDescriptorFixture('oracle_followup_456', 'oracle_upstream_123'),
+            'printf "%s\\n" "Usage: oracle --engine browser --browser-archive never --write-output <p> --browser-follow-up <t> --followup <id> --browser-model-strategy current --copy-profile <dir> --browser-chrome-profile <name> --chatgpt-url <url> --heartbeat <seconds> --slug <slug> --browser-capture-provider-native"',
+            'SLUG=""; PREV=""; for a in "$@"; do if [ "$PREV" = "--slug" ]; then SLUG="$a"; fi; PREV="$a"; done',
+            'mkdir -p "$ORACLE_HOME_DIR/sessions/$SLUG"',
+            'printf "%s\\n" "{\\"id\\":\\"$SLUG\\",\\"status\\":\\"completed\\",\\"browser\\":{\\"runtime\\":{\\"promptSubmitted\\":true,\\"conversationId\\":\\"fixture-conversation\\"}},\\"options\\":{\\"followupSessionId\\":\\"oracle_upstream_123\\"}}" > "$ORACLE_HOME_DIR/sessions/$SLUG/meta.json"',
             'ARGS="$*"',
             'OUT=""',
             'PREV=""',
@@ -2662,7 +2675,7 @@ describe('chatgpt browser command', () => {
             '  if [ "$PREV" = "--write-output" ]; then OUT="$a"; fi',
             '  PREV="$a"',
             'done',
-            'printf "%s\\n" "Session ID: oracle_followup_456"',
+            'printf "%s\\n" "Session ID: $SLUG"',
             'if [ -n "$OUT" ]; then printf "%s\\n" "Oracle saw: $ARGS" > "$OUT"; fi',
           ].join('\n'),
         );
@@ -2688,10 +2701,10 @@ describe('chatgpt browser command', () => {
         // Parent linkage points at the source conversation; the new session's own
         // providerSessionId reflects what oracle returned for the reopened run.
         expect(followupMeta.parentProviderSessionId).toBe('oracle_upstream_123');
-        expect(followupMeta.providerSessionId).toBe('oracle_followup_456');
-        expect(followupMeta.oracle.observation.modelSelection).toMatchObject({ strategy: 'current', resolvedLabel: '6 Pro', verified: false });
+        const childSlug = output.match(/--slug ([a-z0-9-]+)/)?.[1];
+        expect(childSlug).toBeDefined();
+        expect(childSlug).not.toBe('oracle_upstream_123');
         expect(followupMeta.model.verified).toBe(false);
-        expect(followupMeta.model.requested).toBeUndefined();
       } finally {
         rmSync(binDir, { recursive: true, force: true });
       }
@@ -2775,16 +2788,10 @@ test.each([0, 9])('fresh audit capture survives provider cleanup on exit %s', as
         `exit ${exitCode}`,
       ] });
       const result = await runBrowserConsult({ repoRoot, prompt: 'fixture audit', provider: 'oracle', oracleBin, captureNetworkEvidence: true });
-      expect(result.status).toBe(exitCode === 0 ? 'completed' : 'failed');
-      const capture = result.meta.oracle?.networkCapture;
-      expect(capture?.status).toBe('empty'); expect(capture?.sessionId).toBe(id);
-      expect(existsSync(capture!.path)).toBe(true);
-      expect(readFileSync(capture!.path, 'utf8')).toBe(trace + '\n');
-      expect(lstatSync(dirname(capture!.path)).mode & 0o777).toBe(0o700);
-      expect(lstatSync(capture!.path).mode & 0o777).toBe(0o600);
+      expect(result.status).toBe('failed');
+        expect(result.error?.code).toBe('ORACLE_UNSUPPORTED_EVIDENCE');
+      expect(result.meta.oracle?.networkCapture).toBeUndefined();
       expect(result.output).not.toContain('capture_start');
-      expect(result.meta.model.verified).toBe(false);
-      expect(capture).not.toHaveProperty('resolved_commit');
     } finally { rmSync(binDir, { recursive: true, force: true }); }
   });
 }, 20000);
@@ -2794,23 +2801,24 @@ test('session history capture crosses provider cleanup with allocated identity',
     const binDir=mkdtempSync(join(tmpdir(),'history-oracle-'));
     try {
       const id='history-session', conversationId='fixture-conversation';
-      const metadata=JSON.stringify({id,status:'completed',browser:{runtime:{promptSubmitted:true,conversationId}}});
-      const history=JSON.stringify({protocol:1,kind:'oracle-session-conversation-history',sessionId:id,history:{conversationId}});
-      const oracleBin=writeFakeOracle(join(binDir,'oracle'),{body:[...sessionDescriptorFixture(id),
-        'OUT=""; HISTORY=""; PREV=""; WAIT=""',
+      const oracleBin=writeFakeOracle(join(binDir,'oracle'),{body:[
+        'SLUG=""; OUT=""; PREV=""; WAIT=""',
         'for a in "$@"; do',
+        'if [ "$PREV" = "--slug" ]; then SLUG="$a"; fi',
         'if [ "$PREV" = "--write-output" ]; then OUT="$a"; fi',
-        'if [ "$PREV" = "--write-conversation-evidence" ]; then HISTORY="$a"; fi',
         'if [ "$a" = "--wait" ]; then WAIT="yes"; fi',
         'if [ "$a" = "--model" ]; then exit 8; fi',
-        'PREV="$a"','done','[ "$WAIT" = "yes" ] || exit 7','umask 077',
-        `printf '%s\n' '${metadata}' > "$ORACLE_HOME_DIR/sessions/${id}/meta.json"`,
-        `printf '%s\n' '${history}' > "$HISTORY"`,
+        'PREV="$a"','done','umask 077',
+        'mkdir -p "$ORACLE_HOME_DIR/sessions/$SLUG/artifacts"',
+        'printf "%s\n" "{\\"id\\":\\"$SLUG\\",\\"status\\":\\"completed\\",\\"browser\\":{\\"runtime\\":{\\"promptSubmitted\\":true,\\"conversationId\\":\\"fixture-conversation\\"}},\\"options\\":{\\"followupSessionId\\":null}}" > "$ORACLE_HOME_DIR/sessions/$SLUG/meta.json"',
+        'printf "%s\n" "{\\"conversationId\\":\\"fixture-conversation\\",\\"messages\\":[]}" > "$ORACLE_HOME_DIR/sessions/$SLUG/artifacts/conversation-fixture-conversation-raw.json"',
+        'RAW="$ORACLE_HOME_DIR/sessions/$SLUG/artifacts/conversation-fixture-conversation-raw.json"; HASH=$(shasum -a 256 "$RAW" | cut -d " " -f 1); BYTES=$(wc -c < "$RAW" | tr -d " "); printf "%s\\n" "{\\"schema\\":\\"oracle.provider-native-capture-evidence/v1\\",\\"conversationId\\":\\"fixture-conversation\\",\\"rawSha256\\":\\"$HASH\\",\\"rawBytes\\":$BYTES,\\"materializedDocument\\":{\\"path\\":\\"conversation-fixture-conversation-raw.json\\",\\"sha256\\":\\"$HASH\\",\\"bytes\\":$BYTES}}" > "$ORACLE_HOME_DIR/sessions/$SLUG/artifacts/conversation-fixture-conversation-evidence.json"',
         'printf "%s\n" "audit fixture" > "$OUT"',
       ]});
       const result=await runBrowserConsult({repoRoot,prompt:'fixture audit',provider:'oracle',oracleBin,captureConversationEvidence:true});
       expect(result.status).toBe('completed');
-      expect(result.meta.oracle?.conversationCapture).toMatchObject({status:'captured',sessionId:id,conversationId});
+      expect(result.meta.oracle?.conversationCapture).toMatchObject({status:'captured',conversationId});
+      expect(result.meta.oracle?.conversationCapture?.sessionId).not.toBe(id);
       expect(result.meta.model.verified).toBe(false);
     }finally{rmSync(binDir,{recursive:true,force:true});}
   });
